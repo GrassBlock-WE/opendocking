@@ -1,0 +1,55 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "opendocking"
+version = "0.1.0"
+description = "odock — a modern, open-source molecular docking toolchain (Rust core + Python workbench)"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.9"
+authors = [{ name = "The OpenDocking Project" }]
+keywords = ["docking", "molecular-modelling", "cheminformatics", "autodock", "vina"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Chemistry",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+dependencies = [
+    "numpy>=1.22",
+]
+
+[project.optional-dependencies]
+# Chemical perception, PDBQT preparation and the ligand/receptor pre-processing.
+chem = ["rdkit>=2022.9"]
+# The PyQt6 + ModernGL 3D workbench.
+gui = ["PyQt6>=6.5", "moderngl>=5.8", "numpy>=1.22"]
+dev = ["pytest>=7", "rdkit>=2022.9"]
+
+[project.scripts]
+odock = "odock.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/opendocking/odock"
+Source = "https://github.com/opendocking/odock"
+
+[tool.maturin]
+manifest-path = "crates/dock-py/Cargo.toml"
+module-name = "odock._odock"
+python-source = "python"
+features = ["pyo3/extension-module"]
+strip = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+markers = [
+    "slow: end-to-end docking and crystallographic validation (minutes)",
+]

@@ -1,0 +1,37 @@
+[workspace]
+resolver = "2"
+members = ["crates/dock-core", "crates/dock-py"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "GPL-3.0-or-later"
+authors = ["The OpenDocking Project"]
+repository = "https://github.com/opendocking/odock"
+homepage = "https://github.com/opendocking/odock"
+readme = "README.md"
+
+[workspace.dependencies]
+glam = "0.29"
+rayon = "1.10"
+thiserror = "2"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+[profile.bench]
+inherits = "release"
+
+# Development builds carry no debug info: the kernel is numerically dense and
+# the compiler's PDB write is a needless bottleneck on Windows. Panic messages
+# still report file/line/column because that is compiled into the code.
+[profile.dev]
+debug = 0
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
+

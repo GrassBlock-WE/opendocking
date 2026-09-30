@@ -1,0 +1,8 @@
+# Normalise line endings on commit and check out LF everywhere, so the Rust and
+# Python sources are byte-identical on Windows, Linux and macOS.
+* text=auto eol=lf
+
+# Windows-only binaries, should they ever be added
+*.exe binary
+*.dll binary
+*.pyd binary

@@ -1,0 +1,31 @@
+# Everything listed here is *generated*: a build product, a cache or a local run
+# artefact. Nothing that ships is ignored — in particular `demo/` (bundled demo
+# data and screenshots) and `docs/` are tracked content.
+
+# --- Rust build artefacts ---------------------------------------------------
+/target/
+**/*.rs.bk
+
+# --- Python bytecode, caches, virtual environments, packaging --------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+pytest-of-*/
+
+# --- The compiled extension module (`maturin develop` rebuilds it) ---------
+python/odock/*.pyd
+python/odock/*.so
+python/odock/*.dll
+
+# --- Local run artefacts ---------------------------------------------------
+/out/
+/.rust-tmp/
+*.log

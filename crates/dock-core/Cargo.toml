@@ -1,0 +1,37 @@
+[package]
+name = "dock-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+
+[dependencies]
+glam = "0.29"
+rayon = "1"
+thiserror = "2"
+
+[features]
+default = []
+# Cross-platform GPU acceleration (Vulkan / Metal / Direct3D 12) for affinity
+# grid construction. Off by default so that a plain `cargo build` never needs a
+# graphics driver.
+gpu = ["dep:wgpu", "dep:bytemuck", "dep:pollster"]
+
+[dependencies.wgpu]
+version = "25"
+optional = true
+default-features = false
+features = ["wgsl", "dx12", "metal", "vulkan"]
+
+[dependencies.bytemuck]
+version = "1"
+optional = true
+features = ["derive"]
+
+[dependencies.pollster]
+version = "0.4"
+optional = true
