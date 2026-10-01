@@ -399,7 +399,7 @@ These are recorded rather than quietly fixed, because a published 0.1.0 shipped
 them.
 
 **Non-finite Gasteiger charges reached the PDBQT file.** The demo receptor
-`demo/3ptb/receptor.pdbqt` as shipped carried **128 non-finite Gasteiger
+`demo/systems/3ptb/receptor.pdbqt` as shipped carried **128 non-finite Gasteiger
 charges**: 8 rendered as the literal string `inf`, and the other 120 rendered as
 `0.000` because the guard only tested `isnan` and the value was `NaN`. RDKit's
 charge model does not converge for a fraction of a protein's atoms. The
@@ -409,7 +409,7 @@ pose 3 scored `nan` under AD4 while the other five were finite), while Vina and
 Vinardo were unaffected because they use an 8 Å cutoff and no electrostatics.
 Fixed in `pdbqt.gasteiger_charges`: a non-finite charge is written as `0.000`
 **and reported** through a `UserWarning` that names the count and the first
-atoms, so the lost electrostatic term is visible. `demo/3ptb/receptor.pdbqt` was
+atoms, so the lost electrostatic term is visible. `demo/systems/3ptb/receptor.pdbqt` was
 regenerated through the same `prepare_receptor` path: 8 lines change, no
 non-finite charge remains, and AD4 scores every demo pose.
 
@@ -432,9 +432,9 @@ search box, which contains an Ångström sign, and a GBK or cp1252 console raise
 `UnicodeEncodeError` before the run started. Fixed by reconfiguring stdout and
 stderr to UTF-8 (what `odock`'s own CLI already does).
 
-**The demo directory mixes two runs.** `demo/3ptb/poses.pdbqt` (6 models,
+**The demo directory mixes two runs.** `demo/systems/3ptb/poses.pdbqt` (6 models,
 −6.210 … −4.414) comes from the CLI walkthrough at `exhaustiveness = 32`, as
-`config.txt` records, while `demo/3ptb/result.json` (4 modes, −6.212 … −4.513)
+`config.txt` records, while `demo/systems/3ptb/result.json` (4 modes, −6.212 … −4.513)
 and `demo/README.md` come from `python examples/make_demo.py --fast`
 (`exhaustiveness = 4`). Both are reproducible — re-running `make_demo.py --fast`
 reproduces `result.json`, `README.md`, `receptor.pdbqt` and `ligand.pdbqt` exactly

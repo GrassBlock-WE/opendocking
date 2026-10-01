@@ -33,8 +33,8 @@ from PyQt6 import QtCore, QtGui, QtWidgets  # noqa: E402
 from odock.gui.app import DockingWorkbench, _configure_surface_format  # noqa: E402
 
 positional = [a for a in sys.argv[1:] if not a.startswith("-")]
-RECEPTOR = positional[0] if positional else str(ROOT / "demo" / "3ptb" / "receptor.pdbqt")
-LIGAND = positional[1] if len(positional) > 1 else str(ROOT / "demo" / "3ptb" / "poses.pdbqt")
+RECEPTOR = positional[0] if positional else str(ROOT / "demo" / "systems" / "3ptb" / "receptor.pdbqt")
+LIGAND = positional[1] if len(positional) > 1 else str(ROOT / "demo" / "systems" / "3ptb" / "poses.pdbqt")
 OUT = Path(positional[2]) if len(positional) > 2 else ROOT / "out" / "viewport_check.png"
 
 BACKGROUND = np.array([22.0, 24.0, 32.0])

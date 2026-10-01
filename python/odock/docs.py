@@ -1372,7 +1372,7 @@ def build_site(root, out=None, *, title: str = "OpenDocking documentation") -> S
         result.warnings.append(
             "no package was found to build an API reference from (python/odock is missing)"
         )
-    tutorial_inputs = (base / "tests" / "data" / "3PTB.pdb", base / "demo" / "library.smi")
+    tutorial_inputs = (base / "tests" / "data" / "3PTB.pdb", base / "demo" / "libraries" / "library.smi")
     tutorial_possible = all(path.is_file() for path in tutorial_inputs)
     if not tutorial_possible:
         # The tutorial runs the real toolchain on the bundled data.  A tree without
@@ -1737,7 +1737,7 @@ def check_site(root, out=None, *, strict_images: bool = False) -> List[Finding]:
     if result.api_modules:
         expected |= {"api.html"} | {module.page for module in api_modules(base)}
     if all(path.is_file() for path in (base / "tests" / "data" / "3PTB.pdb",
-                                       base / "demo" / "library.smi")):
+                                       base / "demo" / "libraries" / "library.smi")):
         expected.add(TUTORIAL_PAGE)
     generated = {entry["page"] for entry in result.pages}
     missing, extra = sorted(expected - generated), sorted(generated - expected)

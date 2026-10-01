@@ -52,9 +52,9 @@ install: ## Build the extension and install the dev extras (one build)
 install-gui: ## The same, plus PyQt6 + ModernGL for the workbench
 	$(MATURIN) develop --release --extras=dev,gui
 
-demo: demo/3ptb/receptor.pdbqt ## Generate the bundled demo fixtures (offline)
+demo: demo/systems/3ptb/receptor.pdbqt ## Generate the bundled demo fixtures (offline)
 
-demo/3ptb/receptor.pdbqt:
+demo/systems/3ptb/receptor.pdbqt:
 	$(PYTHON) examples/make_demo.py --fast
 
 test: demo ## The CI test command: fast suite, refusing to skip the demo fixtures

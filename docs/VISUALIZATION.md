@@ -542,7 +542,112 @@ under-stroke, and a rendered before/after pixel count), and
 
 ---
 
-## 6. Using it
+## 6. Cavities and channels: what a watertight volume can answer
+
+A pocket volume says how much space there is. It does not say whether that space
+is a **closed cavity**, a **channel**, or a **shallow groove**, and those are
+different chemical situations. `python/odock/cavity.py` classifies the empty
+space around a structure and measures the **aperture** of everything that opens
+to the outside. The full criterion is in the module docstring; this is the
+summary and the measured behaviour.
+
+### The criterion, stated
+
+Everything is built on the same probe-centre field the surface uses,
+``F(p) = min_i(|p - c_i| - (r_i + probe))``, so ``A = {F > 0}`` is where a water
+probe may sit. Three definitions then do the work:
+
+* **bulk** — the components of ``A`` that touch a face of the analysis box. This
+  is the one assumption that can fail, and it is *enforced*: the margin is raised
+  to ``probe + CORE_RADIUS + 2·spacing`` so a solvent layer always exists, and
+  with `auto_margin=False` a box that cannot hold one is reported
+  (`box_too_tight`) and **nothing is labelled enclosed**.
+* **enclosed** — a component of ``A`` that reaches no face: a 1.4 Å probe cannot
+  get in at all.
+* **open / shallow** — cells the LIGSITE protein-solvent-protein scan accepts
+  (protein within 10 Å on at least **five of the six** axis directions, i.e.
+  everything but the mouth is blocked), clustered, minus a 25 Å³ volume floor. An
+  open cluster whose bottleneck is ≥ 4 Å is demoted to *shallow*.
+
+The **bottleneck radius** is the narrowest cross-section on the path out: the
+largest ``r`` for which the pocket's deepest cell is still connected to the bulk
+through cells that fit a ball of radius ``r``. It is found by bisection, each step
+one labelling of the pocket's neighbourhood, and it is verified against a
+cylinder whose answer is analytic (``R_wall − r_atom − probe``).
+
+### Measured on the bundled systems (`tools/cavity_report.py`)
+
+| | 3PTB trypsin (1 994 atoms) | 1M17 EGFR (2 985 atoms) |
+|---|---|---|
+| grid at 0.6 Å | 91×82×101 = 753 662 | 174×129×105 = 2 356 830 |
+| accessible / bulk volume | 124 061 / 124 041 Å³ | 446 077 / 446 038 Å³ |
+| bulk faces / box too tight | 6 / false | 6 / false |
+| pockets | 8 (0 enclosed, 4 open, 4 shallow) | 12 (0 enclosed, 9 open, 3 shallow) |
+| largest pocket | 331.3 Å³, bottleneck **3.23 Å** | 824.7 Å³, bottleneck 4.57 Å |
+| its lining | Gly38, Tyr39, His40, Phe41, Cys42, His57, Ile73, Asn74 | Leu694, Gly695, Ala698, Phe699, Val702, Lys704, Ala719, Lys721 |
+| ligand inside a pocket? | **yes** — the benzamidine sits in the 331 Å³ open pocket | 7.4 Å from the largest pocket's centroid; its lining is the ATP-site hydrophobic shell |
+| cost | **4.2 s** (aperture 4.0 s) | **17.4 s** (aperture 17.0 s) |
+
+Neither structure has a genuinely **enclosed** cavity in this model: trypsin's S1
+site and EGFR's ATP site are both open. That is the expected answer for these two
+— an enclosed void needs a buried hole — and it is why the classification is
+worth having: a surface map shows "a pocket" for both.
+
+Sensitivity to the two settings that matter, on 3PTB: at 0.8 / 0.6 / 0.5 Å
+spacing × 8 / 10 / 12 Å scan radius the analysis reports **7–9 pockets, 0
+enclosed, 2–4 open, 3–6 shallow** and 1 646–8 733 enclosure cells, in 5–10 s. The
+classification is stable across that grid; the number of *shallow* entries moves
+by a couple, which is what a volume floor does to surface dents.
+
+### The heuristic, and what it is not
+
+`Pocket.geometric_score = 0.45·enclosure + 0.35·min(1, volume/400) + 0.20·lining
+hydrophobicity`, where enclosure is ``1 − bottleneck/CORE_RADIUS`` (1.0 for an
+enclosed void) and the hydrophobicity is the mean Kyte–Doolittle value of the
+lining atoms from §2. The weights are a **stated choice**, not a fit: this is a
+**geometric heuristic for sorting a table**, it was not trained on anything, it
+has not been correlated with ligand efficiency or with experimental binding, and
+**it is not a druggability score**. On the bundled systems it orders the two
+sites a reader knows are real (3PTB P1 0.37, 1M17 P1 0.44) above the surface
+dents, which is all it claims to do.
+
+### What is *not* reported, and why
+
+* **The number of distinct mouths.** `Pocket.openings` is ``0`` for an enclosed
+  void and **``None`` for an open pocket**. A thin band at the critical radius
+  cannot tell a mouth from a dimple: measured on trypsin's P1 it returned 2 050
+  clusters and on EGFR up to 1 772, and tightening the band only moved the
+  problem. A number that large is worse than no number, so the neck *cells* are
+  reported instead (that is what the bottleneck residues are built from) and
+  counting mouths is left to a medial-axis or flow-based method this module does
+  not implement.
+* **A straight through-tunnel is not called a pocket** by the five-of-six rule: a
+  bore open at both ends has protein in four directions only. That is stated, and
+  `CavitySettings.min_directions = 4` finds it, at the price of more false
+  positives everywhere else — both halves are asserted in the tests.
+* **The pocket-lining surface** in §3.1 is a different object: a closed shell
+  *around* the lining atoms, whose volume is the slab's, not the cavity's.
+
+### Tests
+
+`tests/test_cavity.py` — 13 closed-form and contract tests: the field is asserted
+equal to `odock.gui.surface.scalar_field` (two implementations, one check); the
+direction scan is pinned against a constructed plane, including the
+integer-accumulation trap that first made it count 0/1 forever; a sealed shell
+gives **one enclosed cavity** with the analytic ``4/3 π (R_shell − r − probe)³``;
+a tube open at both ends gives the analytic bottleneck ``R_wall − r − probe``; a
+half-blocked tube is still a channel; a tube sealed at both ends has no aperture
+and is classified enclosed; the auto-margin guarantee and the safe-failure
+contract; and the heuristic's arithmetic.
+
+**Not yet wired**: the workbench action that colours a surface by cavity class and
+annotates a bottleneck, and the PyMOL/ChimeraX export of the classification. The
+module, the report tool, the tests and this section are in; those two halves are
+listed as remaining rather than half-done.
+
+---
+
+## 7. Using it
 
 **View ▸ Surface**
 
@@ -593,7 +698,7 @@ with (`2·d·tan(fov/2)/height`), so a length in the picture is a measurement.
 
 ---
 
-## 6. The figures in this document
+## 8. The figures in this document
 
 `tools/render_surface_previews.py` regenerates every image in `out/surface/`
 against the bundled 3PTB demo, offscreen, and prints the statistics for each
@@ -631,7 +736,7 @@ surface (figure 06) hides it.
 
 ---
 
-## 7. What is *not* claimed
+## 9. What is *not* claimed
 
 * The **SES reentrant patches are grid-resolved**. The erosion samples the
   probe sphere on 42 directions and interpolates trilinearly, so a concave

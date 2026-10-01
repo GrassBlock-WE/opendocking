@@ -65,6 +65,27 @@ generated artefacts (`.pyd`, `.so`, `.dll`, `.pyc`, `__pycache__`, `target/`,
 `out/`) inside the set; a destination that already holds files, unless `--force`
 (a stale snapshot mixed files into a release once).
 
+### Read the list — a required step, not an optional one
+
+`stage` ends its output with the staged set **grouped by top-level entry** (files
+and bytes each), and reading it is how a human catches what no rule was written for.
+On 0.2.1, four `odock-chrome-hylyoa4p`-style directories — Chrome profiles left
+behind by the PDF path — reached the published tree: the deny rules did not mention
+them, and nobody read a list because there was no list. A gate catches what it was
+told about; a person reading the list catches what nobody thought of. If an entry
+appears that you do not recognise, fix the tree, re-stage, and read the list again
+before `publish`. `--json` carries the same grouping, so a script can review it too.
+
+`stage` refuses on a generated entry **family** in the root, naming the entry and
+the family: `tmp*` (42 files reached a snapshot once), the browser-profile prefixes
+`odock-chrome-*` / `odock-report-*` / `odock-ensemble-*` (the profile directory the
+PDF step creates, and the same `tempfile` fallback that produced the `tmp*`
+incident), and Chrome's own `chrome_*`, `scoped_dir*` and `Crashpad*`. The same
+family is denied in `.gitignore`, in maturin's `exclude`, in
+`tools/inspect_dist.py`'s deny-list (with a self-test case) and in the release
+content scan — added in each place with a comment saying why the *family* is denied
+rather than the four names that leaked.
+
 The result reports the file count, the byte count, how many paths `.gitignore`
 excluded, and a manifest SHA-256 over `(path, size, sha256)` rows — so two
 stagings of the same tree can be compared without trusting either one.

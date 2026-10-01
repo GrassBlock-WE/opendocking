@@ -598,7 +598,7 @@ def main() -> int:
 
     print("\n### 7. waters: the network, the displaced ones, and the pose correlation\n")
     report["waters"] = report_waters(
-        library=ROOT / "demo" / "library.smi",
+        library=ROOT / "demo" / "libraries" / "library.smi",
         exhaustiveness=args.exhaustiveness,
         num_poses=max(2, args.num_poses // 2),
         seed=42,

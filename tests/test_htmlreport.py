@@ -35,7 +35,7 @@ import pytest
 from odock import htmlreport, project
 
 ROOT = Path(__file__).resolve().parent.parent
-DEMO = ROOT / "demo" / "3ptb"
+DEMO = ROOT / "demo" / "systems" / "3ptb"
 
 
 def _demo_ready() -> bool:
@@ -58,7 +58,7 @@ def report_files(tmp_path_factory):
         title="3PTB benzamidine re-docking",
         seed=42,
         scoring="vina",
-        command="odock report-html demo/3ptb/poses.pdbqt -o 3ptb.html",
+        command="odock report-html demo/systems/3ptb/poses.pdbqt -o 3ptb.html",
     )
 
 
@@ -437,6 +437,70 @@ def test_the_rdkit_depiction_is_embedded_when_a_molecule_is_given(tmp_path):
     )
     assert 'id="figure-ligand"' in built.html
     assert htmlreport.find_external_references(built.html) == []
+
+
+def test_a_browser_profile_is_never_created_in_the_working_directory(monkeypatch, tmp_path):
+    """The leak that reached 0.2.1: four `odock-chrome-*` profile directories.
+
+    `tempfile.mkdtemp` falls back to the working directory when the environment's
+    temp directory is not writable, so the profile landed next to the source.  The
+    helper refuses that rather than writing there.
+    """
+    inside = tmp_path / "odock-chrome-fallback"
+    inside.mkdir()
+
+    def fallback(*args, **kwargs):
+        return str(inside)
+
+    monkeypatch.setattr(htmlreport.tempfile, "mkdtemp", fallback)
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(htmlreport.PdfUnavailable) as excinfo:
+        htmlreport._browser_profile_directory()
+    assert "inside the working directory" in str(excinfo.value)
+    assert not inside.exists(), "the refused directory must not be left behind"
+
+
+def test_a_browser_profile_lands_in_the_temp_directory(monkeypatch, tmp_path):
+    # `cwd` and the (fake) temp directory are separate trees: the check is "is the
+    # profile inside the working directory?", not "is it inside the repository?".
+    work = tmp_path / "work"
+    work.mkdir()
+    outside = tmp_path / "temp"
+    outside.mkdir()
+
+    def created(*args, **kwargs):
+        path = outside / "odock-chrome-abcdefgh"
+        path.mkdir()
+        return str(path)
+
+    monkeypatch.setattr(htmlreport.tempfile, "mkdtemp", created)
+    monkeypatch.chdir(work)
+    profile = htmlreport._browser_profile_directory()
+    assert profile.parent == outside
+    assert htmlreport._remove_browser_profile(profile) is None
+    assert not profile.exists()
+
+
+def test_a_profile_that_cannot_be_removed_is_reported(monkeypatch, tmp_path):
+    """Silence is what the leak looked like: a surviving directory is returned, so
+    the caller can refuse and name it."""
+    profile = tmp_path / "odock-chrome-stuck"
+    profile.mkdir()
+    (profile / "settings.dat").write_bytes(b"x")
+    monkeypatch.setattr(htmlreport.shutil, "rmtree", lambda *args, **kwargs: None)
+    monkeypatch.setattr(htmlreport.time, "sleep", lambda seconds: None)
+    leftover = htmlreport._remove_browser_profile(profile)
+    assert leftover == profile
+
+
+def test_the_report_still_refuses_pdf_without_a_temp_directory(monkeypatch, tmp_path):
+    """The contract survives the fix: no PDF, and the HTML report is still complete."""
+    monkeypatch.setattr(
+        htmlreport.tempfile, "mkdtemp",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("no temp directory")),
+    )
+    with pytest.raises(htmlreport.PdfUnavailable, match="no writable temporary directory"):
+        htmlreport._browser_profile_directory()
 
 
 # ---------------------------------------------------------------------------

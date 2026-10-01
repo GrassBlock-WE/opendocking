@@ -19,7 +19,7 @@ rdkit = pytest.importorskip("rdkit")
 from odock import pocket_score as PS  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
-DEMO = ROOT / "demo" / "3ptb"
+DEMO = ROOT / "demo" / "systems" / "3ptb"
 RECEPTOR = DEMO / "receptor.pdbqt"
 LIGAND = DEMO / "ligand.pdbqt"
 
@@ -439,7 +439,7 @@ def test_the_library_ranking_puts_the_amidines_at_the_top(pocket_3ptb):
 
     pocket, _, _ = pocket_3ptb
     library = []
-    for line in (ROOT / "demo" / "library.smi").read_text(encoding="utf-8").splitlines():
+    for line in (ROOT / "demo" / "libraries" / "library.smi").read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
             continue
@@ -465,7 +465,7 @@ def test_the_prefilter_reports_the_recall_of_the_named_binders(pocket_3ptb):
 
     pocket, _, _ = pocket_3ptb
     library = []
-    for line in (ROOT / "demo" / "library.smi").read_text(encoding="utf-8").splitlines():
+    for line in (ROOT / "demo" / "libraries" / "library.smi").read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
             continue

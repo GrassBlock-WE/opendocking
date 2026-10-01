@@ -23,7 +23,7 @@ all three:
    in §4.
 
 ```bash
-odock decoys -a demo/library.smi -p demo/decoys.smi -n 5 -o out/decoys.smi --json-out out/decoys.json
+odock decoys -a demo/libraries/library.smi -p demo/libraries/decoys.smi -n 5 -o out/decoys.smi --json-out out/decoys.json
 odock lbvs   -a actives.smi -d out/decoys.smi --methods fingerprint,pharmacophore,overlay,crude \
              --shape overlay --conformers 2 --bootstrap 200 --prefilter 0.05 \
              --prefilter-method usr --json-out out/lbvs.json
@@ -39,7 +39,7 @@ pre-filter's recall.
 
 ## 1. The decoy set, and the evidence that it is matched
 
-`demo/decoys.smi` is a **hand-curated pool of 125 drug-like molecules** —
+`demo/libraries/decoys.smi` is a **hand-curated pool of 125 drug-like molecules** —
 metabolites, drugs, fragments, amino acids and aminoheterocycles — written out in
 this repository because a DUD-E download is not possible offline and a vendor
 catalogue would not be redistributable. It is a *pool*, not a decoy set:
@@ -264,7 +264,7 @@ and the self-match row that shows why a recall must be leave-one-out.
   *stratified* estimate rests on a single stratum.  Five targets would be a start; the
   benchmark literature this would be compared against uses dozens.
 * **Co-crystallised ligands are actives by construction.** Every active in
-  `demo/actives.smi` is an active because a structure contains it, which carries the
+  `demo/libraries/actives.smi` is an active because a structure contains it, which carries the
   selection bias that comes with it: these are the molecules that crystallised and
   were deposited, not a random sample of binders, and a series built from one
   structure's analogues inherits that structure's chemotype.
@@ -277,11 +277,11 @@ and the self-match row that shows why a recall must be leave-one-out.
 
 ```bash
 # the decoys (easy set), with the matching evidence
-odock decoys -a actives.smi -p demo/decoys.smi -n 5 \
+odock decoys -a actives.smi -p demo/libraries/decoys.smi -n 5 \
     -o out/decoys-easy.smi --json-out out/decoys-easy.json
 
 # the hard band: decoys that look like the actives without being analogues
-odock decoys -a actives.smi -p demo/decoys.smi -n 5 \
+odock decoys -a actives.smi -p demo/libraries/decoys.smi -n 5 \
     --min-similarity 0.35 --max-similarity 0.6 -o out/decoys-hard.smi
 
 # the benchmark: both shape engines, two controls, intervals, and the pre-filter
@@ -290,12 +290,12 @@ odock lbvs -a actives.smi -d out/decoys-easy.smi \
     --conformers 2 --bootstrap 200 --prefilter 0.05 --prefilter-method usr \
     --json-out out/lbvs-easy.json
 
-odock conformers -i demo/library.smi --n-conformers 16 --json-out out/conformers.json
+odock conformers -i demo/libraries/library.smi --n-conformers 16 --json-out out/conformers.json
 
 # the multi-target set: what can be benchmarked, and what cannot (and why)
 python -c "from odock import lbvs; from odock.chem.ligand import read_ligands; \
-r = lbvs.benchmark_per_target(lbvs.read_targets('demo/actives.smi'), \
-read_ligands('demo/decoys.smi', embed=False), per_active=5, \
+r = lbvs.benchmark_per_target(lbvs.read_targets('demo/libraries/actives.smi'), \
+read_ligands('demo/libraries/decoys.smi', embed=False), per_active=5, \
 methods=('fingerprint','pharmacophore','overlay','crude'), conformers=2, bootstrap=200); \
 print(r.per_target_table()); print(r.paired_table(samples=3000)); print(r.skipped)"
 
@@ -309,11 +309,11 @@ The same thing from Python:
 from odock import decoys, lbvs
 from odock.chem.ligand import read_ligands
 
-actives = [m for m in read_ligands("demo/library.smi", embed=False)
+actives = [m for m in read_ligands("demo/libraries/library.smi", embed=False)
            if m.GetProp("_Name") in ("benzamidine", "benzamidine_methyl",
                                      "hydroxybenzamidine", "fluorobenzamidine",
                                      "chloro_benzamidine")]
-pool = read_ligands("demo/decoys.smi", embed=False)
+pool = read_ligands("demo/libraries/decoys.smi", embed=False)
 
 selection = decoys.match_decoys(actives, pool, per_active=5)
 print(selection.quality_table())
@@ -325,10 +325,10 @@ report = lbvs.benchmark(actives, decoys_mols, conformers=2, bootstrap=200,
 print(report.table())
 print(report.paired_table(samples=3000))     # the paired test, with the MDD
 print(report.power(samples=3000))            # what this set can detect at all
-print(lbvs.prefilter(list(read_ligands("demo/library.smi", embed=False)) + pool,
+print(lbvs.prefilter(list(read_ligands("demo/libraries/library.smi", embed=False)) + pool,
                      actives, keep=0.05)["workload_saved_fraction"])
 # the 3-D filter instead of the 2-D one, with its measured recall and cost
-print(lbvs.prefilter(list(read_ligands("demo/library.smi", embed=False)) + pool,
+print(lbvs.prefilter(list(read_ligands("demo/libraries/library.smi", embed=False)) + pool,
                      actives, keep=0.05, method="usr"))
 ```
 
@@ -364,8 +364,8 @@ delta -0.080   SE 0.0616   MDD 0.173   95% CI [-0.229, +0.000]   resolvable: NO
 
 ### 8.2 The enlargement, and where it stops
 
-`demo/actives.smi` collects every **documented** active the repository can build a
-target from: the five ring-amidines of `demo/library.smi` (benzamidine is the
+`demo/libraries/actives.smi` collects every **documented** active the repository can build a
+target from: the five ring-amidines of `demo/libraries/library.smi` (benzamidine is the
 co-crystallised ligand of 3PTB), plus the co-crystallised ligands of 3ERT and 1ERE_A
 (ERα), 1HVR (HIV-1 protease), 1M17 (EGFR) and 1STP (streptavidin).  The four ligands
 with a bundled structure file are written out from it; erlotinib is checked in
@@ -428,7 +428,7 @@ And the comparison the whole section exists for, in each row:
   the MDD from 0.174 to 0.354 and takes every method down with it (pharmacophore 1.000
   → 0.852, overlay 0.920 → 0.790) because the sixth amidine is neither property-matched
   by the pool (max |SMD| 0.97 → 1.33) nor ranked consistently by the methods.  More
-  actives is not more power when the added active is an outlier: `demo/actives.smi`
+  actives is not more power when the added active is an outlier: `demo/libraries/actives.smi`
   therefore keeps the published five and says why.
 * **Resolving the observed gap would take ~23 actives** (5 · (0.173/0.080)²), at the
   same decoy count: four to five times everything the repository has, and the

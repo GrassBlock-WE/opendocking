@@ -1,0 +1,34 @@
+# A small screening library for the bundled trypsin (3PTB) demo.
+#
+# Checked in by hand so that docs/SCREENING.md has a runnable example without a
+# network fetch.  The set is deliberate:
+#
+#   * benzamidine is the 3PTB ligand itself: re-docking it is the sanity check
+#     that the pipeline reproduces the published validation;
+#   * the benzamidine analogues are a small structure-activity series of the kind
+#     a campaign is really run on;
+#   * caffeine, aspirin, ibuprofen, salicylic acid, acetanilide, paracetamol,
+#     nicotinamide, isonicotinic acid and warfarin are drug-like and are kept;
+#   * triphenylene fails Lipinski's LogP rule (5.15 > 5) and benzoquinone is a
+#     PAINS quinone, so the filter funnel has one molecule per filter to show.
+#
+# Run `odock filter -i demo/libraries/library.smi` to see the verdicts.
+#
+# SMILES name
+c1ccc(cc1)C(=N)N benzamidine
+c1ccc(cc1)C(=N)NC benzamidine_methyl
+c1ccc(cc1)CC(=N)N benzylamidine
+N=C(N)c1ccc(O)cc1 hydroxybenzamidine
+N=C(N)c1ccc(F)cc1 fluorobenzamidine
+N=C(N)c1ccccc1Cl chloro_benzamidine
+Cn1cnc2c1c(=O)n(C)c(=O)n2C caffeine
+CC(=O)Oc1ccccc1C(=O)O aspirin
+CC(C)Cc1ccc(cc1)C(C)C(=O)O ibuprofen
+OC(=O)c1ccccc1O salicylic_acid
+CC(=O)Nc1ccccc1 acetanilide
+CC(=O)Nc1ccc(O)cc1 paracetamol
+NC(=O)c1cccnc1 nicotinamide
+OC(=O)c1ccncc1 isonicotinic_acid
+CC(=O)CC(c1ccccc1)c1c(O)c2ccccc2oc1=O warfarin
+c1ccc2c(c1)c1ccccc1c1ccccc21 triphenylene
+O=C1C=CC(=O)C=C1 benzoquinone

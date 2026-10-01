@@ -30,6 +30,21 @@ python/odock/*.dll
 *.npy
 /tmp*
 
+# A headless-browser profile directory left behind in the working directory.  Four of
+# them (`odock-chrome-<8 chars>`, each holding CrashpadMetrics-active.pma, metadata and
+# settings.dat) reached the published 0.2.1 tree from the PDF path's Chrome profile:
+# `tempfile.mkdtemp` fell back to the working directory because the environment's temp
+# directory is not writable, and a browser can hold its profile open past the cleanup.
+# The *family* is denied rather than the four names, because the prefix has already
+# changed once (odock-chrome- -> odock-report-) and Chrome makes chrome_*, scoped_dir*
+# and Crashpad* directories of its own.
+/odock-chrome-*/
+/odock-report-*/
+/odock-ensemble-*/
+/chrome_*/
+/scoped_dir*/
+/Crashpad*/
+
 # A release snapshot of this repository, staged at its own root by the release
 # process. It is not part of the project and must not be committed or packaged
 # (`tools/inspect_dist.py` fails if a root `odock/` reaches an artefact).

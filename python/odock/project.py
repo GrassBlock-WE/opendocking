@@ -757,6 +757,69 @@ def result_from_pdbqt(
     return result
 
 
+def _apply_exact_pose_fields(result: Any, payload: Mapping[str, Any]) -> int:
+    """Replace numbers rebuilt from rendered PDBQT text with the dock JSON's exact ones.
+
+    ``result_from_pdbqt`` parses ``REMARK VINA RESULT`` / ``REMARK INTER`` lines,
+    which the PDBQT writer **renders** to three decimals.  The dock JSON holds the
+    values the engine produced, so when a project is saved from both, the JSON wins
+    and the coordinates keep coming from the pose file.  Returns how many poses
+    were replaced, so the caller can report the substitution rather than assume it.
+    """
+    poses = getattr(result, "poses", None)
+    items = payload.get("poses") if isinstance(payload, Mapping) else None
+    if not poses or not isinstance(items, list):
+        return 0
+    by_index: Dict[int, Mapping[str, Any]] = {}
+    for position, item in enumerate(items):
+        if isinstance(item, Mapping):
+            try:
+                by_index[int(item.get("index", position))] = item
+            except (TypeError, ValueError):
+                continue
+    fields = (
+        ("affinity", "affinity"),
+        ("rmsd_lower_bound", "rmsd_lower_bound"),
+        ("rmsd_upper_bound", "rmsd_upper_bound"),
+        ("inter", "inter"),
+        ("intra", "intra"),
+        ("conf_independent", "conf_independent"),
+        ("unbound", "unbound"),
+    )
+    replaced = 0
+    for pose in poses:
+        try:
+            item = by_index.get(int(getattr(pose, "index", -1)))
+        except (TypeError, ValueError):
+            item = None
+        if item is None:
+            continue
+        values: Dict[str, float] = {}
+        for attribute, key in fields:
+            if key not in item or item[key] is None:
+                continue
+            try:
+                values[attribute] = float(item[key])
+            except (TypeError, ValueError):
+                continue
+        if not values:
+            continue
+        # `Pose` may be frozen; try in-place first and fall back to a copy so this
+        # works whichever shape the docking layer uses.
+        try:
+            for attribute, value in values.items():
+                setattr(pose, attribute, value)
+        except Exception:  # pragma: no cover - only for a frozen dataclass
+            import dataclasses
+
+            for position, existing in enumerate(poses):
+                if existing is pose:
+                    poses[position] = dataclasses.replace(pose, **values)
+                    break
+        replaced += 1
+    return replaced
+
+
 # ---------------------------------------------------------------------------
 # The manifest and its versions
 # ---------------------------------------------------------------------------
@@ -3838,8 +3901,15 @@ def cmd_project_save(args) -> int:
                 f"error: {args.dock_json} is not a dock JSON document (no 'poses'); "
                 "`odock dock --json-out FILE` writes one"
             )
-        if poses:
-            # The pose file carries the coordinates; the JSON carries the settings.
+        # The pose file carries the coordinates; the JSON carries the settings
+            # *and the exact numbers*.  A PDBQT `REMARK VINA RESULT` is rendered
+            # text -- three decimals -- so a result rebuilt from a pose file alone
+            # carries rounded affinities, and comparing that archive against a
+            # fresh run at `--tolerance 0` could never pass.  Measured before this
+            # line existed: a run scoring -5.9449521243509125 was archived as
+            # -5.945, and `project reproduce` reported INCONCLUSIVE with
+            # `max |delta affinity|` 4.37e-4 -- the rounding residual, not a
+            # difference in the engine.
             result = result_from_pdbqt(
                 poses,
                 box=args.box,
@@ -3848,6 +3918,7 @@ def cmd_project_save(args) -> int:
                 seed=payload.get("seed"),
                 scoring=args.scoring or payload.get("scoring"),
             )
+            _apply_exact_pose_fields(result, payload)
         else:
             result = result_from_dock_json(
                 payload,

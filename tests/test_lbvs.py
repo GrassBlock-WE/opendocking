@@ -21,8 +21,8 @@ from rdkit import Chem  # noqa: E402
 from odock import lbvs  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
-LIBRARY = ROOT / "demo" / "library.smi"
-POOL = ROOT / "demo" / "decoys.smi"
+LIBRARY = ROOT / "demo" / "libraries" / "library.smi"
+POOL = ROOT / "demo" / "libraries" / "decoys.smi"
 
 AMIDINES = (
     "benzamidine",
@@ -326,7 +326,7 @@ def test_the_stratified_difference_pools_over_targets_not_molecules():
 
 
 def test_read_targets_reads_the_shipped_multi_target_file(tmp_path):
-    path = ROOT / "demo" / "actives.smi"
+    path = ROOT / "demo" / "libraries" / "actives.smi"
     if not path.exists():
         pytest.skip("the bundled multi-target actives file is missing")
     targets = lbvs.read_targets(path)

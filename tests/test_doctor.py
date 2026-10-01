@@ -25,7 +25,7 @@ import pytest
 from odock import doctor
 
 ROOT = Path(__file__).resolve().parent.parent
-DEMO = ROOT / "demo" / "3ptb"
+DEMO = ROOT / "demo" / "systems" / "3ptb"
 
 
 def _demo_ready() -> bool:
@@ -272,7 +272,7 @@ def test_a_partial_checkout_reports_the_missing_files(tmp_path):
     assert finding.severity == "warning"
     assert "promised file(s) are missing" in finding.title
     assert finding.data["checked"] == len(doctor.DOCUMENTED_FILES)
-    assert "demo/3ptb/receptor.pdbqt" in finding.data["missing"]
+    assert "demo/systems/3ptb/receptor.pdbqt" in finding.data["missing"]
     assert "make demo" in finding.fix
 
 

@@ -37,7 +37,7 @@ from odock.docking import DockResult, Pose
 from odock.prepare import BoxSpec
 
 ROOT = Path(__file__).resolve().parent.parent
-DEMO = ROOT / "demo" / "3ptb"
+DEMO = ROOT / "demo" / "systems" / "3ptb"
 DEMO_RECEPTOR = DEMO / "receptor.pdbqt"
 DEMO_LIGAND = DEMO / "ligand.pdbqt"
 DEMO_POSES = DEMO / "poses.pdbqt"

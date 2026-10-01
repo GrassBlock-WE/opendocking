@@ -38,9 +38,9 @@ from gui_robot import Robot  # noqa: E402
 
 from odock.gui.viewport import LIGAND_STYLES, PROTEIN_STYLES  # noqa: E402
 
-DEFAULT_RECEPTOR = ROOT / "demo" / "3ptb" / "receptor.pdbqt"
-DEFAULT_LIGAND = ROOT / "demo" / "3ptb" / "ligand.pdbqt"
-DEFAULT_POSES = ROOT / "demo" / "3ptb" / "poses.pdbqt"
+DEFAULT_RECEPTOR = ROOT / "demo" / "systems" / "3ptb" / "receptor.pdbqt"
+DEFAULT_LIGAND = ROOT / "demo" / "systems" / "3ptb" / "ligand.pdbqt"
+DEFAULT_POSES = ROOT / "demo" / "systems" / "3ptb" / "poses.pdbqt"
 
 
 def module_ready(name: str) -> bool:
@@ -137,8 +137,9 @@ def main() -> int:
         )
         tabs = [window.inspector.tabText(i) for i in range(window.inspector.count())]
         step.expect(
-            tabs == ["Receptor", "Ligand", "Grid", "Engine"],
-            "the inspector has the four required tabs",
+            tabs == ["Receptor", "Ligand", "Grid", "Engine", "Protocol"],
+            "the inspector has the required tabs, plus Protocol — the settings that "
+            "will run, as a shareable and diffable document",
             str(tabs),
         )
         columns = [

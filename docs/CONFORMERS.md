@@ -15,9 +15,9 @@ Two modules, both measured here rather than asserted:
   reference, with the two terms always reported separately.
 
 ```bash
-odock conformers -i demo/library.smi                       # ensemble quality + accounting
-odock conformers -i demo/library.smi --json-out out/conformers.json
-odock conformers -i demo/library.smi --fixed-attempts      # the old fixed 16-attempt rule
+odock conformers -i demo/libraries/library.smi                       # ensemble quality + accounting
+odock conformers -i demo/libraries/library.smi --json-out out/conformers.json
+odock conformers -i demo/libraries/library.smi --fixed-attempts      # the old fixed 16-attempt rule
 odock conformers -i poses.sdf --keep-input                 # measure the poses as given
 odock lbvs -a actives.smi -d decoys.smi --methods overlay,crude --conformers 2 \
            --prefilter 0.05 --prefilter-method usr --json-out out/lbvs.json
@@ -40,7 +40,7 @@ symmetric ends.
 
 ### 1.1 Where the conformers go
 
-`odock conformers -i demo/library.smi` (17 molecules, rotor-scaled default):
+`odock conformers -i demo/libraries/library.smi` (17 molecules, rotor-scaled default):
 
 ```text
 conformers: 17 of 17 molecule(s) embedded (100%), 2.82 conformer(s) kept on average

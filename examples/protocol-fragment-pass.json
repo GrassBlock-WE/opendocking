@@ -1,0 +1,78 @@
+{
+  "kind": "opendocking-protocol",
+  "schema_version": 1,
+  "name": "fragment-pass",
+  "note": "Use for fragments and other very small ligands, where the usual scoring is noisy: keep the non-polar hydrogens, drop the drug-likeness filters (a fragment fails them by definition), and raise exhaustiveness so a few-atom search is exhaustive rather than lucky.",
+  "preparation": {
+    "keep_water": false,
+    "keep_hetero": true,
+    "strip": [],
+    "add_polar_hydrogens": true,
+    "strict": false,
+    "modified_residues": ["MSE", "SEP", "TPO", "PTR", "CSO", "KCX", "MLY", "M3L", "HYP", "PCA"],
+    "ligand": {
+      "add_hydrogens": true,
+      "strip_nonpolar": false,
+      "rigid_amides": true,
+      "embed": true,
+      "optimize": true
+    },
+    "prepare_seed": 20240101
+  },
+  "box": {
+    "source": "ligand",
+    "center": null,
+    "size": null,
+    "spacing": 0.3,
+    "ligand_padding": 5.0,
+    "pocket_index": null
+  },
+  "engine": {
+    "scoring": "vina",
+    "search": null,
+    "exhaustiveness": 64,
+    "num_poses": 20,
+    "min_rmsd": 0.5,
+    "energy_range": 5.0,
+    "islands": 8,
+    "population": 64,
+    "generations": 40,
+    "use_grid": true,
+    "refine": true
+  },
+  "execution": {
+    "seed": 7,
+    "jobs": 0,
+    "timeout": null,
+    "checkpoint_every": 10
+  },
+  "library": {
+    "filters": false,
+    "limit": null,
+    "top": 0,
+    "format": "jsonl",
+    "interactions": true,
+    "write_poses": true,
+    "consensus": false,
+    "consensus_top": 0,
+    "consensus_method": "rank"
+  },
+  "thresholds": {
+    "interactions": {
+      "hbond": 3.5,
+      "salt": 4.0,
+      "hydrophobic": 4.0,
+      "pi": 4.5,
+      "cation_pi": 5.0,
+      "clash_ratio": 0.75
+    },
+    "pocket": {},
+    "strain": {}
+  },
+  "provenance": {
+    "tool": null,
+    "kernel": null,
+    "python": null,
+    "created": null
+  }
+}

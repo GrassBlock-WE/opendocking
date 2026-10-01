@@ -43,10 +43,10 @@ from rdkit import Chem  # noqa: E402
 from rdkit.Chem import AllChem  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
-DEMO_LIGAND = ROOT / "demo" / "3ptb" / "ligand.pdbqt"
-DEMO_POSES = ROOT / "demo" / "3ptb" / "poses.pdbqt"
-DEMO_RECEPTOR = ROOT / "demo" / "3ptb" / "receptor.pdbqt"
-DEMO_BOX = ROOT / "demo" / "3ptb" / "box.json"
+DEMO_LIGAND = ROOT / "demo" / "systems" / "3ptb" / "ligand.pdbqt"
+DEMO_POSES = ROOT / "demo" / "systems" / "3ptb" / "poses.pdbqt"
+DEMO_RECEPTOR = ROOT / "demo" / "systems" / "3ptb" / "receptor.pdbqt"
+DEMO_BOX = ROOT / "demo" / "systems" / "3ptb" / "box.json"
 
 #: A remote two-atom receptor: the ligand's *intra* term is what the strain
 #: measures, and a receptor 40 Å away contributes nothing to it.

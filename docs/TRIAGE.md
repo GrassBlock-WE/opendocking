@@ -12,7 +12,7 @@ belong together:
 | **the series view** | the whole table grouped by the Murcko series `odock scaffolds` already computes, so "this cluster carries a Michael acceptor, that one is clean" is one screen |
 
 ```bash
-odock triage -i demo/library.smi
+odock triage -i demo/libraries/library.smi
 odock triage -i hits.sdf --affinities out/3ptb-screen/results.jsonl --flagged-only
 odock triage -i hits.sdf --catalogues PAINS,BRENK,NIH,ZINC -o triage.xlsx --json-out triage.json
 ```
@@ -95,7 +95,7 @@ space, not verdicts about compounds.
 ## 3. The triage report
 
 ```bash
-odock triage -i demo/library.smi
+odock triage -i demo/libraries/library.smi
 ```
 
 ```text
@@ -147,8 +147,8 @@ themselves. Measured with every catalogue and both SMARTS sets:
 
 | set | molecules | PAINS | BRENK | NIH | ZINC | SMARTS `liability` | SMARTS `soft_spot` |
 |---|---|---|---|---|---|---|---|
-| demo library (`demo/library.smi`) | 17 | 1 (6 %) | **11 (65 %)** | 2 (12 %) | 1 (6 %) | 1 (6 %) | 4 (24 %) |
-| decoy pool (`demo/decoys.smi`) | 125 | 9 (7 %) | 42 (34 %) | 3 (2 %) | 0 (0 %) | 46 (37 %) | 21 (17 %) |
+| demo library (`demo/libraries/library.smi`) | 17 | 1 (6 %) | **11 (65 %)** | 2 (12 %) | 1 (6 %) | 1 (6 %) | 4 (24 %) |
+| decoy pool (`demo/libraries/decoys.smi`) | 125 | 9 (7 %) | 42 (34 %) | 3 (2 %) | 0 (0 %) | 46 (37 %) | 21 (17 %) |
 | both together | 142 | 10 (7 %) | 53 (37 %) | 5 (4 %) | 1 (1 %) | 47 (33 %) | 25 (18 %) |
 
 Read that table before reading any alert-based ranking. On a hand-curated,
@@ -191,10 +191,10 @@ catalogue exceeds a quarter of the set, which is why the note is in the output o
 
 ```bash
 # the demo library, with the rates, the series view and every alert location
-odock triage -i demo/library.smi
+odock triage -i demo/libraries/library.smi
 
 # the decoy pool, for the breadth comparison in §4
-odock triage -i demo/decoys.smi --top 5
+odock triage -i demo/libraries/decoys.smi --top 5
 
 # only the flagged molecules of a screening result, with the affinities
 odock triage -i hits.sdf --affinities out/3ptb-screen/results.jsonl --flagged-only \
@@ -205,7 +205,7 @@ odock triage -i hits.sdf --affinities out/3ptb-screen/results.jsonl --flagged-on
 from odock import triage
 from odock.chem.ligand import read_ligands
 
-hits = read_ligands("demo/library.smi", embed=False)
+hits = read_ligands("demo/libraries/library.smi", embed=False)
 report = triage.triage_library(hits, affinities={"benzamidine": -5.9})
 print(report.rates_table())
 print(report.series_table())

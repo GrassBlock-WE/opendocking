@@ -333,7 +333,7 @@ odock ensemble generate -r 3PTB.pdb --box-ligand BEN \
     --max-rotamers 5 --min-rmsd 0.3 --combinations 16 --seed 7 \
     --outdir out/generated_3ptb --json-out out/generated_3ptb.json
 odock ensemble pockets -r out/generated_3ptb/*.pdb --no-superpose \
-    --box demo/3ptb/box.json --region-radius 12 --max-pockets 10
+    --box demo/systems/3ptb/box.json --region-radius 12 --max-pockets 10
 
 odock ensemble modes -r 3ERT.pdb --box-ligand OHT --modes 3 \
     --compare 1ERE_A.pdb --outdir out/mode_ensemble --json-out out/modes.json

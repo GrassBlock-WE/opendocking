@@ -165,16 +165,16 @@ def test_the_demo_data_is_published_except_the_vendored_binary():
     assert "/demo/*" not in rules, (
         "ignoring the whole demo directory drops 18 published files"
     )
-    assert f"!/demo/library.smi" not in rules, (
+    assert f"!/demo/libraries/library.smi" not in rules, (
         "the exception is only needed when the whole directory is ignored"
     )
 
     # The published demo data has to be on disk, or a clone loses it.
     for kept in ("receptor.pdbqt", "ligand.pdbqt", "poses.pdbqt", "result.pdbqt",
                  "box.json", "config.txt"):
-        assert (ROOT / "demo" / "3ptb" / kept).exists(), kept
-    assert (ROOT / "demo" / "egfr" / "receptor.pdbqt").exists()
-    assert (ROOT / "demo" / "library.smi").exists()
+        assert (ROOT / "demo" / "systems" / "3ptb" / kept).exists(), kept
+    assert (ROOT / "demo" / "systems" / "1m17" / "receptor.pdbqt").exists()
+    assert (ROOT / "demo" / "libraries" / "library.smi").exists()
     assert (ROOT / "demo" / "README.md").exists()
     # The binary itself is deliberately *not* asserted present: it is ignored, so
     # a fresh clone will not have it, and that is the point of the rule.

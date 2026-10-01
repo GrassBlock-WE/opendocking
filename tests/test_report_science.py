@@ -24,7 +24,7 @@ rdkit = pytest.importorskip("rdkit")
 from rdkit import Chem  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
-DEMO = ROOT / "demo" / "3ptb"
+DEMO = ROOT / "demo" / "systems" / "3ptb"
 DEMO_RECEPTOR = DEMO / "receptor.pdbqt"
 DEMO_LIGAND = DEMO / "ligand.pdbqt"
 DEMO_POSES = DEMO / "poses.pdbqt"

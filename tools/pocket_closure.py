@@ -20,8 +20,8 @@ from odock.gui.structure import read_pdbqt  # noqa: E402
 
 
 def main() -> int:
-    receptor = read_pdbqt(ROOT / "demo" / "3ptb" / "receptor.pdbqt")[0].atoms
-    ligand = read_pdbqt(ROOT / "demo" / "3ptb" / "ligand.pdbqt")[0].atoms
+    receptor = read_pdbqt(ROOT / "demo" / "systems" / "3ptb" / "receptor.pdbqt")[0].atoms
+    ligand = read_pdbqt(ROOT / "demo" / "systems" / "3ptb" / "ligand.pdbqt")[0].atoms
     centre = tuple(
         float(value)
         for value in np.asarray([[a.x, a.y, a.z] for a in ligand]).mean(axis=0)

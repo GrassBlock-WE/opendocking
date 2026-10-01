@@ -214,9 +214,9 @@ def main() -> int:
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     window = DockingWorkbench()
     window.resize(WIDTH, HEIGHT)
-    window.load_receptor(str(ROOT / "demo" / "3ptb" / "receptor.pdbqt"))
-    window.load_ligand(str(ROOT / "demo" / "3ptb" / "ligand.pdbqt"))
-    window.load_poses(str(ROOT / "demo" / "3ptb" / "poses.pdbqt"))
+    window.load_receptor(str(ROOT / "demo" / "systems" / "3ptb" / "receptor.pdbqt"))
+    window.load_ligand(str(ROOT / "demo" / "systems" / "3ptb" / "ligand.pdbqt"))
+    window.load_poses(str(ROOT / "demo" / "systems" / "3ptb" / "poses.pdbqt"))
     # The view a user has after docking: a cartoon protein, the ligand in the
     # pocket, and the contacts annotated in front of it.
     window.scene.style_protein = "cartoon"

@@ -32,7 +32,7 @@ from odock import overlay as O  # noqa: E402
 from odock import scaffold as S  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
-LIBRARY = ROOT / "demo" / "library.smi"
+LIBRARY = ROOT / "demo" / "libraries" / "library.smi"
 
 BENZAMIDINE = "N=C(N)c1ccccc1"
 HYDROXYBENZAMIDINE = "N=C(N)c1ccc(O)cc1"

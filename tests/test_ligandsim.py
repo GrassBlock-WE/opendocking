@@ -23,7 +23,7 @@ import odock  # noqa: E402  (imports the chem layer lazily)
 from odock import ligandsim as L  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
-LIBRARY = ROOT / "demo" / "library.smi"
+LIBRARY = ROOT / "demo" / "libraries" / "library.smi"
 
 
 # ---------------------------------------------------------------------------
@@ -54,7 +54,7 @@ def demo_library():
 def demo_fingerprints(demo_library):
     names = [mol.GetProp("_Name") for mol in demo_library]
     return L.fingerprint_set(
-        demo_library, names=names, smiles=True, source="demo/library.smi"
+        demo_library, names=names, smiles=True, source="demo/libraries/library.smi"
     )
 
 

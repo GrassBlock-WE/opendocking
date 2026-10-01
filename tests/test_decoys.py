@@ -13,8 +13,8 @@ from rdkit import Chem  # noqa: E402
 from odock import decoys as D  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
-LIBRARY = ROOT / "demo" / "library.smi"
-POOL = ROOT / "demo" / "decoys.smi"
+LIBRARY = ROOT / "demo" / "libraries" / "library.smi"
+POOL = ROOT / "demo" / "libraries" / "decoys.smi"
 
 RING_AMIDINES = (
     "benzamidine",

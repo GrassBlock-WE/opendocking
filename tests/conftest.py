@@ -3,7 +3,7 @@
 
 This file also carries two guards against a green run that proves nothing:
 
-* ``--require-demo`` — the demo fixtures (``demo/3ptb/...``, ``demo/egfr/...``)
+* ``--require-demo`` — the demo fixtures (``demo/systems/3ptb/...``, ``demo/systems/1m17/...``)
   are generated rather than committed, so a fresh checkout has none of them and
   every test that needs them *skips*.  A skipped accuracy test is not a passing
   accuracy test, so CI runs pytest with ``--require-demo``, which turns those

@@ -10,7 +10,7 @@ electrostatic consumer in the project stands.
 
 Benzamidine in trypsin's S1 pocket.  The bound species is the **amidinium**, and its
 salt bridge with Asp189 is the interaction that defines the pocket.  Three charge
-assignments at the **crystallographic pose** (`demo/3ptb/ligand.pdbqt`, whose two
+assignments at the **crystallographic pose** (`demo/systems/3ptb/ligand.pdbqt`, whose two
 amidine nitrogens are **2.87 Å** from the nearest Asp189 oxygen):
 
 | assignment | charge on the amidine N | Σ q·φ | ESP term | score |
@@ -36,7 +36,7 @@ Three things follow, and the second is the one that generalises furthest:
    **negative (−0.11 e)** — the +1 is spread over the whole ion.  Only restoring the
    group's formal charge flips the sign.  **No protonation-state change without a
    charge model that can hold a formal charge.**
-3. **It changes a ranking, not just a number.**  Ranking `demo/library.smi` against the
+3. **It changes a ranking, not just a number.**  Ranking `demo/libraries/library.smi` against the
    3PTB pocket, the five ring-amidines take ranks **1, 2, 3, 10, 11** with the ESP term
    clamped for every molecule (so the "combined" score *is* the shape term), and
    **1, 2, 3, 5, 6** with the formal-charge correction — chloro_benzamidine moves from

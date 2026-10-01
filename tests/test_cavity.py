@@ -243,8 +243,8 @@ def test_a_tube_open_at_both_ends_has_the_analytic_bottleneck_radius():
     exact = wall - CARBON - PROBE
     assert bottleneck is not None
     assert bottleneck == pytest.approx(exact, abs=spacing)
-    assert openings >= 1
-    assert len(neck) > 0
+    assert openings is None          # the mouth count is not reported
+    assert len(neck) > 0             # the neck cells are, for the residues
 
 
 def test_a_half_blocked_tube_is_still_a_channel():
@@ -275,7 +275,7 @@ def test_a_half_blocked_tube_is_still_a_channel():
     )
     assert bottleneck is not None
     assert bottleneck == pytest.approx(1.5, abs=spacing)
-    assert openings >= 1
+    assert openings is None          # see _aperture: not reported, not guessed
 
 
 def test_a_tube_sealed_at_both_ends_has_no_aperture():

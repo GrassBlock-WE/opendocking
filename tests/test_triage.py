@@ -20,7 +20,7 @@ from rdkit import Chem  # noqa: E402
 from odock import triage as T  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
-LIBRARY = ROOT / "demo" / "library.smi"
+LIBRARY = ROOT / "demo" / "libraries" / "library.smi"
 
 
 def named(smiles: str, name: str = ""):

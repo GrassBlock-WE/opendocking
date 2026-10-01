@@ -652,6 +652,59 @@ def stray_temp_entries(root: PathLike) -> List[str]:
     ) if base.is_dir() else []
 
 
+#: Root-entry families that are debris from a build or a run, not release content.
+#: ``tmp*`` is the original; the rest are the same failure mode with a different
+#: name, and the browser-profile entry is the leak that reached the published 0.2.1
+#: tree: four ``odock-chrome-*`` directories, each holding a Chrome profile, left by
+#: the PDF path when the environment's temp directory was not writable.  The family
+#: is listed rather than the names, because the prefix has already changed once.
+GENERATED_ROOT_PREFIXES: Tuple[Tuple[str, str], ...] = (
+    ("tmp", "a temporary directory or file (tempfile fell back to the working directory)"),
+    ("odock-chrome-", "a headless-browser profile directory (the PDF path's Chrome profile)"),
+    ("odock-report-", "a headless-browser profile directory (the PDF path's Chrome profile)"),
+    ("odock-ensemble-", "a run's scratch directory (tempfile fell back to the working directory)"),
+    ("chrome_", "a headless browser's own profile directory"),
+    ("scoped_dir", "a headless browser's own profile directory"),
+    ("Crashpad", "a headless browser's crash-report directory"),
+)
+
+
+def stray_generated_entries(root: PathLike) -> List[Tuple[str, str]]:
+    """``(name, family)`` for every root entry that is debris rather than content."""
+    base = Path(root)
+    if not base.is_dir():
+        return []
+    found: List[Tuple[str, str]] = []
+    for item in sorted(base.iterdir()):
+        for prefix, family in GENERATED_ROOT_PREFIXES:
+            if item.name.startswith(prefix):
+                found.append((item.name, family))
+                break
+    return found
+
+
+def _entry_summary(root: Path, names: Sequence[str]) -> List[Tuple[str, int, int]]:
+    """``(top-level entry, files, bytes)`` for the staged set, biggest first.
+
+    This is what a human reads before publishing: the guard's rules catch what
+    somebody thought of, and a grouped listing of what is *about* to ship catches
+    what nobody did — ``odock-chrome-*`` in that list is visible at a glance.
+    """
+    grouped: Dict[str, List[int]] = {}
+    for name in names:
+        head = name.split("/", 1)[0]
+        try:
+            size = (root / name).stat().st_size
+        except OSError:  # pragma: no cover - a vanished file
+            size = 0
+        bucket = grouped.setdefault(head, [0, 0])
+        bucket[0] += 1
+        bucket[1] += size
+    rows = [(head, counts[0], counts[1]) for head, counts in grouped.items()]
+    return sorted(rows, key=lambda row: (-row[1], row[0]))
+
+
+
 @dataclass
 class StageResult:
     """What ``release stage`` wrote."""
@@ -664,6 +717,8 @@ class StageResult:
     ignored: int
     dry_run: bool
     notes: List[str] = field(default_factory=list)
+    #: ``(top-level entry, files, bytes)`` — what a human reads before publishing.
+    listing: List[Tuple[str, int, int]] = field(default_factory=list)
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -675,9 +730,13 @@ class StageResult:
             "ignored": int(self.ignored),
             "dry_run": bool(self.dry_run),
             "notes": list(self.notes),
+            "entries": [
+                {"entry": name, "files": files, "bytes": size}
+                for name, files, size in self.listing
+            ],
         }
 
-    def text(self) -> str:
+    def text(self, *, listing: bool = True) -> str:
         lines = [
             f"stage {_project.portable_path(self.root)} -> {_project.portable_path(self.out)}"
             + (" [dry run]" if self.dry_run else ""),
@@ -687,6 +746,16 @@ class StageResult:
         ]
         for note in self.notes:
             lines.append(f"  note: {note}")
+        if listing and self.listing:
+            lines.append("")
+            lines.append("  WHAT WILL BE PUBLISHED, by top-level entry "
+                         "(read this before `release publish`):")
+            for name, files, size in self.listing:
+                lines.append(f"    {name:<28} {files:>5} file(s)  {size:>12,} bytes")
+            lines.append(
+                "    — anything here you do not recognise is a leak: fix the tree, "
+                "re-stage, and read this list again."
+            )
         return "\n".join(lines)
 
 
@@ -713,15 +782,24 @@ def stage_release(
             fix="pass --root pointing at the repository root",
         )
 
-    stray = stray_temp_entries(base)
+    # Debris in the root, by family.  `tmp*` was the first (42 files reached a
+    # snapshot); the browser-profile prefix is the one that reached the **published**
+    # 0.2.1 tree, from the PDF path's Chrome profile.  Naming the family is what makes
+    # the next one a refusal instead of a leak.
+    stray = stray_generated_entries(base)
     if stray:
+        families = sorted({family for _, family in stray})
         raise ReleaseError(
-            f"{len(stray)} stray temp entr{'y' if len(stray) == 1 else 'ies'} in the "
-            "release root: " + ", ".join(stray[:8]) + (" …" if len(stray) > 8 else ""),
+            f"{len(stray)} generated entr{'y' if len(stray) == 1 else 'ies'} in the "
+            "release root: " + ", ".join(name for name, _ in stray[:8])
+            + (" …" if len(stray) > 8 else "")
+            + " — " + "; ".join(families),
             fix=(
-                "delete them (they come from a temp directory that is not writable, "
-                "so Python's tempfile fell back to the working directory): remove "
-                "them, and run tests with `--basetemp .pytest-tmp` or set TMPDIR"
+                "delete them before staging (they come from a temp directory that is "
+                "not writable, so `tempfile` fell back to the working directory, or "
+                "from a browser profile the cleanup could not remove): remove them, "
+                "set TMPDIR/TEMP to a writable directory, and run tests with "
+                "`--basetemp .pytest-tmp`"
             ),
         )
 
@@ -767,9 +845,14 @@ def stage_release(
 
     digest = _manifest_digest(base, published)
     total = sum((base / name).stat().st_size for name in published)
+    # What is about to ship, grouped by top-level entry: the guard's rules catch what
+    # somebody thought of; a human reading this list catches what nobody did (an
+    # `odock-chrome-*` entry is visible here at a glance).
+    listing = _entry_summary(base, published)
     if dry_run:
         return StageResult(base, destination, len(published), total, digest,
-                           len(ignored), True, notes + ["nothing was written (dry run)"])
+                           len(ignored), True,
+                           notes + ["nothing was written (dry run)"], listing)
 
     if destination.exists() and force:
         shutil.rmtree(destination)
@@ -789,7 +872,7 @@ def stage_release(
             fix="this is a bug in `release stage`; the mismatch is reported rather than hidden",
         )
     return StageResult(base, destination, len(published), total, digest,
-                       len(ignored), False, notes)
+                       len(ignored), False, notes, listing)
 
 
 def _manifest_digest(root: Path, files: Sequence[str]) -> str:

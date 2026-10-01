@@ -31,9 +31,9 @@ def main() -> int:
     i18n.set_language("en")
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     window = DockingWorkbench()
-    window.load_receptor(str(ROOT / "demo" / "3ptb" / "receptor.pdbqt"))
-    window.load_ligand(str(ROOT / "demo" / "3ptb" / "ligand.pdbqt"))
-    window.load_poses(str(ROOT / "demo" / "3ptb" / "poses.pdbqt"))
+    window.load_receptor(str(ROOT / "demo" / "systems" / "3ptb" / "receptor.pdbqt"))
+    window.load_ligand(str(ROOT / "demo" / "systems" / "3ptb" / "ligand.pdbqt"))
+    window.load_poses(str(ROOT / "demo" / "systems" / "3ptb" / "poses.pdbqt"))
     app.processEvents()
 
     centre = window._surface_centre()

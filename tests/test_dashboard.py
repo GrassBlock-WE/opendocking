@@ -32,6 +32,7 @@ QtWidgets = pytest.importorskip("PyQt6.QtWidgets")
 QtGui = pytest.importorskip("PyQt6.QtGui")
 QtCore = pytest.importorskip("PyQt6.QtCore")
 
+from odock import protocol  # noqa: E402
 from odock.gui import dashboard, i18n  # noqa: E402
 from odock.gui.app import DockingWorkbench  # noqa: E402
 from odock.gui.structure import Atom  # noqa: E402
@@ -2503,6 +2504,166 @@ def test_the_console_and_the_measurement_toolkit_share_the_session(qapp, tmp_pat
         window.console.execute(f"select('{key[0]}', {key[1]}, '{key[2]}')")
         qapp.processEvents()
         assert window.sequence.selected_keys() == [key]
+    finally:
+        window.close()
+
+
+# ---------------------------------------------------------------------------
+# task-46: the protocol inspector tab
+# ---------------------------------------------------------------------------
+
+
+def test_the_protocol_tab_shows_the_settings_that_will_run(qapp, tmp_path):
+    """The tab is a view of the other tabs, never a second copy of them."""
+    window = _toolkit_window(qapp, tmp_path)
+    try:
+        assert window.inspector.count() == 5
+        assert window.inspector.tabText(4) == i18n.EN["tab.protocol"]
+        window.inspector.setCurrentWidget(window._protocol_page)
+        _pump(qapp, 30)
+
+        text = window.protocol_view.toPlainText()
+        assert window.protocol_caption.text() == i18n.EN["protocol.caption"]
+        assert "engine.exhaustiveness" in text
+        assert "box.source" in text
+        # The hash is stated with what it covers and what it does not.
+        assert "identity, not correctness" in text
+        assert window.protocol_template_diff.text() == i18n.EN["protocol.template_none"]
+
+        # The capture follows the widgets: change the engine, the hash changes.
+        before = window.current_protocol()
+        window.exhaustiveness.setValue(int(window.exhaustiveness.value()) + 8)
+        window.inspector.setCurrentWidget(window._protocol_page)
+        _pump(qapp, 20)
+        after = window.current_protocol()
+        assert after.hash() != before.hash()
+        differences = {
+            item["field"]: item["values"] for item in protocol.diff_protocols(before, after)
+        }
+        assert differences["engine.exhaustiveness"][1] == window.exhaustiveness.value()
+        assert str(window.exhaustiveness.value()) in window.protocol_view.toPlainText()
+        # The box's derivation is recorded, not implied.
+        assert after.box.source in protocol.BOX_SOURCES
+        # What the GUI has no control for stays at the documented default.
+        assert after.library.filters is True and after.preparation.keep_hetero is True
+    finally:
+        window.close()
+
+
+def test_the_protocol_tab_saves_loads_and_compares(qapp, tmp_path, monkeypatch):
+    """Save writes a validated document; Load applies it to the widgets."""
+    window = _toolkit_window(qapp, tmp_path)
+    try:
+        window.exhaustiveness.setValue(21)
+        window.seed.setValue(1234)
+        target = tmp_path / "mine.json"
+        monkeypatch.setattr(
+            QtWidgets.QFileDialog,
+            "getSaveFileName",
+            staticmethod(lambda *a, **k: (str(target), "")),
+        )
+        window._save_protocol_action()
+        _pump(qapp, 20)
+        assert target.exists()
+        saved = protocol.load_protocol(target)
+        assert saved.engine.exhaustiveness == 21 and saved.execution.seed == 1234
+        assert i18n.EN["log.protocol_saved"].split("{")[0] in window.log.toPlainText()
+
+        # Change the session, then load the file back: the widgets follow.
+        window.exhaustiveness.setValue(3)
+        window.seed.setValue(7)
+        monkeypatch.setattr(
+            QtWidgets.QFileDialog,
+            "getOpenFileName",
+            staticmethod(lambda *a, **k: (str(target), "")),
+        )
+        window._load_protocol_action()
+        _pump(qapp, 20)
+        assert window.exhaustiveness.value() == 21
+        assert window.seed.value() == 1234
+        assert window._loaded_protocol is not None
+        assert i18n.EN["log.protocol_loaded"].split("{")[0] in window.log.toPlainText()
+
+        # Compare against a different document: the log names the field and both
+        # values, which is the whole point of the diff.
+        other = tmp_path / "other.json"
+        changed = window.current_protocol()
+        changed.engine.exhaustiveness = 99
+        protocol.save_protocol(changed, other)
+        window.exhaustiveness.setValue(5)
+        monkeypatch.setattr(
+            QtWidgets.QFileDialog,
+            "getOpenFileName",
+            staticmethod(lambda *a, **k: (str(other), "")),
+        )
+        window._compare_protocol_action()
+        _pump(qapp, 20)
+        log = window.log.toPlainText()
+        assert "engine.exhaustiveness" in log
+        assert "99 -> 5" in log
+    finally:
+        window.close()
+
+
+def test_the_protocol_template_view_says_what_differs(qapp, tmp_path):
+    """'What differs from this template' — before running something expensive."""
+    window = _toolkit_window(qapp, tmp_path)
+    try:
+        templates = protocol.list_templates()
+        if not templates:
+            pytest.skip("no protocol templates are installed")
+        window.inspector.setCurrentWidget(window._protocol_page)
+        _pump(qapp, 20)
+        names = [
+            window.protocol_template.itemData(index)
+            for index in range(window.protocol_template.count())
+        ]
+        assert None in names
+        assert all(template.name in names for template in templates), names
+
+        fast = protocol.template_named("fast-screen")
+        window._apply_protocol_to_widgets(fast)
+        _pump(qapp, 20)
+        window.protocol_template.setCurrentIndex(names.index("fast-screen"))
+        _pump(qapp, 20)
+        # The template's own settings were applied to the widgets, so a protocol
+        # captured now matches it in the fields the GUI holds.
+        captured = window.current_protocol()
+        assert captured.engine.exhaustiveness == fast.engine.exhaustiveness
+        assert "fast-screen" in window.protocol_template_diff.text()
+
+        # A deliberate deviation says how many settings differ, and the tooltip
+        # carries the field-by-field diff with both values.
+        window.exhaustiveness.setValue(int(window.exhaustiveness.value()) + 4)
+        window._refresh_protocol_tab()
+        _pump(qapp, 20)
+        expected = [
+            item
+            for item in protocol.diff_protocols(
+                protocol.template_named("fast-screen"), window.current_protocol()
+            )
+            if item["kind"] == "setting"
+        ]
+        assert expected, "the deviation must be visible"
+        assert str(len(expected)) in window.protocol_template_diff.text()
+        tooltip = window.protocol_template_diff.toolTip()
+        assert "engine.exhaustiveness" in tooltip and "->" in tooltip
+    finally:
+        window.close()
+
+
+def test_the_console_can_reach_the_protocols(qapp, tmp_path):
+    """The keyboard-only path: the same functions the tab and the CLI use."""
+    window = _toolkit_window(qapp, tmp_path)
+    try:
+        window.console.execute("print(current_protocol().name)")
+        assert window.current_protocol().name in window.log.toPlainText()
+        window.console.execute("print([t.name for t in list_templates()][:2])")
+        assert "fast-screen" in window.log.toPlainText() or (
+            "careful-redock" in window.log.toPlainText()
+        )
+        window.console.execute("print(len(current_protocol().hash()))")
+        assert "64" in window.log.toPlainText()
     finally:
         window.close()
 

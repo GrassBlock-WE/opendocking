@@ -152,7 +152,7 @@ documented individually. The number is reported rather than smoothed away.
 ## The tutorial
 
 `odock tutorial` walks the whole toolchain on the bundled 3PTB data — prepare the
-receptor, build the ligand from `demo/library.smi`, choose the box, dock, read the
+receptor, build the ligand from `demo/libraries/library.smi`, choose the box, dock, read the
 ranking, profile the interactions, save a project and verify it reproduces, export
 the report — and prints what each step **measured**. It takes about five seconds,
 writes only under `out/`, is seeded, and asserts the shape of every step, so it

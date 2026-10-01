@@ -26,7 +26,7 @@ from odock import sasa as sasa_module  # noqa: E402
 from odock.gui import surface as surface_module  # noqa: E402
 from odock.gui.structure import read_pdbqt  # noqa: E402
 
-RECEPTOR = ROOT / "demo" / "3ptb" / "receptor.pdbqt"
+RECEPTOR = ROOT / "demo" / "systems" / "3ptb" / "receptor.pdbqt"
 SPACINGS = (1.20, 1.00, 0.80, 0.65, 0.50, 0.40)
 MODES = ("sas", "ses")
 

@@ -539,13 +539,32 @@ class BurialReport:
     ``reference`` is the sentence the numbers have to be read with:
 
     ``"free"``
-        every residue measured **on its own** (its own atoms only). This is the
-        classical folding burial: how much of the residue's surface the rest of
-        the structure — and the partner — covers.
+        every residue measured **on its own** (its own atoms only) — the
+        classical folding burial. The per-residue ``buried_fraction`` is the
+        number to quote from this one, because its denominator is that residue's
+        own isolated area.
     ``"unbound"``
-        the same structure **without the partner** (``other``). This is the
-        binding burial: how much surface the ligand itself hides. It is the
-        number that answers "is this a real contact or a crystal neighbour?".
+        the same structure **without the partner** (``other``) — the binding
+        burial: how much surface the partner itself hides. These are the totals
+        that are internally consistent, and they agree exactly with
+        :func:`interface_area`.
+
+    **Two traps this class guards against**, both of which cost a sibling
+    workstream a −357 kcal/mol nonpolar term before they were found:
+
+    * :attr:`reference_total` is the **sum of the reference areas**, not "the
+      free area of the structure". For ``reference="free"`` that sum is over *N*
+      residues each measured in isolation, so on a 1 994-atom receptor it is
+      58 377 Å² against an intact-receptor SASA of 9 275 Å² — a factor of six,
+      and subtracting it from the complex area is meaningless. Use
+      :attr:`free_structure_area` (``None`` for ``"free"``, exact for
+      ``"unbound"``) or :func:`interface_area` for "how much area did the partner
+      bury".
+    * :attr:`buried_area` and :attr:`buried_fraction` are therefore **``None``**
+      for ``reference="free"``: a per-residue sum has no single comparable total.
+      A caller that wants the folding ΔASA can sum ``residue.buried_area`` over
+      :attr:`residues` (or read :attr:`summed_buried_area`); a caller that wants
+      binding burial should use ``reference="unbound"``.
     """
 
     residues: List[ResidueArea] = field(default_factory=list)
@@ -558,14 +577,52 @@ class BurialReport:
     seconds: float = 0.0
 
     @property
-    def buried_area(self) -> float:
+    def free_structure_area(self) -> Optional[float]:
+        """The intact structure's own area, or ``None`` when it was not measured.
+
+        For ``reference="unbound"`` this is exactly ``sasa_of_atoms(atoms)`` — a
+        property of the structure alone, independent of what it is compared
+        against. For ``reference="free"`` the report never measured the intact
+        structure, so it answers ``None`` rather than something that looks like an
+        area and is not one.
+        """
+        return float(self.reference_total) if self.reference == "unbound" else None
+
+    @property
+    def summed_buried_area(self) -> float:
+        """``Σ (reference_i − area_i)`` over residues, whatever the reference.
+
+        A legitimate quantity — the ΔASA of folding for ``reference="free"`` —
+        but a sum of *per-residue* differences, not a surface. Named so it cannot
+        be mistaken for :attr:`buried_area`.
+        """
+        return float(
+            sum(
+                max(0.0, float(item.reference_area or 0.0) - float(item.area))
+                for item in self.residues
+            )
+        )
+
+    @property
+    def buried_area(self) -> Optional[float]:
+        """What the partner hid, in Å² — ``None`` unless ``reference="unbound"``.
+
+        Only the ``"unbound"`` reference measures one structure twice (with and
+        without the partner), so only there is the difference a surface. For
+        ``reference="free"`` this is ``None`` by design; see the class docstring.
+        """
+        if self.reference != "unbound":
+            return None
         return max(0.0, float(self.reference_total) - float(self.total_area))
 
     @property
-    def buried_fraction(self) -> float:
+    def buried_fraction(self) -> Optional[float]:
+        """The buried fraction of the reference area, or ``None`` (see above)."""
+        if self.reference != "unbound":
+            return None
         if not self.reference_total:
             return 0.0
-        return min(1.0, self.buried_area / float(self.reference_total))
+        return min(1.0, (self.buried_area or 0.0) / float(self.reference_total))
 
     def most_buried(self, count: int = 10) -> List[ResidueArea]:
         """The residues with the largest buried area, largest first."""
@@ -581,8 +638,18 @@ class BurialReport:
             "partner_atoms": self.partner_atoms,
             "total_area": round(float(self.total_area), 2),
             "reference_total": round(float(self.reference_total), 2),
-            "buried_area": round(float(self.buried_area), 2),
-            "buried_fraction": round(float(self.buried_fraction), 4),
+            "free_structure_area": (
+                None
+                if self.free_structure_area is None
+                else round(float(self.free_structure_area), 2)
+            ),
+            "buried_area": (
+                None if self.buried_area is None else round(float(self.buried_area), 2)
+            ),
+            "buried_fraction": (
+                None if self.buried_fraction is None else round(float(self.buried_fraction), 4)
+            ),
+            "summed_buried_area": round(float(self.summed_buried_area), 2),
             "seconds": round(float(self.seconds), 4),
             "residues": [item.as_dict() for item in self.residues],
         }
@@ -596,9 +663,14 @@ class BurialReport:
                 f"{(item.buried_area or 0.0):9.1f} "
                 f"{100.0 * (item.buried_fraction or 0.0):8.1f}"
             )
+        share = (
+            100.0 * self.summed_buried_area / self.reference_total
+            if self.reference_total
+            else 0.0
+        )
         rows.append(
             f"{'TOTAL':<12} {self.total_area:8.1f} "
-            f"{self.buried_area:9.1f} {100.0 * self.buried_fraction:8.1f}"
+            f"{self.summed_buried_area:9.1f} {share:8.1f}"
         )
         return "\n".join(rows)
 
@@ -625,7 +697,10 @@ def burial(
         still meaningful for ``reference="free"``.
     reference:
         ``"free"`` (each residue alone) or ``"unbound"`` (``atoms`` without
-        ``other``). See :class:`BurialReport`.
+        ``other``). See :class:`BurialReport` — in particular, use
+        ``reference="unbound"`` (or :func:`interface_area`) when the question is
+        how much surface the partner buried, because only that reference measures
+        one structure twice.
     """
     started = time.perf_counter()
     atoms = list(atoms)
@@ -757,12 +832,22 @@ def interface_area(
 ) -> Dict[str, float]:
     """The buried area of the *receptor* side of one complex, in Å².
 
-    The receptor SASA is evaluated with and without the ligand. ``radius``
-    limits the receptor to the atoms within that distance of the ligand, which
-    is what makes this affordable on a 3 000-atom protein: the buried surface
-    of a contact is local by construction, so a shell is not an approximation
-    of the answer, it *is* the answer (the test suite pins that the shell and
-    the whole protein agree).
+    **This is the function to use for "how much area did the partner bury"**, on
+    either side of the contact: the receptor SASA is measured twice — alone and
+    with the partner present — and the difference is a surface, not a sum. It
+    agrees exactly with ``burial(receptor, ligand, reference="unbound")``, and a
+    test asserts that agreement so the two can never drift apart.
+
+    ``radius`` limits the receptor to the atoms within that distance of the
+    ligand, which is what makes this affordable on a 3 000-atom protein: the
+    buried surface of a contact is local by construction, so a shell is not an
+    approximation of the answer, it *is* the answer (the test suite pins that the
+    shell and the whole protein agree).
+
+    For the ligand's own hidden area use :func:`ligand_buried_contact_area`. Do
+    **not** subtract ``burial(...).reference_total`` for
+    ``reference="free"`` from anything: that number is the sum of every residue's
+    *isolated* area (see :class:`BurialReport`).
     """
     receptor = list(receptor)
     ligand = list(ligand)

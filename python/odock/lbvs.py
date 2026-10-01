@@ -1432,7 +1432,7 @@ def prefilter(
 def read_targets(path: Union[str, Path]) -> Dict[str, List[Any]]:
     """Read a ``SMILES name target`` file into ``{target: [molecule, ...]}``.
 
-    The format is the one `demo/actives.smi` ships: three whitespace-separated
+    The format is the one `demo/libraries/actives.smi` ships: three whitespace-separated
     fields per line, comments allowed.  Targets keep the order they first appear in,
     so a report over them is reproducible.
     """

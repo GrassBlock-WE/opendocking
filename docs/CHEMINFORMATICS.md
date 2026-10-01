@@ -27,14 +27,14 @@ with the measured error bars.
 
 ## The library every number below comes from
 
-[`demo/library.smi`](../demo/library.smi) — 17 molecules, hand-checked in so a
+[`demo/libraries/library.smi`](../demo/libraries/library.smi) — 17 molecules, hand-checked in so a
 clone can run the whole walk-through offline. Six of them are a benzamidine
 series (the 3PTB ligand and five analogues), nine are drug-like molecules and two
 are deliberate filter failures (triphenylene on LogP, benzoquinone as a PAINS
 quinone).
 
 ```bash
-odock scaffolds -i demo/library.smi
+odock scaffolds -i demo/libraries/library.smi
 ```
 
 ```text
@@ -85,7 +85,7 @@ test: **Tanimoto** `|A∩B| / |A∪B|`, **Dice** `2|A∩B| / (|A|+|B|)` and **Tv
 ### The measured answer to "what looks like benzamidine"
 
 ```bash
-odock similar -q 'N=C(N)c1ccccc1' -i demo/library.smi --cutoff 0.5
+odock similar -q 'N=C(N)c1ccccc1' -i demo/libraries/library.smi --cutoff 0.5
 ```
 
 | rank | molecule | Tanimoto (Morgan r2, 2048 bits) |
@@ -206,7 +206,7 @@ point, and the result is the molecule × R-group matrix a medicinal chemist asks
 for on day one:
 
 ```bash
-odock rgroups -i demo/library.smi --core 'N=C(N)c1ccccc1' --affinities out/3ptb-screen/results.jsonl
+odock rgroups -i demo/libraries/library.smi --core 'N=C(N)c1ccccc1' --affinities out/3ptb-screen/results.jsonl
 ```
 
 | name | affinity | matched | R1 | R2 | R3 |
@@ -260,7 +260,7 @@ series contains.
 ### The worked example
 
 ```bash
-odock rgroups -i demo/library.smi --core 'N=C(N)c1ccccc1' \
+odock rgroups -i demo/libraries/library.smi --core 'N=C(N)c1ccccc1' \
     --affinities out/3ptb-screen/results.jsonl --mmp
 ```
 
@@ -337,7 +337,7 @@ make the 4-hydroxy analogue next. Read the noise and you would not.
 ### Measured: how small a subset can be
 
 ```bash
-odock diverse -i demo/library.smi -n 6
+odock diverse -i demo/libraries/library.smi -n 6
 ```
 
 | method | subset | molecules | worst pair inside | scaffolds covered |
@@ -379,7 +379,7 @@ Representatives are medoids (the member closest to the rest of the cluster), not
 ### `--diverse N` inside a screening campaign
 
 ```bash
-odock screen -r demo/3ptb/receptor.pdbqt -i demo/library.smi --box demo/3ptb/box.json \
+odock screen -r demo/systems/3ptb/receptor.pdbqt -i demo/libraries/library.smi --box demo/systems/3ptb/box.json \
     -o out/3ptb-screen --diverse 6 -e 8 --seed 42
 ```
 
@@ -451,23 +451,23 @@ Read this before quoting any number above.
 
 ```bash
 # fingerprints, similarity and analogues
-odock similar -q 'N=C(N)c1ccccc1' -i demo/library.smi --cutoff 0.5
-odock similar -q 'N=C(N)c1ccccc1' -i demo/library.smi --3d --conformers 8 --cutoff 0.0
+odock similar -q 'N=C(N)c1ccccc1' -i demo/libraries/library.smi --cutoff 0.5
+odock similar -q 'N=C(N)c1ccccc1' -i demo/libraries/library.smi --3d --conformers 8 --cutoff 0.0
 
 # diversity, with the scaffold coverage of the subset
-odock diverse -i demo/library.smi -n 6 -o out/diverse.sdf --json-out out/diverse.json
-odock diverse -i demo/library.smi -n 6 --method sphere --cutoff 0.3
+odock diverse -i demo/libraries/library.smi -n 6 -o out/diverse.sdf --json-out out/diverse.json
+odock diverse -i demo/libraries/library.smi -n 6 --method sphere --cutoff 0.3
 
 # scaffolds, series and the whole chemistry page
-odock scaffolds -i demo/library.smi
-odock scaffolds -i demo/library.smi --affinities out/3ptb-screen/results.jsonl --report
+odock scaffolds -i demo/libraries/library.smi
+odock scaffolds -i demo/libraries/library.smi --affinities out/3ptb-screen/results.jsonl --report
 
 # the R-group matrix and the matched pairs
-odock rgroups -i demo/library.smi --core 'N=C(N)c1ccccc1' \
+odock rgroups -i demo/libraries/library.smi --core 'N=C(N)c1ccccc1' \
     --affinities out/3ptb-screen/results.jsonl --mmp -o out/rgroups.xlsx
 
 # the affinities the deltas above use (≈ 80 s for the 15 survivors)
-odock screen -r demo/3ptb/receptor.pdbqt -i demo/library.smi --box demo/3ptb/box.json \
+odock screen -r demo/systems/3ptb/receptor.pdbqt -i demo/libraries/library.smi --box demo/systems/3ptb/box.json \
     -o out/3ptb-screen -e 8 --seed 42 --jobs 8 --no-poses
 ```
 
@@ -477,7 +477,7 @@ The Python API is the same thing:
 from odock import ligandsim, scaffold
 from odock.chem.ligand import read_ligands
 
-library = read_ligands("demo/library.smi", embed=False)
+library = read_ligands("demo/libraries/library.smi", embed=False)
 fingerprints = ligandsim.fingerprint_set(library, smiles=True)
 
 print(ligandsim.find_analogues("N=C(N)c1ccccc1", fingerprints, cutoff=0.5).table())

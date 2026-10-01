@@ -18,9 +18,9 @@ from odock.gui import bonds as B
 from odock.gui.structure import Atom, parse_pdbqt
 
 ROOT = Path(__file__).resolve().parents[1]
-LIGAND_PDBQT = ROOT / "demo" / "3ptb" / "ligand.pdbqt"
+LIGAND_PDBQT = ROOT / "demo" / "systems" / "3ptb" / "ligand.pdbqt"
 RECEPTOR_PDB = ROOT / "tests" / "data" / "3PTB.pdb"
-RECEPTOR_PDBQT = ROOT / "demo" / "3ptb" / "receptor.pdbqt"
+RECEPTOR_PDBQT = ROOT / "demo" / "systems" / "3ptb" / "receptor.pdbqt"
 
 #: HETATM records that are not part of the protein chain.
 _NOT_PROTEIN = frozenset({"HOH", "BEN", "CA"})

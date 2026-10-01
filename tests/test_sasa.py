@@ -304,6 +304,90 @@ def test_burial_is_a_fraction_between_zero_and_one():
         assert item.buried_area is not None and item.buried_area >= 0.0
 
 
+def test_the_free_reference_total_is_the_sum_of_each_residue_measured_alone():
+    """``reference_total`` is a *sum of isolation events*, and this pins it.
+
+    A sibling workstream read it as "the free receptor's area" and subtracted it
+    from the complex area, producing a −357 kcal/mol nonpolar term: on the
+    bundled 3PTB receptor the sum is 58 377 Å² against an intact-receptor SASA of
+    9 275 Å², because 224 residues are each measured with nothing else present.
+    The equality below is exact, so if this ever changes the test says so.
+    """
+    atoms = _peptide()
+    report = sasa.burial(atoms, reference="free")
+    by_slot = {}
+    for atom in atoms:
+        key = sasa.residue_key(atom)
+        by_slot.setdefault(key, []).append(atom)
+    expected = sum(
+        float(sasa.sasa_of_atoms(members).sum()) for members in by_slot.values()
+    )
+    assert report.reference_total == pytest.approx(expected, rel=1e-12)
+    # ... and it is *larger* than the intact structure's area, which is the
+    # property that makes subtracting it meaningless. On a peptide the factor is
+    # small; on a 1 994-atom receptor it is 6.3.
+    assert report.reference_total > float(sasa.sasa_of_atoms(atoms).sum())
+    assert report.free_structure_area is None
+    assert report.buried_area is None
+    assert report.buried_fraction is None
+    payload = report.as_dict()
+    assert payload["buried_area"] is None
+    assert payload["buried_fraction"] is None
+    assert payload["free_structure_area"] is None
+    # The per-residue sum is still available under a name that says what it is.
+    assert report.summed_buried_area >= 0.0
+
+
+def test_the_unbound_reference_is_a_property_of_the_structure_alone():
+    """What it is compared against must not change the free area.
+
+    This is also the answer to "which is wrong": the ``"unbound"`` reference and
+    :func:`interface_area` agree exactly, so the free area is well defined; only
+    the ``"free"`` *total* is a different quantity.
+    """
+    receptor = _peptide()
+    ligand = [atom("C", 0.0, 4.5, 2.6, res_name="LIG")]
+    with_partner = sasa.burial(receptor, ligand, reference="unbound")
+    without = sasa.burial(receptor, reference="unbound")
+    direct = float(sasa.sasa_of_atoms(receptor).sum())
+    assert with_partner.reference_total == pytest.approx(direct, rel=1e-12)
+    assert without.reference_total == pytest.approx(direct, rel=1e-12)
+    assert with_partner.reference_total == pytest.approx(without.reference_total, rel=1e-12)
+    assert with_partner.free_structure_area == pytest.approx(direct, rel=1e-12)
+    # The partner does move the *complex* area, which is the measurement.
+    assert with_partner.total_area < without.total_area
+
+
+def test_the_unbound_burial_and_interface_area_cannot_drift_apart():
+    """Two public answers to "how much area did the ligand bury": one number.
+
+    ``burial(..., reference="unbound").buried_area`` and
+    ``interface_area(...)["buried_area"]`` compute the same thing by different
+    routes (per-residue grouping versus a single call), so a caller can use
+    either and the documentation can point at both.
+    """
+    receptor = _peptide()
+    ligand = [atom("C", 0.0, 4.5, 2.6, res_name="LIG")]
+    report = sasa.burial(receptor, ligand, reference="unbound")
+    direct = sasa.interface_area(receptor, ligand)
+    assert report.buried_area == pytest.approx(direct["buried_area"], rel=1e-12)
+    assert report.total_area == pytest.approx(direct["complex_area"], rel=1e-12)
+    assert report.free_structure_area == pytest.approx(direct["free_area"], rel=1e-12)
+    # And they agree on an empty partner, where the answer must be zero.
+    alone = sasa.burial(receptor, reference="unbound")
+    assert alone.buried_area == pytest.approx(0.0, abs=1e-9)
+
+
+def test_the_documented_route_to_a_binding_burial_is_the_one_that_works():
+    """The docstrings name the function to use, and the name is stated there."""
+    doc = sasa.interface_area.__doc__ or ""
+    assert "how much area did the partner bury" in doc
+    burial_doc = sasa.burial.__doc__ or ""
+    assert "interface_area" in burial_doc
+    report_doc = sasa.BurialReport.__doc__ or ""
+    assert "58 377" in report_doc and "9 275" in report_doc
+
+
 def test_a_reference_of_free_residue_makes_a_buried_residue_buried():
     """The disulfide sulfur pair buries each other; the free reference sees it."""
     atoms = _peptide()

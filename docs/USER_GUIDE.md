@@ -577,7 +577,7 @@ Everything in it is optional — the CLI and the Python API never import it.
 | left click on an atom | select its residue (shift/ctrl adds) |
 | hover an atom | the read-out card, bottom right, names it |
 | double click | centre the camera on that residue |
-| pose slider / table row | show that mode |
+| pose table row (or ←/→, Home/End) | show that mode |
 | **ctrl** + click a second table row | compare the two poses (see 5.5) |
 | `Ctrl+K` | command palette — every menu action, including every measurement and annotation |
 | `Ctrl+Z` / `Ctrl+Shift+Z` | undo / redo a scene edit (see 5.6) |
@@ -585,10 +585,28 @@ Everything in it is optional — the CLI and the Python API never import it.
 | `Ctrl+Shift+R` | restore the saved session |
 | `F5` / `F6` / `F7` | start / pause-resume / abort the docking run |
 | `Home` | reset the view |
+| typing in the log's `>>>` line | run a Python command against the live session (see 5.7) |
+| `Tab` in that line | complete a bound name; `↑`/`↓` walk the history |
+| `Esc` in that line | hand the keyboard back to the 3-D view |
 
 The search box is edited from the **Grid** tab (centre, size, spacing) and the
 Grid menu; a drag in the 3-D view orbits or pans and never moves the box, so a
 mis-aimed drag can never change what is being docked.
+
+**Visibility contract.** Four things decide what is *drawn*, and they are
+independent of what is *computed*:
+
+| toggle | effect on the drawing |
+|---|---|
+| receptor / ligand visibility | hides the interaction dashes and the focus emphasis too: a line whose far endpoint is not rendered reads as an interaction reaching across the protein, which is exactly the misreading it used to cause |
+| `Analysis ▸ Show interactions` | the only thing that starts drawing contacts; docking and pose browsing report them (pose label, table) but draw nothing |
+| `Analysis ▸ Clear annotations` | stops the drawing again, keeps the data |
+| `View ▸ Interaction lines` | hides kinds; the table still lists them and the heading states how many are hidden |
+
+The HUD legend counts what was detected (so it agrees with the table) and shows
+`detected → drawn` when the per-residue reduction or the kind filter changes the
+drawing. Measurements and annotations are drawn *above* all of it, so an arc or a
+plane is never confused with an interaction dash.
 
 **Rendering note.** The viewport renders with a ModernGL context that it owns
 and blits the image into the widget, rather than sharing Qt's GL context. That
@@ -819,9 +837,9 @@ names what each step will do (`Undo add Angle measurement`). Covered edits:
 * search-box edits (including “there was no box”);
 * the displayed pose.
 
-A **slider drag is one step**, not two hundred: consecutive pose changes within a
-short window coalesce, and undoing goes back to where the drag started while
-redoing lands on its final state. A new edit clears the redo branch, as in every
+A **pose change is one step**, not two hundred: consecutive changes within a short
+window coalesce, so undoing a fast browse returns to where it started while
+redoing lands on the final pose. A new edit clears the redo branch, as in every
 editor. Undo restores the *panels* as well as the scene — the table, the tree,
 the overlays and the labels are all derived from the restored state, which is the
 failure this kind of feature invites and which the test-suite checks explicitly
@@ -832,6 +850,91 @@ Everything on this page is a menu action, so `Ctrl+K` reaches all of it: type
 `dih` to measure a dihedral, `lab` to add a label, `undo` to step back — the
 palette is generated from the menu bar, so it can never drift from what the
 menus offer.
+
+### 5.7 The console, and the language
+
+#### The `>>>` line in the log
+
+The log panel ends in a single input line, so reading and typing happen in one
+place: the output of a command goes into the same view as the docking log, and the
+prompt line is echoed there with `>>>` (a continued block uses `... `).
+
+Why a **Python console bound to the live session** and not a spawned CLI: 
+`odock dock` starts a *new* process and cannot see the receptor you have open, so
+typing CLI lines would mean re-specifying everything on disk and would not replace
+the mouse. A console against the live objects does replace it. The bound names are
+the session itself —
+
+```text
+window  scene  viewport  receptor  ligand  poses  box  interactions
+measurements  annotations
+```
+
+— plus convenience functions named after their CLI counterparts, so someone who
+knows the command line can guess them and someone who prefers the mouse can copy a
+line out of the log:
+
+```python
+>>> set_box_center(2.0, 3.0, 4.0)      # move the search box
+>>> measure("angle", ("receptor", 190), ("receptor", 191), ("receptor", 192))
+>>> annotate("gatekeeper")
+>>> dock(exhaustiveness=8)             # the same run the Docking menu starts
+>>> save_project("pose3.json")
+```
+
+* `help` (or `help()`) lists the bound names, the helpers and the safety note.
+* `Tab` completes a name from that namespace (or an attribute after a dot) and
+  lists the candidates when a prefix is ambiguous; `↑`/`↓` walk the command
+  history; a line ending in `:` continues the block with an indented body.
+* Errors are printed and the session carries on — the console never takes the
+  workbench down with it.
+* **It runs in the workbench process with full access: there is no sandbox.**
+  Treat it like a Python prompt attached to your data, because that is what it is.
+* Every command goes through the same code paths the menus use, so the log, the
+  undo stack and the panels stay in sync: `set_box_center(...)` from the console
+  is one `Ctrl+Z`, exactly like the same change from the Grid tab.
+
+The console does not steal the workbench's keyboard: while the line has focus,
+`Ctrl+Z`, `Ctrl+K`, `F5`–`F7` and the rest still reach the window, and `Esc`
+returns the keyboard to the 3-D view.
+
+#### Why Chinese and English look different — measured
+
+Both languages are laid out from the same widgets, and the difference is
+*typography*, not content width:
+
+| measurement (window 1600×900, bundled 3PTB demo) | English | 简体中文 |
+|---|---|---|
+| `minimumSizeHint().width()` | **912 px** | **912 px** |
+| `minimumSizeHint().height()` | 602 px | 604 px |
+| left / centre / right dock width | 180 / 848 / 560 px | 180 / 848 / 560 px |
+| bottom dock / run monitor | 1063 / 531 px | 1063 / 531 px |
+| Latin `M` advance (app font) | 10 px | 10 px |
+| CJK `测` advance (same font) | 12 px | 12 px |
+| widest content-derived minimum | 183 px, 32 chars (`poses: 6 models …`) | 188 px, 25 chars (`构象：来自 …`) |
+
+The reason is the glyph, not the string: a Chinese label needs far fewer
+characters, but each one is about 20 % wider than a Latin `M`, so 25 full-width
+characters occupy roughly the width of 32 narrow ones. Where the strings are
+short, Chinese is *narrower* — `Measure` (`action.measure`) is 97 px in English and
+48 px in Chinese, `Interaction distances…` is 124 px against 80 px — and the only
+place a Chinese string is wider is a long sentence: the console banner measures
+1082 px in English against 1108 px in Chinese. Neither drives a minimum, because
+long labels wrap or scroll.
+
+The one *font* effect that does matter is fallback, and it is not language
+content: when Qt cannot find a font that covers the CJK range it falls back to one
+whose Latin glyphs are wider too, which is how the same window measured 932 px
+with `QT_QPA_FONTDIR` pointing at a system font directory and 1134 px without it.
+Both figures are measured; the fix is a font directory that has a CJK face, not a
+layout change. With the fonts present, the current floor is 912 px in *both*
+languages, and the test-suite pins it: `tests/test_dashboard.py` asserts
+`minimumSizeHint().width() <= 1000` in each language and re-checks it with a
+restored session.
+
+English is the startup default regardless of the operating system's locale; the
+`View ▸ Language` switch is remembered in the session and in a saved project, so a
+project written in 中文 reopens in 中文.
 
 ---
 

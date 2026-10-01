@@ -36,16 +36,16 @@ for record in summary.ranked(summary.receptor_names[0], limit=10):
 
 The repository bundles a trypsin structure (PDB 3PTB, the same system as the
 re-docking validation), its active-site box, and a small screening library of 17
-molecules (`demo/library.smi`): six benzamidine analogues, nine drug-like
+molecules (`demo/libraries/library.smi`): six benzamidine analogues, nine drug-like
 compounds, one molecule that fails Lipinski's LogP rule and one PAINS quinone.
 
 ### 1.1 Look before you leap
 
 ```bash
 odock screen \
-    -r demo/3ptb/receptor.pdbqt \
-    -i demo/library.smi \
-    --box demo/3ptb/box.json \
+    -r demo/systems/3ptb/receptor.pdbqt \
+    -i demo/libraries/library.smi \
+    --box demo/systems/3ptb/box.json \
     -o out/3ptb-screen \
     --dry-run
 ```
@@ -112,15 +112,15 @@ results, so the campaign itself starts instantly.
 
 ```bash
 odock screen \
-    -r demo/3ptb/receptor.pdbqt \
-    -i demo/library.smi \
-    --box demo/3ptb/box.json \
+    -r demo/systems/3ptb/receptor.pdbqt \
+    -i demo/libraries/library.smi \
+    --box demo/systems/3ptb/box.json \
     -o out/3ptb-screen \
     --exhaustiveness 8 --top 5 --seed 42
 ```
 
 ```text
-=== demo/3ptb/receptor.pdbqt: 15 to dock of 15 (0 already done) ===
+=== demo/systems/3ptb/receptor.pdbqt: 15 to dock of 15 (0 already done) ===
     box BoxSpec(center=(-1.86, 14.37, 16.75), size=(17.9, 19.9, 20.5) Å, V=7319 Å³)
   [######################]    15/15    100.0%  ok 15    failed 0     0.14/s  ETA    0:00  best  -7.338
 OpenDocking screen — 1 receptor(s) x 15 molecule(s)
@@ -131,7 +131,7 @@ filters: 17 read -> 15 kept (2 removed by Lipinski/Veber/PAINS)
   Veber          0 failed this filter (0 first here)
   PAINS          1 failed this filter (1 first here)
 
-=== demo/3ptb/receptor.pdbqt ===
+=== demo/systems/3ptb/receptor.pdbqt ===
 15 of 15 docked
 rank  name                affinity  MW     LE    tors  poses  key residues
 ----  ------------------  --------  -----  ----  ----  -----  ---------------------------------------------
@@ -181,9 +181,9 @@ Spearman rho.
 
 ```bash
 odock screen \
-    -r demo/3ptb/receptor.pdbqt \
-    -i demo/library.smi \
-    --box demo/3ptb/box.json \
+    -r demo/systems/3ptb/receptor.pdbqt \
+    -i demo/libraries/library.smi \
+    --box demo/systems/3ptb/box.json \
     -o out/3ptb-screen \
     --exhaustiveness 8 --top 6 --consensus --seed 42
 ```
@@ -249,7 +249,7 @@ The cost is one exact scoring pass per pose of the shortlist under each field
 ### 1.4 Look at the hits
 
 ```bash
-odock gui -r demo/3ptb/receptor.pdbqt -p out/3ptb-screen/top_receptor.pdbqt
+odock gui -r demo/systems/3ptb/receptor.pdbqt -p out/3ptb-screen/top_receptor.pdbqt
 odock cluster -p out/3ptb-screen/top_receptor.pdbqt --cutoff 2.0
 odock report  -p out/3ptb-screen/poses/receptor/000015_warfarin.pdbqt -o warfarin.xlsx
 ```
@@ -261,7 +261,7 @@ the same command again:
 
 ```text
 resume: 7 molecule x receptor row(s) already in results.jsonl
-=== demo/3ptb/receptor.pdbqt: 8 to dock of 15 (7 already done) ===
+=== demo/systems/3ptb/receptor.pdbqt: 8 to dock of 15 (7 already done) ===
 ```
 
 Resuming is the **default** when the output directory already holds results. A
@@ -450,7 +450,7 @@ with its `poses` and `interactions` lists shortened):
 ```json
 {
   "receptor": "receptor", "ligand": "library.smi#1", "name": "benzamidine",
-  "source": "demo/library.smi", "index": 0, "status": "ok",
+  "source": "demo/libraries/library.smi", "index": 0, "status": "ok",
   "affinity": -5.900566019865151,
   "n_heavy": 9, "n_atoms": 12, "n_torsions": 1,
   "molecular_weight": 120.155,
@@ -514,7 +514,7 @@ restart reports:
 
 ```text
 resume: 3 molecule x receptor row(s) already in results.jsonl
-=== demo/3ptb/receptor.pdbqt: 12 to dock of 15 (3 already done) ===
+=== demo/systems/3ptb/receptor.pdbqt: 12 to dock of 15 (3 already done) ===
 ```
 
 If the results file survives but `run.json` does not (a run killed by an older

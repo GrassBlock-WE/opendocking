@@ -416,7 +416,7 @@ def test_the_ruler_paints_and_keeps_its_pixels(qapp):
 # the window: selection -> 3-D highlight -> atom list -> Copy as PDBQT
 # ---------------------------------------------------------------------------
 
-DEMO = Path(__file__).resolve().parent.parent / "demo" / "3ptb"
+DEMO = Path(__file__).resolve().parent.parent / "demo" / "systems" / "3ptb"
 
 
 @pytest.fixture()
@@ -759,7 +759,11 @@ def test_the_pose_dock_sits_side_by_side_and_can_stack(window):
     # and the summary label that used to share its row now spans it.
     assert left.findChild(QtWidgets.QSlider) is None
     assert window.lbl_pose.parent() is left
-    assert right is window.log
+    # The right side is the log panel: the log itself plus the console input line
+    # under it, so reading and typing happen in one place.
+    assert right is window.log_panel
+    assert window.log.parent() is window.log_panel
+    assert window.console.parent() is window.console_row
 
     window.stack_action.setChecked(True)
     qapp = QtWidgets.QApplication.instance()

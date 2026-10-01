@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "opendocking"
-version = "0.2.2"
+version = "0.3.0"
 description = "odock — a modern, open-source molecular docking toolchain (Rust core + Python workbench)"
 readme = "README.md"
 # PEP 639: an SPDX expression plus the files that carry the licence text.  The
@@ -105,6 +105,18 @@ exclude = [
     "scratch/*",
     "pytest-of-*/*",
     "tmp*/*",
+    # A headless-browser profile directory that leaked into the working directory:
+    # four `odock-chrome-*` directories reached the published 0.2.1 tree from the PDF
+    # path's Chrome profile.  The family is excluded, not the four names -- the prefix
+    # has already changed once (odock-chrome- -> odock-report-) and Chrome makes
+    # chrome_*, scoped_dir* and Crashpad* directories of its own.  `.gitignore` denies
+    # the same family, and `tools/inspect_dist.py` fails an artefact that carries one.
+    "odock-chrome-*/*",
+    "odock-report-*/*",
+    "odock-ensemble-*/*",
+    "chrome_*/*",
+    "scoped_dir*/*",
+    "Crashpad*/*",
 ]
 # `odock/*` is deliberately NOT in the list above.  `exclude` is not
 # format-scoped: it applies to the wheel as well, and in a wheel `odock/` *is* the
@@ -134,7 +146,7 @@ include = [
     { path = "examples/*", format = "sdist" },
     { path = "tools/*", format = "sdist" },
     { path = "benchmark/*", format = "sdist" },
-    { path = "demo/library.smi", format = "sdist" },
+    { path = "demo/libraries/library.smi", format = "sdist" },
     { path = "CONTRIBUTING.md", format = "sdist" },
     { path = "Makefile", format = "sdist" },
     { path = ".pre-commit-config.yaml", format = "sdist" },

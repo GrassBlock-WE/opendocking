@@ -20,8 +20,8 @@ small-molecule workflow:
 
 ```bash
 # build a model from the benzamidine series and screen the demo library with it
-odock pharmacophore build -i demo/library.smi --core 'N=C(N)c1ccccc1' -o model.json
-odock pharmacophore screen -m model.json -i demo/library.smi --actives actives.smi
+odock pharmacophore build -i demo/libraries/library.smi --core 'N=C(N)c1ccccc1' -o model.json
+odock pharmacophore screen -m model.json -i demo/libraries/library.smi --actives actives.smi
 odock pharmacophore show -m model.json
 ```
 
@@ -40,7 +40,7 @@ The demo library's five ring-amidines (the 3PTB ligand benzamidine and four
 analogues) are a series, so they are evidence about the trypsin S1 pocket:
 
 ```bash
-odock pharmacophore build -i demo/library.smi --core 'N=C(N)c1ccccc1' -o model.json
+odock pharmacophore build -i demo/libraries/library.smi --core 'N=C(N)c1ccccc1' -o model.json
 ```
 
 ```text
@@ -90,7 +90,7 @@ the information that makes them comparable.
 ## 2. Screening, measured
 
 ```bash
-odock pharmacophore screen -m model.json -i demo/library.smi --conformers 4
+odock pharmacophore screen -m model.json -i demo/libraries/library.smi --conformers 4
 ```
 
 | rank | molecule | fit | matched | shape | how it was placed |
@@ -150,7 +150,7 @@ first one embedded.
 ## 3. Enrichment, and how little it proves
 
 ```bash
-odock pharmacophore screen -m model.json -i demo/library.smi --actives actives.smi
+odock pharmacophore screen -m model.json -i demo/libraries/library.smi --actives actives.smi
 ```
 
 ```text
@@ -250,7 +250,7 @@ receptor, not of the ligand, so it cannot be part of a ligand-derived model.
 ## 7. Reproducing the numbers
 
 ```bash
-LIB=demo/library.smi
+LIB=demo/libraries/library.smi
 CORE='N=C(N)c1ccccc1'
 
 # the model (5 of 17 members contain that core; the other 12 are reported)
@@ -268,7 +268,7 @@ python - <<'PY'
 from odock import pharmacophore as P
 from odock.chem.ligand import read_ligands
 
-library = read_ligands("demo/library.smi", embed=False)
+library = read_ligands("demo/libraries/library.smi", embed=False)
 amidines = [m for m in library
             if m.GetProp("_Name") in ("benzamidine", "benzamidine_methyl",
                                       "hydroxybenzamidine", "fluorobenzamidine",

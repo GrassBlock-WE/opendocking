@@ -40,8 +40,8 @@ from odock.screen import (  # noqa: E402
 )
 
 ROOT = Path(__file__).resolve().parent.parent
-DEMO_3PTB = ROOT / "demo" / "3ptb"
-DEMO_LIBRARY = ROOT / "demo" / "library.smi"
+DEMO_3PTB = ROOT / "demo" / "systems" / "3ptb"
+DEMO_LIBRARY = ROOT / "demo" / "libraries" / "library.smi"
 
 
 # ---------------------------------------------------------------------------
@@ -146,7 +146,7 @@ def campaign(demo_3ptb, screen_library, tmp_path_factory):
 def test_grid_points_reproduces_the_kernel_figure(demo_box):
     """The estimate must count grid samples exactly as `odock dock` does."""
     assert grid_points(demo_box) == 150_920  # what the 3PTB demo run reports
-    egfr = odock.BoxSpec(**json.loads((ROOT / "demo" / "egfr" / "box.json").read_text()))
+    egfr = odock.BoxSpec(**json.loads((ROOT / "demo" / "systems" / "1m17" / "box.json").read_text()))
     assert grid_points(egfr) == 95_550
 
 
@@ -361,14 +361,14 @@ def test_the_cli_runs_a_campaign_and_reports_it(
 
 
 def test_the_bundled_library_is_the_documented_example(demo_3ptb, tmp_path, capsys):
-    """`odock screen -r ... -i demo/library.smi --box ... -o ...` must work.
+    """`odock screen -r ... -i demo/libraries/library.smi --box ... -o ...` must work.
 
     docs/SCREENING.md quotes the funnel figures of this exact command, so they are
     pinned here: 17 molecules read, 15 kept, one removed by each of Lipinski and
     PAINS.
     """
     if not DEMO_LIBRARY.exists():
-        pytest.skip("demo/library.smi is missing")
+        pytest.skip("demo/libraries/library.smi is missing")
     code, out, _err = run_cli(
         screen_argv(demo_3ptb, DEMO_LIBRARY, tmp_path / "bundled", "--dry-run"), capsys
     )
@@ -505,7 +505,7 @@ def test_an_interrupted_run_keeps_the_completed_molecules(
 
 
 def test_one_bad_molecule_does_not_stop_the_run(demo_3ptb, tmp_path, capsys):
-    ligand = (ROOT / "demo" / "3ptb" / "ligand.pdbqt").read_text(encoding="utf-8")
+    ligand = (ROOT / "demo" / "systems" / "3ptb" / "ligand.pdbqt").read_text(encoding="utf-8")
     broken = ligand.replace("TORSDOF 1", "REMARK deliberately broken")
     library = tmp_path / "mixed.pdbqt"
     library.write_text(
@@ -570,7 +570,7 @@ def test_a_box_that_misses_the_receptor_is_refused(demo_3ptb, screen_library, tm
 
 def test_a_receptor_that_does_not_match_the_box_is_refused(demo_3ptb, screen_library, tmp_path, capsys):
     """The classic mistake: a box from another structure (here, EGFR's)."""
-    egfr = ROOT / "demo" / "egfr"
+    egfr = ROOT / "demo" / "systems" / "1m17"
     if not (egfr / "receptor.pdbqt").exists():
         pytest.skip("the bundled EGFR demo is missing")
     argv = [

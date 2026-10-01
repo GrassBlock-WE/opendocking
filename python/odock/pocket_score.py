@@ -498,6 +498,7 @@ def _score_arrays(
     shape_weight: float,
     electrostatic: bool,
     size_factor: float = 1.0,
+    objective=None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """``(combined, shape, esp, contact, clash, exposed)`` for a batch of poses.
 
@@ -514,6 +515,15 @@ def _score_arrays(
     ``size_factor`` multiplies the result: it is 1.0 unless the pocket carries a
     :data:`DEFAULT_SIZE_REFERENCE`, in which case it is the Gaussian size
     complementarity of the ligand against the pocket's known binder.
+
+    ``objective`` is an optional **vectorised** hook that replaces the final combination,
+    so a caller can put extra physics *inside the search* instead of re-scoring the winner
+    afterwards.  It is called as ``objective(shape, esp_term, combined, shape_values)``
+    with ``(k,)`` arrays and the ``(k, n)`` field values, and must return a ``(k,)`` array
+    — higher is better, matching ``combined``.  With ``objective=None`` (the default) the
+    result is **bit-identical to the combination above**, which is why adding the hook
+    cannot change any existing score.  See `docs/FRAGMENTS.md` §5 for why a term that is
+    not in the search objective cannot affect the search.
     """
     clashing = shape_values < -_CLASH_TOLERANCE
     in_contact = (~clashing) & (shape_values <= float(contact_margin))
@@ -536,7 +546,16 @@ def _score_arrays(
         esp_term = np.clip(-esp / float(esp_reference), 0.0, 1.0)
         combined = float(shape_weight) * shape + (1.0 - float(shape_weight)) * esp_term
     else:
+        esp_term = np.clip(-esp / float(esp_reference), 0.0, 1.0) \
+            if float(esp_reference) > 0.0 else np.zeros_like(esp)
         combined = shape
+    if objective is not None:
+        # The hook sees the same field values the terms were built from, so a penalty for
+        # a deep overlap or a buried polar atom can be computed per pose without a second
+        # sampling pass over the pocket.
+        combined = np.asarray(
+            objective(shape, esp_term, combined, shape_values), dtype=float
+        ).reshape(-1)
     return combined, shape, esp, contact, clash, exposed_count
 
 
@@ -626,6 +645,7 @@ def place_and_score(
     esp_reference: float = DEFAULT_ESP_REFERENCE,
     shape_weight: float = SHAPE_WEIGHT,
     electrostatic: bool = True,
+    objective=None,
 ) -> PoseScore:
     """Place a conformer in the pocket and score the best pose found.
 
@@ -636,6 +656,12 @@ def place_and_score(
     ``translation_step · 2^-level`` Å, the centroid clamped inside the box).  It is a
     rigid-body search against a *fixed* receptor: no induced fit, no flexible
     sidechains, and the answer is ``max over the poses that were tried``.
+
+    ``objective`` is the optional vectorised hook of :func:`_score_arrays`, and it is how
+    a caller puts extra physics **into the search** rather than re-scoring the winner
+    afterwards: the pose kept is the one that maximises the hook, and the returned
+    ``combined`` is that maximised value while ``shape`` and ``esp`` stay the raw terms.
+    Absent, the score is exactly what it was.
     """
     coords = np.asarray(coords, dtype=float).reshape(-1, 3)
     charges = np.asarray(charges, dtype=float).reshape(-1)
@@ -661,6 +687,7 @@ def place_and_score(
             shape_values, esp_values, charges, contact_margin=contact_margin,
             esp_reference=esp_reference, shape_weight=shape_weight,
             electrostatic=electrostatic, size_factor=size_factor,
+            objective=objective,
         )
 
     combined, shape, esp, contact, clash, exposed = evaluate(rotations, translations)

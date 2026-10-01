@@ -18,8 +18,8 @@ from gui_robot import Robot  # noqa: E402
 
 robot = Robot(output_dir=ROOT / "out" / "timing")
 window = robot.window
-window.load_receptor(str(ROOT / "demo" / "3ptb" / "receptor.pdbqt"))
-window.load_ligand(str(ROOT / "demo" / "3ptb" / "ligand.pdbqt"))
+window.load_receptor(str(ROOT / "demo" / "systems" / "3ptb" / "receptor.pdbqt"))
+window.load_ligand(str(ROOT / "demo" / "systems" / "3ptb" / "ligand.pdbqt"))
 robot.pump(300)
 window._fit_box_to_ligand()
 window.exhaustiveness.setValue(2)

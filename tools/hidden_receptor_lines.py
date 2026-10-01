@@ -77,8 +77,8 @@ def main() -> int:
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     window = DockingWorkbench()
     window.resize(WIDTH, HEIGHT)
-    window.load_receptor(str(ROOT / "demo" / "3ptb" / "receptor.pdbqt"))
-    window.load_ligand(str(ROOT / "demo" / "3ptb" / "ligand.pdbqt"))
+    window.load_receptor(str(ROOT / "demo" / "systems" / "3ptb" / "receptor.pdbqt"))
+    window.load_ligand(str(ROOT / "demo" / "systems" / "3ptb" / "ligand.pdbqt"))
     window.scene.interactions = list(
         analysis.profile_interactions(
             window.scene.receptor, window.scene.ligand, **window.interaction_thresholds

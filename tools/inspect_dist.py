@@ -72,7 +72,7 @@ SDIST_REQUIRED: Sequence[Tuple[str, Tuple[str, ...]]] = (
     ("the README", ("README.md",)),
     ("the licence", ("LICENSE",)),
     ("the contribution guide", ("CONTRIBUTING.md",)),
-    ("the demo library", ("demo/library.smi",)),
+    ("the demo library", ("demo/libraries/library.smi",)),
     ("the benchmark baseline", ("benchmark/baseline.json",)),
     ("the release automation", (".github/workflows/ci.yml", "Makefile")),
 )
@@ -336,7 +336,7 @@ _FAKE_SDIST: Tuple[str, ...] = (
     "python/odock/__init__.py", "python/odock/cli.py",
     "docs/USER_GUIDE.md", "docs/SCREENING.md",
     "tests/conftest.py", "tests/data/3PTB.pdb",
-    "examples/make_demo.py", "demo/library.smi", "benchmark/baseline.json",
+    "examples/make_demo.py", "demo/libraries/library.smi", "benchmark/baseline.json",
     ".github/workflows/ci.yml",
 )
 

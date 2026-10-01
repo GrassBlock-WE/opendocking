@@ -33,7 +33,7 @@ from odock.analysis import (
 
 ROOT = Path(__file__).resolve().parent.parent
 PDB_3PTB = ROOT / "tests" / "data" / "3PTB.pdb"
-DEMO_POSES = ROOT / "demo" / "3ptb" / "poses.pdbqt"
+DEMO_POSES = ROOT / "demo" / "systems" / "3ptb" / "poses.pdbqt"
 
 
 @dataclass

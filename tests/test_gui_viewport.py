@@ -616,7 +616,7 @@ def test_style_shots_opt_in(qapp):
     group hidden, so the geometry of the style under test is what fills the
     frame. The images are meant to be looked at, not asserted.
     """
-    demo = Path(__file__).resolve().parent.parent / "demo" / "3ptb"
+    demo = Path(__file__).resolve().parent.parent / "demo" / "systems" / "3ptb"
     receptor = (demo / "receptor.pdbqt").read_text(encoding="utf-8")
     ligand = (demo / "ligand.pdbqt").read_text(encoding="utf-8")
     out = Path(__file__).resolve().parent.parent / "out" / "styles"
@@ -1144,8 +1144,8 @@ def test_the_box_fill_never_paints_over_an_atom_in_front_of_it(qapp):
     one of them was tinted, which is what hid the receptor.
     """
     root = Path(__file__).resolve().parent.parent
-    receptor = root / "demo" / "3ptb" / "receptor.pdbqt"
-    ligand = root / "demo" / "3ptb" / "ligand.pdbqt"
+    receptor = root / "demo" / "systems" / "3ptb" / "receptor.pdbqt"
+    ligand = root / "demo" / "systems" / "3ptb" / "ligand.pdbqt"
     if not (receptor.exists() and ligand.exists()):  # pragma: no cover - data guard
         pytest.skip("the bundled 3PTB files are not present")
 
@@ -1218,9 +1218,9 @@ def test_the_interaction_dashes_are_visible_not_hairlines(qapp):
     order of magnitude more than that.
     """
     root = Path(__file__).resolve().parent.parent
-    receptor = root / "demo" / "3ptb" / "receptor.pdbqt"
-    ligand = root / "demo" / "3ptb" / "ligand.pdbqt"
-    poses = root / "demo" / "3ptb" / "poses.pdbqt"
+    receptor = root / "demo" / "systems" / "3ptb" / "receptor.pdbqt"
+    ligand = root / "demo" / "systems" / "3ptb" / "ligand.pdbqt"
+    poses = root / "demo" / "systems" / "3ptb" / "poses.pdbqt"
     if not (receptor.exists() and ligand.exists() and poses.exists()):
         pytest.skip("the bundled 3PTB files are not present")  # pragma: no cover
 
@@ -1270,9 +1270,9 @@ def test_the_interaction_dashes_are_visible_not_hairlines(qapp):
 def test_the_emphasis_suppresses_the_base_spheres_it_replaces(qapp):
     """A focused residue drawn twice is what buried the ball-and-stick."""
     root = Path(__file__).resolve().parent.parent
-    receptor = root / "demo" / "3ptb" / "receptor.pdbqt"
-    ligand = root / "demo" / "3ptb" / "ligand.pdbqt"
-    poses = root / "demo" / "3ptb" / "poses.pdbqt"
+    receptor = root / "demo" / "systems" / "3ptb" / "receptor.pdbqt"
+    ligand = root / "demo" / "systems" / "3ptb" / "ligand.pdbqt"
+    poses = root / "demo" / "systems" / "3ptb" / "poses.pdbqt"
     if not (receptor.exists() and ligand.exists() and poses.exists()):
         pytest.skip("the bundled 3PTB files are not present")  # pragma: no cover
 

@@ -371,7 +371,7 @@ def test_the_gitignore_engine_agrees_with_the_verify_script():
         "python/odock/__pycache__/m.pyc",
         "tmp123/file.txt",
         "tmpfile.txt",
-        "demo/3ptb/vina.exe",
+        "demo/systems/3ptb/vina.exe",
         ".venv/Lib/site-packages/x.py",
         "docs/PROJECTS.md",
         "readme.log",
@@ -388,10 +388,72 @@ def test_stage_refuses_while_stray_temp_entries_exist(tmp_path):
     with pytest.raises(release.ReleaseError) as excinfo:
         release.stage_release(root, tmp_path / "staged", dry_run=True)
     message = str(excinfo.value)
-    assert "2 stray temp entries" in message
+    assert "2 generated entries" in message
     assert "tmpabc" in message and "tmpdef.txt" in message
+    assert "a temporary directory or file" in message
     assert "--basetemp" in excinfo.value.fix
-    assert "--basetemp" in excinfo.value.fix or "TMPDIR" in excinfo.value.fix
+    assert "TMPDIR" in excinfo.value.fix
+
+
+def test_stage_refuses_a_browser_profile_directory(tmp_path):
+    """The leak that reached the published 0.2.1 tree: four `odock-chrome-*`
+    directories from the PDF path's Chrome profile.  The refusal names the family,
+    not the four names, so the next prefix is caught too."""
+    root = _tree(tmp_path)
+    (root / "odock-chrome-hylyoa4p").mkdir()
+    (root / "odock-chrome-hylyoa4p" / "settings.dat").write_bytes(b"x")
+    with pytest.raises(release.ReleaseError) as excinfo:
+        release.stage_release(root, tmp_path / "staged", dry_run=True)
+    message = str(excinfo.value)
+    assert "1 generated entry" in message
+    assert "odock-chrome-hylyoa4p" in message
+    assert "headless-browser profile directory" in message
+    assert "." not in message.split(":")[0]  # the entry is named, not just counted
+
+
+def test_every_debris_family_is_recognised():
+    """The families, including the one that already renamed itself once."""
+    for name in ("tmpabc", "tmp.log", "odock-chrome-abc12345", "odock-report-xyz",
+                 "odock-ensemble-1", "chrome_debug", "scoped_dir999", "CrashpadMetrics"):
+        assert release.stray_generated_entries  # the function exists
+        assert any(prefix for prefix, _ in release.GENERATED_ROOT_PREFIXES
+                   if name.startswith(prefix)), name
+    # And a legitimate root entry is not debris.
+    for name in ("docs", "python", "README.md", "out", "scratch"):
+        assert not any(name.startswith(prefix)
+                       for prefix, _ in release.GENERATED_ROOT_PREFIXES), name
+
+
+def test_the_staged_listing_is_grouped_by_top_level_entry(tmp_path):
+    """The human control the leak was missing: what is about to ship, by entry."""
+    root = _tree(tmp_path)
+    result = release.stage_release(root, tmp_path / "staged", dry_run=True)
+    entries = {name for name, _, _ in result.listing}
+    assert {"docs", "python", "crates"} <= entries
+    totals = {name: (files, size) for name, files, size in result.listing}
+    assert totals["docs"][0] >= 1 and totals["docs"][1] > 0
+    # Every published file is accounted for exactly once.
+    assert sum(files for _, files, _ in result.listing) == result.files
+    text = result.text()
+    assert "WHAT WILL BE PUBLISHED" in text
+    assert "anything here you do not recognise is a leak" in text
+    payload = result.as_dict()
+    assert payload["entries"] and payload["entries"][0]["entry"]
+
+
+def test_the_listing_shows_a_debris_entry_that_got_past_the_rules(tmp_path, monkeypatch):
+    """A gate catches what it was told about; the listing is what a human reads.  If a
+    debris directory ever became publishable, it must be visible in the list."""
+    root = _tree(tmp_path)
+    ghost = root / "odock-chrome-hylyoa4p"
+    ghost.mkdir()
+    (ghost / "settings.dat").write_bytes(b"x")
+    (root / ".gitignore").write_text("out/\nscratch/\n", encoding="utf-8")
+    # Pretend the deny rules did not exist: the file is in the published set.
+    monkeypatch.setattr(release, "stray_generated_entries", lambda root: [])
+    result = release.stage_release(root, tmp_path / "staged", dry_run=True)
+    assert "odock-chrome-hylyoa4p" in {name for name, _, _ in result.listing}
+    assert "odock-chrome-hylyoa4p" in result.text()
 
 
 def test_stage_writes_exactly_the_published_set(tmp_path):
@@ -1435,7 +1497,25 @@ def test_cli_release_stage_refuses_on_stray_temp(tmp_path, capsys):
     root = _tree(tmp_path)
     (root / "tmpstray").mkdir()
     assert main(["release", "stage", str(tmp_path / "out"), "--root", str(root)]) == 2
-    assert "stray temp" in capsys.readouterr().err
+    assert "generated entry" in capsys.readouterr().err
+
+
+def test_cli_release_stage_prints_what_will_be_published(tmp_path, capsys):
+    """The review step: the grouped listing is printed, and it is what a maintainer
+    reads before `publish` (`docs/RELEASE.md` makes that a required step)."""
+    from odock.cli import main
+
+    root = _tree(tmp_path)
+    assert main(["release", "stage", str(tmp_path / "staged"), "--root", str(root)]) == 0
+    out = capsys.readouterr().out
+    assert "WHAT WILL BE PUBLISHED" in out
+    assert "docs" in out and "python" in out
+    assert "read this before `release publish`" in out
+    # The JSON form carries the same grouping, so a script can review it too.
+    assert main(["release", "stage", str(tmp_path / "staged2"), "--root", str(root),
+                 "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert {entry["entry"] for entry in payload["entries"]} >= {"docs", "python"}
 
 
 def test_cli_release_check_writes_a_report(tmp_path, capsys, monkeypatch):

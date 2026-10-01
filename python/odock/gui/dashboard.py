@@ -2353,10 +2353,12 @@ class ConsoleInput(QtWidgets.QLineEdit):
         if _needs_continuation(source):
             # A trailing colon (or an unclosed bracket) means the block is not
             # finished: the classic ``for x in y:`` plus an indented body.
+            self.promptChanged.emit(self.prompt())
             return line
         self._history.append(source)
         self._history_index = len(self._history)
         self._buffer = []
+        self.promptChanged.emit(self.prompt())
         self._executor(source)
         return source
 
@@ -2417,6 +2419,9 @@ class ConsoleInput(QtWidgets.QLineEdit):
 
     #: Emitted with the candidate list when Tab cannot complete a single name.
     completionHint = QtCore.pyqtSignal(str)
+
+    #: Emitted with the prompt to show: `>>>` or the continuation `... `.
+    promptChanged = QtCore.pyqtSignal(str)
 
     # -- events -------------------------------------------------------------
 

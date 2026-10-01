@@ -7,8 +7,8 @@ potential, sampled from one structure, and a rigid-body placement of each confor
 inside them.
 
 ```bash
-odock pocket-score -r demo/3ptb/receptor.pdbqt -i demo/library.smi \
-    --box demo/3ptb/box.json --reference-ligand demo/3ptb/ligand.pdbqt \
+odock pocket-score -r demo/systems/3ptb/receptor.pdbqt -i demo/libraries/library.smi \
+    --box demo/systems/3ptb/box.json --reference-ligand demo/systems/3ptb/ligand.pdbqt \
     --keep 0.05 --actives benzamidine --actives hydroxybenzamidine --json-out out/pocket.json
 ```
 
@@ -55,7 +55,7 @@ Measured on this machine:
 |---|---|
 | `pocket_score` on given coordinates (9-atom ligand) | **182 µs/pose** |
 | `place_and_score`, the full rigid search | **10 ms** per conformer (689 poses, **15 µs/pose** in one batch) |
-| ranking `demo/library.smi` (17 molecules, 2 conformers, 13 516 poses) | **0.8 s** |
+| ranking `demo/libraries/library.smi` (17 molecules, 2 conformers, 13 516 poses) | **0.8 s** |
 
 The batch is where the speed comes from: the search scores 48-64 poses per array
 operation, so the per-pose cost falls from 182 µs to 15 µs.  Scaling with pocket size
@@ -78,7 +78,7 @@ the measurement:**
 
 ## 3. Validation: the correlation with the docked affinity
 
-`demo/3ptb/result.json` holds the re-docking validation of the 3PTB ligand: four
+`demo/systems/3ptb/result.json` holds the re-docking validation of the 3PTB ligand: four
 benzamidine poses with Vina affinities from −6.21 to −4.51 kcal/mol.  Scoring each
 pose gives:
 
@@ -157,7 +157,7 @@ from the nearest Asp189 oxygen.
 
 ## 4. An honest use case: a pre-filter before docking
 
-Ranking `demo/library.smi` (17 molecules, the five ring-amidines are the documented
+Ranking `demo/libraries/library.smi` (17 molecules, the five ring-amidines are the documented
 trypsin binders) and cutting, against the 2-D fingerprint filter on the same library:
 
 | keep | molecules kept | pocket: binders kept | pocket recall | fingerprint recall |

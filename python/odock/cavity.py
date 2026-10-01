@@ -199,8 +199,10 @@ class Pocket:
     points: int
     centre: Tuple[float, float, float]
     extent: Tuple[float, float, float]
-    #: Number of separate openings to the bulk solvent (0 for enclosed).
-    openings: int
+    #: Number of separate openings to the bulk solvent: ``0`` for an enclosed
+    #: void, and always ``None`` for an open one. See :func:`_aperture` for why
+    #: the count is **not reported** rather than guessed.
+    openings: Optional[int]
     #: Radius of the narrowest ball that still passes through the aperture, Å.
     #: ``None`` for an enclosed void.
     bottleneck_radius: Optional[float]
@@ -220,6 +222,11 @@ class Pocket:
     #: The atoms nearest to the pocket's core, for a caller that wants to draw
     #: or select them.
     atom_indices: List[int] = field(default_factory=list)
+    #: True when this pocket only qualified because ``min_directions`` was
+    #: lowered: it is open at *both* ends, i.e. a **channel** rather than a
+    #: pocket. It travels into the legend and the export so that a picture of an
+    #: ATP site and a picture of a bore cannot be mistaken for each other.
+    channel: bool = False
 
     def as_dict(self) -> Dict[str, object]:
         return {
@@ -229,12 +236,13 @@ class Pocket:
             "points": int(self.points),
             "centre": [round(float(v), 2) for v in self.centre],
             "extent": [round(float(v), 2) for v in self.extent],
-            "openings": int(self.openings),
+            "openings": None if self.openings is None else int(self.openings),
             "bottleneck_radius": (
                 None if self.bottleneck_radius is None else round(float(self.bottleneck_radius), 2)
             ),
             "bottleneck_residues": list(self.bottleneck_residues),
             "lining_residues": list(self.lining_residues),
+            "channel": bool(self.channel),
             "hydrophobicity": round(float(self.hydrophobicity), 3),
             "enclosure": round(float(self.enclosure), 3),
             "geometric_score": round(float(self.geometric_score), 3),
@@ -270,6 +278,10 @@ class CavityReport:
     #: behaviour on a structure is inspectable rather than assumed.
     direction_histogram: Dict[int, int] = field(default_factory=dict)
     seconds: float = 0.0
+    #: ``(label, kind, cells)`` for every pocket, kept so a caller can ask which
+    #: pocket a point lines (:func:`classify_points`) without re-running the
+    #: analysis. The cells are grid indices, a few thousand entries per pocket.
+    pocket_cells: List[Tuple[str, str, np.ndarray]] = field(default_factory=list)
     #: How many labellings and how long the aperture search took, in seconds.
     aperture_seconds: float = 0.0
 
@@ -286,10 +298,11 @@ class CavityReport:
         ]
         for pocket in self.pockets[:limit]:
             neck = "  —  " if pocket.bottleneck_radius is None else f"{pocket.bottleneck_radius:5.2f}"
+            mouths = " — " if pocket.openings is None else str(pocket.openings)
             lining = ", ".join(pocket.lining_residues[:4])
             rows.append(
                 f"{pocket.label:<11} {pocket.kind:<9} {pocket.volume:>7.1f} "
-                f"{pocket.openings:>4}  {neck}  {pocket.geometric_score:>5.2f}  "
+                f"{mouths:>4}  {neck}  {pocket.geometric_score:>5.2f}  "
                 f"({pocket.centre[0]:>5.1f},{pocket.centre[1]:>6.1f},"
                 f"{pocket.centre[2]:>6.1f})  {lining}"
             )
@@ -352,6 +365,43 @@ def sphere_fibonacci(count: int) -> np.ndarray:
     from .sasa import sphere_points
 
     return sphere_points(int(count))
+
+
+def classify_points(
+    points,
+    report: "CavityReport",
+    *,
+    tolerance: float = 2.5,
+):
+    """``[(label, kind)]`` for arbitrary points: which pocket each one lines.
+
+    A surface vertex sits *on* the boundary, not in the pocket, so the answer is
+    "the pocket this patch of surface lines": the nearest pocket *cell* within
+    ``tolerance`` Å, or ``(None, "bulk")`` when there is none. That is what lets a
+    surface be painted by cavity class without a second geometry pass — the
+    pocket's own cells are kept in :attr:`CavityReport.pocket_cells` for exactly
+    this query.
+    """
+    pts = np.asarray(points, dtype=float).reshape(-1, 3)
+    out: List[Tuple[Optional[str], str]] = [(None, "bulk") for _ in range(len(pts))]
+    if pts.size == 0 or not report.pocket_cells:
+        return out
+    from scipy.spatial import cKDTree
+
+    best = np.full(len(pts), np.inf, dtype=float)
+    best_index = np.full(len(pts), -1, dtype=np.int64)
+    for index, (_label, _kind, cells) in enumerate(report.pocket_cells):
+        if cells is None or len(cells) == 0:
+            continue
+        distance, _nearest = cKDTree(cells).query(pts, k=1)
+        better = distance < best
+        best[better] = distance[better]
+        best_index[better] = index
+    for position, index in enumerate(best_index.tolist()):
+        if index >= 0 and best[position] <= tolerance:
+            label, kind, _cells = report.pocket_cells[index]
+            out[position] = (label, kind)
+    return out
 
 
 def _atom_arrays(atoms) -> Tuple[np.ndarray, np.ndarray]:
@@ -689,6 +739,7 @@ def analyse_cavities(
                 core_radius=float(options.core_radius),
             )
         )
+        report.pocket_cells.append((pockets[-1].label, kind, cells))
 
     report.accessible_volume = float(np.count_nonzero(labels)) * cell_volume
     report.bulk_volume = float(
@@ -881,15 +932,17 @@ def _aperture(
     structure = _ndimage.generate_binary_structure(3, 1)
     mask = accessible_crop & (distance_crop >= max(0.0, bottleneck - 0.5 * spacing))
     found, count = _label(mask)
-    # ``wide`` is the part of the pocket that is *not* pinched. A bore of uniform
-    # radius has none, which is exactly what turns "no neck found" into "one
-    # continuous bore" rather than into a wrong count.
-    wide = accessible_crop & (distance_crop >= bottleneck + 0.5 * spacing)
-    # One vectorised membership test for the whole crop: doing it per component
-    # (a full-array comparison each) made this loop cost tens of seconds.
-    bulk_mask_crop = np.isin(labels_crop, np.fromiter(bulk_crop, dtype=np.int64))
+    # **The number of distinct mouths is deliberately not reported.** A thin band
+    # at the critical radius cannot tell a mouth from a dimple: on trypsin's P1
+    # this returned 2 050 clusters, on EGFR up to 1 772, and reducing the band
+    # only moved the problem. A number that large is worse than no number, so
+    # Pocket.openings stays `None` for an open pocket and the neck cells are
+    # reported instead, which is what the bottleneck residues are built from. The
+    # bottleneck *radius* is sound and is verified against a cylinder; counting
+    # mouths needs a medial-axis or flow-based method this module does not
+    # implement.
     neck_points: List[np.ndarray] = []
-    if count:
+    if count and bottleneck is not None:
         mine = set(np.unique(found[seed & mask]).tolist()) - {0}
         for label in mine:
             component = found == label
@@ -900,29 +953,16 @@ def _aperture(
             }
             if not (touching & bulk_crop):
                 continue
-            band = component & (np.abs(distance_crop - bottleneck) <= 0.35 * spacing)
-            band_labels, band_count = _label(band)
-            for index in range(1, band_count + 1):
-                cluster = band_labels == index
-                if not cluster.any():  # pragma: no cover - defensive
-                    continue
-                grown = _ndimage.binary_dilation(cluster, structure=structure)
-                if not (grown & wide).any():
-                    continue          # a dimple, not a neck on the path
-                if not (grown & bulk_mask_crop).any():
-                    continue
-                neck_points.append(np.argwhere(cluster) + low[None, :])
-    openings = max(1, len(neck_points))
+            band = component & (distance_crop < bottleneck + 0.5 * spacing)
+            if band.any():
+                neck_points.append(np.argwhere(band) + low[None, :])
+    openings: Optional[int] = None          # see the note above
     if neck_points:
         neck_cells = np.concatenate(neck_points, axis=0)
-    else:  # pragma: no cover - a single continuous bore
-        band_cells = np.argwhere(
-            accessible_crop & (np.abs(distance_crop - bottleneck) <= 0.35 * spacing)
-        )
-        neck_cells = (
-            band_cells + low[None, :] if band_cells.size else np.zeros((0, 3), dtype=np.int64)
-        )
+    else:
+        neck_cells = np.zeros((0, 3), dtype=np.int64)
     return bottleneck, openings, neck_cells
+
 
 
 def _bulk_mask(labels: np.ndarray, bulk_labels: Iterable[int]) -> np.ndarray:
@@ -1002,7 +1042,7 @@ def _make_pocket(
         points=int(len(cells)),
         centre=tuple(float(value) for value in centre),
         extent=tuple(float(value) for value in extent),
-        openings=int(openings),
+        openings=None if openings is None else int(openings),
         bottleneck_radius=None if bottleneck is None else float(bottleneck),
         bottleneck_residues=bottleneck_residues,
         lining_residues=lining,

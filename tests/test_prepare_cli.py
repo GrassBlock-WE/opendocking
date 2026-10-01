@@ -437,7 +437,7 @@ def test_the_planarity_report_separates_flat_from_three_dimensional():
 # Pocket detection, library filtering and the exporters
 # ---------------------------------------------------------------------------
 
-DEMO_3PTB = Path(__file__).resolve().parent.parent / "demo" / "3ptb"
+DEMO_3PTB = Path(__file__).resolve().parent.parent / "demo" / "systems" / "3ptb"
 
 
 @pytest.fixture(scope="session")
@@ -1087,7 +1087,7 @@ def test_screen_diverse_replaces_the_library_with_the_subset(demo_3ptb, tmp_path
     argv = [
         "screen",
         "-r", str(demo_3ptb["receptor.pdbqt"]),
-        "-i", str(Path(__file__).resolve().parent.parent / "demo" / "library.smi"),
+        "-i", str(Path(__file__).resolve().parent.parent / "demo" / "libraries" / "library.smi"),
         "--box", str(demo_3ptb["box.json"]),
         "-o", str(outdir),
         "--diverse", "4",
@@ -1622,3 +1622,113 @@ def test_cli_ensemble_screen_requires_its_inputs(capsys):
         assert excinfo.value.code == 2
         assert "required" in capsys.readouterr().err
 
+
+
+# ---------------------------------------------------------------------------
+# `prepare receptor --no-hetero`: the flag that used to exit 1 with a traceback
+# ---------------------------------------------------------------------------
+
+
+def test_no_hetero_removes_every_non_standard_residue(tmp_path, capsys, data_dir):
+    """`--no-hetero` must produce a receptor, not an AttributeError.
+
+    MEASURED DEFECT, now fixed: this command exited 1 with
+
+        AttributeError: 'AtomPDBResidueInfo' object has no attribute
+        'GetIsStandardResidue'
+
+    because the drop loop called an RDKit accessor that does not exist in the
+    installed build (2026.03.1 has no such method at all; `GetResidueName`,
+    `GetChainId` and `GetResidueNumber` do exist).  The sibling ligand helper in
+    the same file already tested the standard-residue question *by name*, and the
+    fix makes the drop loop do the same.
+
+    The assertions are about the outcome, not the exit status: benzamidine and the
+    calcium are gone, the protein is not, and the report names what went.
+    """
+    from odock.cli import main
+
+    source = data_dir / "3PTB.pdb"
+    if not source.exists():
+        pytest.skip("missing the bundled 3PTB structure")
+    out = tmp_path / "no_hetero.pdbqt"
+    assert main(["prepare", "receptor", str(source), str(out), "--no-hetero"]) == 0
+    assert out.exists()
+    text = out.read_text(encoding="utf-8")
+    atoms = [line for line in text.splitlines() if line.startswith(("ATOM", "HETATM"))]
+    assert len(atoms) > 1000, len(atoms)
+    assert not any(line[17:20].strip() == "BEN" for line in atoms), "BEN survived"
+    assert not any(line[17:20].strip() == "CA" for line in atoms), "the calcium survived"
+    assert not any(line[17:20].strip() in ("HOH", "WAT") for line in atoms), "water survived"
+    assert any(line[17:20].strip() == "ASP" for line in atoms), "the protein survived"
+    err = capsys.readouterr().err
+    # The report names the residues it removed rather than counting them.
+    assert "BEN" in err and "CA" in err, err
+
+
+def test_strip_and_keep_hetero_are_the_working_alternatives(tmp_path, data_dir):
+    """The sibling paths on the same file: `--strip` removes only what it names.
+
+    `--strip BEN` must leave the calcium, and leaving `--no-hetero` off must leave
+    the ligand too -- the point is that the rejected flag had neighbours that
+    worked, which is how the defect could look like a user error.
+    """
+    from odock.cli import main
+
+    source = data_dir / "3PTB.pdb"
+    if not source.exists():
+        pytest.skip("missing the bundled 3PTB structure")
+    stripped = tmp_path / "stripped.pdbqt"
+    assert main(
+        ["prepare", "receptor", str(source), str(stripped), "--strip", "BEN"]
+    ) == 0
+    text = stripped.read_text(encoding="utf-8")
+    names = [line[17:20].strip() for line in text.splitlines() if line.startswith(("ATOM", "HETATM"))]
+    assert "BEN" not in names
+    assert "CA" in names, "stripping the ligand must not remove the calcium"
+    assert not any(name in ("HOH", "WAT") for name in names), "waters go by default"
+    # ... and the water switch is the sibling path that puts them back.
+    kept = tmp_path / "stripped_water.pdbqt"
+    assert main(
+        ["prepare", "receptor", str(source), str(kept), "--strip", "BEN", "--keep-water"]
+    ) == 0
+    kept_names = [
+        line[17:20].strip()
+        for line in kept.read_text(encoding="utf-8").splitlines()
+        if line.startswith(("ATOM", "HETATM"))
+    ]
+    assert any(name in ("HOH", "WAT") for name in kept_names), "--keep-water kept nothing"
+    assert "CA" in kept_names
+
+
+def test_a_modified_residue_survives_no_hetero_and_is_named(tmp_path, capsys, data_dir):
+    """Ambiguity reported, not defaulted: CSO is a cysteine, not a ligand.
+
+    `--no-hetero` removes non-standard residues, but a *modified amino acid*
+    flagged HETATM is part of the chain: removing CSO A67/B67 from HIV protease
+    does not strip a ligand, it leaves a hole where two sulfenic-acid cysteines
+    were, and a user who never reads the warning would dock into that.  Measured
+    on the bundled 1HVR with `--no-hetero --strip XK2`: **CSO A67 and CSO B67
+    survive**, nine atoms each, and the report names them as retained with the
+    explicit route to removing them.  Ligand-like HETATM (the inhibitor, the
+    calcium) are still dropped, which the other tests in this group assert.
+    """
+    from odock.cli import main
+
+    source = data_dir / "1HVR.pdb"
+    if not source.exists():
+        pytest.skip("missing the bundled 1HVR structure")
+    out = tmp_path / "hiv.pdbqt"
+    assert main(
+        ["prepare", "receptor", str(source), str(out), "--no-hetero", "--strip", "XK2"]
+    ) == 0
+    captured = capsys.readouterr()
+    combined = captured.err + captured.out
+    assert "CSO" in combined, combined
+    assert "kept modified protein residue" in combined, combined
+    assert "strip=[" in combined, "the report must say how to remove it explicitly"
+    text = out.read_text(encoding="utf-8")
+    names = [line[17:20].strip() for line in text.splitlines() if line.startswith(("ATOM", "HETATM"))]
+    assert names.count("CSO") == 18, "the 18 CSO atoms must survive"
+    assert "XK2" not in names, "the ligand it was told to strip must be gone"
+    assert "ASP" in names

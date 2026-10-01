@@ -2,7 +2,7 @@
 """Pharmacophore models: feature perception, model building, fitting, enrichment.
 
 The measured numbers here come from the bundled demo library
-(`demo/library.smi`), embedded with ETKDGv3 at seed 20240101 when a model is
+(`demo/libraries/library.smi`), embedded with ETKDGv3 at seed 20240101 when a model is
 built and seed 42 when a library is screened — the same settings the CLI defaults
 to, so `odock pharmacophore build/screen` reproduces them.
 """
@@ -22,7 +22,7 @@ from rdkit import Chem  # noqa: E402
 from odock import pharmacophore as P  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
-LIBRARY = ROOT / "demo" / "library.smi"
+LIBRARY = ROOT / "demo" / "libraries" / "library.smi"
 
 #: The six amidines of the demo library: the labelled "actives" of the worked
 #: enrichment example.  All six are trypsin S1-pocket binders (benzamidine is the

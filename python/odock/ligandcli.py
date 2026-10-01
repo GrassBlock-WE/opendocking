@@ -676,7 +676,7 @@ def _add_lbvs(subs) -> None:
     dec.add_argument("-a", "--actives", action="append", required=True, metavar="FILE",
                      help="the actives (a .smi/.sdf/... file); repeat to combine")
     dec.add_argument("-p", "--pool", action="append", required=True, metavar="FILE",
-                     help="the pool to select from (demo/decoys.smi is the bundled one)")
+                     help="the pool to select from (demo/libraries/decoys.smi is the bundled one)")
     dec.add_argument("-n", "--per-active", type=int, default=5, help="decoys per active")
     dec.add_argument("--max-similarity", type=float, default=0.35,
                      help="Tanimoto ceiling: at or above this a pool member is an analogue")
@@ -1248,7 +1248,7 @@ def _add_pocket_score(subs) -> None:
                     help="the receptor PDBQT (its own charges are used)")
     ps.add_argument("-i", "--input", action="append", required=True, metavar="FILE",
                     help="the library (.smi/.sdf/...); repeat to combine several")
-    ps.add_argument("-b", "--box", help="a box.json with center/size (demo/3ptb/box.json)")
+    ps.add_argument("-b", "--box", help="a box.json with center/size (demo/systems/3ptb/box.json)")
     ps.add_argument("--center", help="box centre as x,y,z (an alternative to --box)")
     ps.add_argument("--size", help="box size as x,y,z (an alternative to --box)")
     ps.add_argument("--spacing", type=float, default=None,

@@ -26,13 +26,15 @@ from odock.gui.structure import read_pdbqt  # noqa: E402
 
 SYSTEMS = (
     ("3ptb", "3ptb", "trypsin S1 (benzamidine)"),
-    ("egfr", "egfr", "EGFR kinase (erlotinib)"),
+    ("1m17", "1m17", "EGFR kinase (erlotinib)"),
 )
 
 
 def load(name: str):
-    receptor = read_pdbqt(ROOT / "demo" / name / "receptor.pdbqt")[0].atoms
-    ligand_path = ROOT / "demo" / name / "ligand.pdbqt"
+    receptor = read_pdbqt(
+        ROOT / "demo" / "systems" / name / "receptor.pdbqt"
+    )[0].atoms
+    ligand_path = ROOT / "demo" / "systems" / name / "ligand.pdbqt"
     ligand = read_pdbqt(ligand_path)[0].atoms if ligand_path.is_file() else []
     return receptor, ligand
 
@@ -101,7 +103,7 @@ def sensitivity(receptor) -> None:
 def main() -> int:
     first = None
     for directory, name, label in SYSTEMS:
-        path = ROOT / "demo" / directory / "receptor.pdbqt"
+        path = ROOT / "demo" / "systems" / directory / "receptor.pdbqt"
         if not path.is_file():
             print(f"=== {label}: not bundled ===")
             continue

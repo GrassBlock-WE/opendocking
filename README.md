@@ -1,5 +1,7 @@
 # OpenDocking (`odock`)
 
+**English** · [中文文档](README_zh.md)
+
 > A modern, fully open-source molecular docking toolchain: a pure-Rust
 > high-performance kernel with a Python workbench and a 3-D GUI.
 
@@ -97,6 +99,12 @@ replaces, drops the C++/CUDA toolchain lock-in, and adds a modern Python API.
   route between two sites — with a measured negative (the ERα pocket-to-helix-12
   coupling is contact geometry, not a signal) — see
   [`docs/COUPLING.md`](docs/COUPLING.md).
+* **End-point rescoring** (MM-GBSA-style): decompose every pose into the kernel's
+  interaction energy plus a SASA-proportional nonpolar term and a
+  distance-dependent-dielectric Coulomb term, and report ΔG over the pose ensemble
+  with a bootstrap interval — measured against the docking ranking, where the two
+  are resolvably different (ρ = +0.30 [−0.28, +0.86], n = 17) — see
+  [`docs/ENDPOINT.md`](docs/ENDPOINT.md).
 * A `odock` command-line interface for scripts and pipelines.
 * A PyQt6 + ModernGL workbench: drag the grid box, watch the score live, browse
   poses.

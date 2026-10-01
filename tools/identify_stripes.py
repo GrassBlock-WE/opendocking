@@ -90,8 +90,8 @@ def main() -> int:
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     window = DockingWorkbench()
     window.resize(WIDTH, HEIGHT)
-    window.load_receptor(str(ROOT / "demo" / "3ptb" / "receptor.pdbqt"))
-    window.load_ligand(str(ROOT / "demo" / "3ptb" / "ligand.pdbqt"))
+    window.load_receptor(str(ROOT / "demo" / "systems" / "3ptb" / "receptor.pdbqt"))
+    window.load_ligand(str(ROOT / "demo" / "systems" / "3ptb" / "ligand.pdbqt"))
     # The contacts of the native ligand, computed through the same analysis call
     # the pose-annotation path uses — this keeps the tool independent of the
     # workbench's own pose widgets (and of any edit in flight in them).

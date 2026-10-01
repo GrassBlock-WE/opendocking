@@ -21,7 +21,7 @@ from rdkit.Chem import rdMolDescriptors  # noqa: E402
 from odock import protonation as P  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
-DEMO = ROOT / "demo" / "3ptb"
+DEMO = ROOT / "demo" / "systems" / "3ptb"
 RECEPTOR = DEMO / "receptor.pdbqt"
 
 BENZAMIDINE = "N=C(N)c1ccccc1"

@@ -4,8 +4,8 @@
 The affinities used here are the ones the bundled demo campaign actually
 measured::
 
-    odock screen -r demo/3ptb/receptor.pdbqt -i demo/library.smi \\
-        --box demo/3ptb/box.json -o out/3ptb-screen -e 8 --seed 42
+    odock screen -r demo/systems/3ptb/receptor.pdbqt -i demo/libraries/library.smi \\
+        --box demo/systems/3ptb/box.json -o out/3ptb-screen -e 8 --seed 42
 
 They are written down as data rather than docked in the test, because a docking
 run belongs in the benchmark, not in a unit test of the series arithmetic — and
@@ -26,7 +26,7 @@ from rdkit import Chem  # noqa: E402
 from odock import scaffold as S  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
-LIBRARY = ROOT / "demo" / "library.smi"
+LIBRARY = ROOT / "demo" / "libraries" / "library.smi"
 
 #: The Vina affinity of each demo-library molecule, measured on this tree
 #: (3PTB, exhaustiveness 8, seed 42).  Two library members were removed by the

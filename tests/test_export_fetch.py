@@ -28,7 +28,7 @@ BOX = odock.BoxSpec(
     center=(-1.8555, 14.366, 16.748), size=(17.883, 19.95, 20.514), spacing=0.375
 )
 
-DEMO = Path(__file__).resolve().parent.parent / "demo" / "3ptb"
+DEMO = Path(__file__).resolve().parent.parent / "demo" / "systems" / "3ptb"
 
 
 @pytest.fixture(scope="session")

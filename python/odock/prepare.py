@@ -667,6 +667,18 @@ _KNOWN_HETERO = {
     "NAG", "BMA", "MAN", "FUC", "GAL", "GLC", "NDG", "BGC",
 }
 
+#: The subset of :data:`_KNOWN_HETERO` that is a *modified amino acid*, i.e. part
+#: of the protein chain even though the PDB flags it as HETATM.  These are **kept**
+#: by ``keep_hetero=False`` and reported as retained: removing them does not strip
+#: a ligand, it leaves a chemically wrong receptor with a hole where a residue was,
+#: and a user who never reads the warning would dock into it.  A flag slightly
+#: broader than its name is the smaller problem.  Measured on the bundled 1HVR:
+#: ``--no-hetero --strip XK2`` keeps CSO A67 and CSO B67, nine atoms each, and
+#: removing them is explicit (``strip=["CSO"]``).
+_MODIFIED_RESIDUES = {
+    "MSE", "SEP", "TPO", "PTR", "CSO", "KCX", "MLY", "M3L", "HYP", "PCA",
+}
+
 
 def _organic_hetero_residues(mol) -> Dict[str, int]:
     """Non-standard residues that look like an organic ligand.
@@ -713,13 +725,28 @@ def prepare_receptor(
     an H-bond donor, and adding them is far more reliable than protonating a
     whole protein.
 
+    ``keep_hetero=False`` drops the non-standard residues, with **one deliberate
+    exception**: modified amino acids (``_MODIFIED_RESIDUES`` -- MSE, SEP, TPO,
+    PTR, CSO, KCX, MLY, M3L, HYP, PCA) are *kept*, because they are part of the
+    chain and removing them leaves a chemically wrong receptor with a hole where a
+    residue was.  They are named in the report as retained, so a user who wants
+    the literal behaviour knows what stayed and can remove it with ``strip``.  The
+    flag is therefore slightly broader in what it keeps than its name suggests,
+    which is the deliberate choice: a silently wrong input is worse than a flag
+    whose help text needs one clause.
+
     Parameters
     ----------
     strip
         Residue names to delete, e.g. ``strip=["BEN", "SO4"]``. Use it whenever
         the input PDB is a *holo* complex: leaving the co-crystallised ligand in
         the receptor blocks the very site being docked into. When a likely
-        organic ligand is detected the report carries a warning naming it.
+        organic ligand is detected the report carries a warning naming it. It is
+        also the explicit route to removing a modified residue.
+    keep_hetero
+        ``False`` drops ligand-like non-standard residues (a co-crystallised
+        ligand, a metal, a buffer component) and keeps standard residues plus the
+        chain modifications listed above, naming both groups in the report.
     """
     Chem, AllChem = _require_rdkit()
     report = PreparationReport(kind="receptor")
@@ -808,16 +835,64 @@ def prepare_receptor(
     if not keep_hetero:
         em = Chem.RWMol(mol)
         drop = []
+        dropped: Dict[str, int] = {}
+        retained: Dict[str, int] = {}
+        unnamed = 0
         for a in mol.GetAtoms():
             info = a.GetPDBResidueInfo()
-            if info is not None and info.GetResidueName().strip():
-                if not info.GetIsStandardResidue():
-                    drop.append(a.GetIdx())
+            # The standard-residue test is done **by name**: this RDKit build's
+            # `AtomPDBResidueInfo` has no `GetIsStandardResidue` (calling it raised
+            # AttributeError, which is what made `--no-hetero` exit 1), and the
+            # ligand-candidate helper above tests the same way for the same
+            # reason.  `_STANDARD_RESIDUES` is the set of names that count, and
+            # `_MODIFIED_RESIDUES` are the chain modifications that are kept.
+            name = info.GetResidueName().strip().upper() if info is not None else ""
+            if not name:
+                # Nothing says this atom is a standard residue, so the flag's
+                # contract removes it -- and it is named in the report rather than
+                # silently classified.
+                unnamed += 1
+                drop.append(a.GetIdx())
+                continue
+            if name in _STANDARD_RESIDUES or name in _MODIFIED_RESIDUES:
+                if name in _MODIFIED_RESIDUES:
+                    key = f"{name} {info.GetChainId().strip() or '_'}{info.GetResidueNumber()}"
+                    retained[key] = retained.get(key, 0) + 1
+                continue
+            drop.append(a.GetIdx())
+            key = f"{name} {info.GetChainId().strip() or '_'}{info.GetResidueNumber()}"
+            dropped[key] = dropped.get(key, 0) + 1
         for idx in sorted(drop, reverse=True):
             em.RemoveAtom(idx)
         if drop:
             mol = em.GetMol()
             report.warnings.append(f"removed {len(drop)} hetero atoms")
+            # Name what went: a cofactor, a modified residue and a buffer
+            # component are different decisions for the user, and a count alone
+            # cannot tell them apart.
+            if dropped:
+                report.warnings.append(
+                    "removed non-standard residues: "
+                    + ", ".join(
+                        f"{key} ({count} atom(s))" for key, count in sorted(dropped.items())
+                    )
+                )
+            if unnamed:
+                report.warnings.append(
+                    f"removed {unnamed} atom(s) carrying no residue information"
+                )
+        if retained:
+            # Kept, and named loudly: removing a modified residue does not strip a
+            # ligand, it leaves a hole in the chain, so a user who wants the
+            # literal behaviour has to ask for it.
+            report.warnings.append(
+                "kept modified protein residue(s) "
+                + ", ".join(
+                    f"{key} ({count} atom(s))" for key, count in sorted(retained.items())
+                )
+                + ": a HETATM flag does not make it a ligand, it is part of the "
+                "chain; remove it explicitly with strip=[...] if that is what you want"
+            )
 
     # --- polar hydrogens ---------------------------------------------------
     if add_polar_hydrogens:

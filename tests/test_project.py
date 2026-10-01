@@ -40,7 +40,7 @@ import pytest
 from odock import htmlreport, project
 
 ROOT = Path(__file__).resolve().parent.parent
-DEMO = ROOT / "demo" / "3ptb"
+DEMO = ROOT / "demo" / "systems" / "3ptb"
 
 
 # ---------------------------------------------------------------------------
@@ -594,14 +594,14 @@ def test_portable_path_reduces_a_foreign_absolute_path_to_its_name():
     # the drive, the root or any intermediate directory.
     assert project.portable_path(r"C:\Users\someone") == "someone"
     assert project.portable_path("/home/someone/work") == "work"
-    assert project.portable_path("demo/3ptb/poses.pdbqt") == "demo/3ptb/poses.pdbqt"
-    assert project.portable_path(r"demo\3ptb\poses.pdbqt") == "demo/3ptb/poses.pdbqt"
+    assert project.portable_path("demo/systems/3ptb/poses.pdbqt") == "demo/systems/3ptb/poses.pdbqt"
+    assert project.portable_path(r"demo\systems\3ptb\poses.pdbqt") == "demo/systems/3ptb/poses.pdbqt"
 
 
 def test_portable_path_keeps_a_path_inside_the_checkout_relative():
-    inside = ROOT / "demo" / "3ptb" / "box.json"
-    assert project.portable_path(inside) == "demo/3ptb/box.json"
-    assert project.portable_path(inside, base=ROOT / "demo") == "3ptb/box.json"
+    inside = ROOT / "demo" / "systems" / "3ptb" / "box.json"
+    assert project.portable_path(inside) == "demo/systems/3ptb/box.json"
+    assert project.portable_path(inside, base=ROOT / "demo") == "systems/3ptb/box.json"
 
 
 def test_redact_paths_rewrites_every_path_in_a_command_line():

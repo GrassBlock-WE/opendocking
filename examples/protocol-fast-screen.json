@@ -1,0 +1,78 @@
+{
+  "kind": "opendocking-protocol",
+  "schema_version": 1,
+  "name": "fast-screen",
+  "note": "Use first, on a whole library, when the question is 'which of these thousand molecules is worth a closer look?'. Low exhaustiveness and a box fitted to the ligand: the ranking is stable, the individual poses are not, so do not quote a pose from this run.",
+  "preparation": {
+    "keep_water": false,
+    "keep_hetero": true,
+    "strip": [],
+    "add_polar_hydrogens": true,
+    "strict": false,
+    "modified_residues": ["MSE", "SEP", "TPO", "PTR", "CSO", "KCX", "MLY", "M3L", "HYP", "PCA"],
+    "ligand": {
+      "add_hydrogens": true,
+      "strip_nonpolar": true,
+      "rigid_amides": true,
+      "embed": true,
+      "optimize": true
+    },
+    "prepare_seed": 20240101
+  },
+  "box": {
+    "source": "ligand",
+    "center": null,
+    "size": null,
+    "spacing": 0.375,
+    "ligand_padding": 8.0,
+    "pocket_index": null
+  },
+  "engine": {
+    "scoring": "vina",
+    "search": null,
+    "exhaustiveness": 4,
+    "num_poses": 5,
+    "min_rmsd": 1.0,
+    "energy_range": 3.0,
+    "islands": 4,
+    "population": 32,
+    "generations": 20,
+    "use_grid": true,
+    "refine": true
+  },
+  "execution": {
+    "seed": 42,
+    "jobs": 0,
+    "timeout": null,
+    "checkpoint_every": 20
+  },
+  "library": {
+    "filters": true,
+    "limit": null,
+    "top": 100,
+    "format": "jsonl",
+    "interactions": true,
+    "write_poses": true,
+    "consensus": false,
+    "consensus_top": 0,
+    "consensus_method": "rank"
+  },
+  "thresholds": {
+    "interactions": {
+      "hbond": 3.5,
+      "salt": 4.0,
+      "hydrophobic": 4.0,
+      "pi": 4.5,
+      "cation_pi": 5.0,
+      "clash_ratio": 0.75
+    },
+    "pocket": {},
+    "strain": {}
+  },
+  "provenance": {
+    "tool": null,
+    "kernel": null,
+    "python": null,
+    "created": null
+  }
+}

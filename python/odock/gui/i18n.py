@@ -915,6 +915,21 @@ EN: Dict[str, str] = {
     "console.continued": "… ",
     "action.console_clear": "Clear console",
     "log.console": "console: {line}",
+    # The protocol inspector: the settings a run depends on, as a document.
+    "tab.protocol": "Protocol",
+    "protocol.caption": (
+        "The settings this session would run with, as a reusable protocol."
+    ),
+    "btn.protocol_save": "Save protocol…",
+    "btn.protocol_load": "Load protocol…",
+    "btn.protocol_diff": "Compare with saved",
+    "protocol.template": "Template",
+    "protocol.template_none": "no template to compare with",
+    "protocol.template_same": "identical to {name}",
+    "protocol.template_differs": "{n} setting(s) differ from {name}",
+    "action.protocol_run": "Run protocol…",
+    "log.protocol_saved": "protocol saved: {path}",
+    "log.protocol_loaded": "protocol loaded: {path}",
     # Viewer annotations and undo/redo. These were written against the call
     # sites in app.py while that feature was being added, so the placeholders
     # are the ones the code passes; the wording is deliberately plain.
@@ -1799,6 +1814,18 @@ ZH: Dict[str, str] = {
     "console.continued": "… ",
     "action.console_clear": "清空终端",
     "log.console": "终端：{line}",
+    "tab.protocol": "实验方案",
+    "protocol.caption": "本会话将要使用的设置，可保存为可复用的实验方案。",
+    "btn.protocol_save": "保存方案…",
+    "btn.protocol_load": "载入方案…",
+    "btn.protocol_diff": "与已保存方案比较",
+    "protocol.template": "模板",
+    "protocol.template_none": "没有可比较的模板",
+    "protocol.template_same": "与 {name} 相同",
+    "protocol.template_differs": "与 {name} 有 {n} 项设置不同",
+    "action.protocol_run": "运行方案…",
+    "log.protocol_saved": "方案已保存：{path}",
+    "log.protocol_loaded": "方案已载入：{path}",
     "annotation.default": "标注",
     "annotation.empty": "当前没有可标注的对象",
     "annotation.on_measurement": "测量 {index}",

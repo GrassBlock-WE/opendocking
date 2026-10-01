@@ -34,9 +34,9 @@ from odock.gui import i18n  # noqa: E402
 from odock.gui import surface as surface_module  # noqa: E402
 from odock.gui.app import DockingWorkbench  # noqa: E402
 
-RECEPTOR = ROOT / "demo" / "3ptb" / "receptor.pdbqt"
-LIGAND = ROOT / "demo" / "3ptb" / "ligand.pdbqt"
-POSES = ROOT / "demo" / "3ptb" / "poses.pdbqt"
+RECEPTOR = ROOT / "demo" / "systems" / "3ptb" / "receptor.pdbqt"
+LIGAND = ROOT / "demo" / "systems" / "3ptb" / "ligand.pdbqt"
+POSES = ROOT / "demo" / "systems" / "3ptb" / "poses.pdbqt"
 OUT = ROOT / "out" / "surface"
 
 

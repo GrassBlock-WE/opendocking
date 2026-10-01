@@ -1794,7 +1794,12 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("input", help="input .pdb or .pdbqt file")
     r.add_argument("out", nargs="?", help="output .pdbqt (stdout when omitted)")
     r.add_argument("--keep-water", action="store_true", help="keep crystallographic waters")
-    r.add_argument("--no-hetero", action="store_true", help="drop all non-standard residues")
+    r.add_argument(
+        "--no-hetero", action="store_true",
+        help="drop ligand-like non-standard residues; chain modifications "
+             "(MSE, SEP, TPO, PTR, CSO, KCX, MLY, M3L, HYP, PCA) are kept and "
+             "reported, remove them with --strip",
+    )
     r.add_argument("--no-hydrogens", action="store_true", help="do not add polar hydrogens")
     r.add_argument(
         "--strip",
@@ -2263,7 +2268,7 @@ def _classify_structure(path: Path) -> str:
 def _workbench_arguments(paths: Sequence[str]):
     """Turn ``odock file [file ...]`` into workbench arguments.
 
-    ``odock demo/3ptb/poses.pdbqt`` is the natural thing to type, so it opens
+    ``odock demo/systems/3ptb/poses.pdbqt`` is the natural thing to type, so it opens
     the workbench on those files instead of failing with "invalid choice".
     """
     receptor = ligand = poses = None

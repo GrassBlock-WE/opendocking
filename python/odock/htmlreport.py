@@ -324,6 +324,65 @@ def rasterise_svg(svg: str, *, width: int = 900, height: int = 700) -> Optional[
 _QT_STATE: Dict[str, Any] = {"app": None, "tried": False, "fonts": None}
 
 
+def _browser_profile_directory() -> Path:
+    """A profile directory for the headless browser, or a refusal.
+
+    The failure this prevents is specific and measured: `tempfile.mkdtemp` falls back
+    to the **working directory** when the environment's temp directory is not
+    writable, so a browser profile appears next to the source — and it stays there
+    when the browser is still holding a file open at cleanup time.  Four such
+    directories (`odock-chrome-*`) reached the published 0.2.1 tree.
+
+    So the parent is chosen deliberately and checked: the environment's temp
+    directory, and the directory is refused if it did not land there.  A caller
+    without a writable temp directory gets no PDF and a complete HTML report, which
+    is the existing contract for "no converter available".
+    """
+    parent = Path(tempfile.gettempdir())
+    try:
+        profile = Path(tempfile.mkdtemp(prefix="odock-chrome-", dir=parent))
+    except OSError as exc:
+        raise PdfUnavailable(
+            "no PDF was produced: there is no writable temporary directory for the "
+            f"headless browser's profile ({_project.portable_path(parent)}: "
+            f"{type(exc).__name__}). The HTML report is complete and self-contained; "
+            "print it from a browser instead."
+        )
+    try:
+        inside_working_directory = profile.resolve().is_relative_to(Path.cwd().resolve())
+    except (OSError, ValueError):  # pragma: no cover - an unresolvable path
+        inside_working_directory = False
+    if inside_working_directory:
+        # `tempfile` fell back to the working directory: refuse here rather than
+        # write a browser profile next to the source.
+        shutil.rmtree(profile, ignore_errors=True)
+        raise PdfUnavailable(
+            "no PDF was produced: the temporary directory resolves inside the working "
+            f"directory ({_project.portable_path(profile)}), so the browser's profile "
+            "would be created next to the source. Set TMPDIR/TEMP to a writable "
+            "directory. The HTML report is complete and self-contained."
+        )
+    return profile
+
+
+def _remove_browser_profile(profile: Path) -> Optional[Path]:
+    """Remove the profile directory, retrying once; return it if it survived.
+
+    A browser releases its files asynchronously, so the first `rmtree` can fail on
+    Windows.  The retry is short and bounded, and a surviving directory is
+    **returned rather than ignored**: the leaked 0.2.1 directories are what silence
+    looked like.
+    """
+    for attempt in range(3):
+        if not profile.exists():
+            return None
+        shutil.rmtree(profile, ignore_errors=True)
+        if not profile.exists():
+            return None
+        time.sleep(0.25 * (attempt + 1))
+    return profile if profile.exists() else None
+
+
 def _preferred_platforms() -> List[Optional[str]]:
     """The Qt platform plugins to try, most capable first.
 
@@ -1750,7 +1809,16 @@ def write_pdf(document: Union[str, PathLike], path: PathLike, *, timeout: float 
     # A private profile directory: a shared one is often locked by a running
     # browser, and writing into the user's own profile is not something a report
     # generator should do.
-    profile = Path(tempfile.mkdtemp(prefix="odock-report-"))
+    #
+    # `tempfile.mkdtemp` alone is not enough, and this is the incident: when the
+    # environment's temp directory is not writable, `tempfile` **silently falls back
+    # to the working directory**, and the profile it creates there is left behind if
+    # the browser keeps a handle open past the cleanup (`shutil.rmtree` fails on
+    # Windows and the old code swallowed it with `ignore_errors=True`).  Four
+    # `odock-chrome-*` directories reached the published 0.2.1 tree that way.  So the
+    # directory is created only where it belongs, the fallback is refused, and the
+    # cleanup reports itself if it cannot finish.
+    profile = _browser_profile_directory()
     command = [
         executable,
         "--headless=new",
@@ -1777,9 +1845,16 @@ def write_pdf(document: Union[str, PathLike], path: PathLike, *, timeout: float 
             "browser instead."
         )
     finally:
-        shutil.rmtree(profile, ignore_errors=True)
+        leftover = _remove_browser_profile(profile)
         if temporary_html is not None:
             temporary_html.unlink(missing_ok=True)
+    if leftover:
+        raise PdfUnavailable(
+            "no PDF was produced, and the browser's profile directory could not be "
+            f"removed ({_project.portable_path(leftover)}): delete it before "
+            "publishing, or run with a writable temp directory. The HTML report is "
+            "complete and self-contained."
+        )
     if not target.exists() or target.stat().st_size < 400:
         detail = _project.redact_paths(
             (completed.stderr or b"").decode("utf-8", "replace").strip()

@@ -1,0 +1,83 @@
+{
+  "kind": "opendocking-protocol",
+  "schema_version": 1,
+  "name": "ensemble",
+  "note": "Use when one crystal structure is not the whole story: a flexible receptor where the pocket opens and closes, or a series of snapshots you want scored consistently. The seed is pinned so every member is docked under the same campaign, which is what makes the members comparable.",
+  "preparation": {
+    "keep_water": true,
+    "keep_hetero": false,
+    "strip": [],
+    "add_polar_hydrogens": true,
+    "strict": false,
+    "modified_residues": ["MSE", "SEP", "TPO", "PTR", "CSO", "KCX", "MLY", "M3L", "HYP", "PCA"],
+    "ligand": {
+      "add_hydrogens": true,
+      "strip_nonpolar": true,
+      "rigid_amides": true,
+      "embed": true,
+      "optimize": true
+    },
+    "prepare_seed": 20240101
+  },
+  "box": {
+    "source": "receptor",
+    "center": [0.0, 0.0, 0.0],
+    "size": [30.0, 30.0, 30.0],
+    "spacing": 0.5,
+    "ligand_padding": 8.0,
+    "pocket_index": null
+  },
+  "engine": {
+    "scoring": "vina",
+    "search": null,
+    "exhaustiveness": 8,
+    "num_poses": 9,
+    "min_rmsd": 1.0,
+    "energy_range": 3.0,
+    "islands": 4,
+    "population": 32,
+    "generations": 20,
+    "use_grid": true,
+    "refine": true
+  },
+  "execution": {
+    "seed": 20240101,
+    "jobs": 0,
+    "timeout": null,
+    "checkpoint_every": 20
+  },
+  "library": {
+    "filters": true,
+    "limit": null,
+    "top": 50,
+    "format": "jsonl",
+    "interactions": true,
+    "write_poses": true,
+    "consensus": true,
+    "consensus_top": 20,
+    "consensus_method": "borda"
+  },
+  "thresholds": {
+    "interactions": {
+      "hbond": 3.5,
+      "salt": 4.0,
+      "hydrophobic": 4.0,
+      "pi": 4.5,
+      "cation_pi": 5.0,
+      "clash_ratio": 0.75
+    },
+    "pocket": {
+      "min_volume": 100.0,
+      "probe_radius": 1.4
+    },
+    "strain": {
+      "report_above_kcal": 5.0
+    }
+  },
+  "provenance": {
+    "tool": null,
+    "kernel": null,
+    "python": null,
+    "created": null
+  }
+}

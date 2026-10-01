@@ -38,6 +38,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 from PyQt6 import QtCore, QtGui, QtWidgets
 
 from . import dashboard, dialogs, i18n
+from .. import protocol
 from .i18n import tr
 from .sequence import SequenceTrack
 from . import sequence as sequence_module
@@ -1665,6 +1666,15 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         #: interactions — a dash is what people read as "these two things
         #: interact", so it is opt-in and Clear annotations switches it off.
         self._interactions_shown = False
+        #: How the current box was arrived at (``ligand``/``pocket``/``manual``/
+        #: ``receptor``).  Recorded because the same numbers reached by different
+        #: routes are different decisions: a box fitted to the ligand follows it
+        #: to a new pose, a hand-placed one does not, and a protocol says which.
+        self._box_source = "ligand"
+        #: The template currently being compared against, and the last protocol
+        #: loaded from a file (for the tab's diff label).
+        self._loaded_protocol = None
+        self._protocol_view = None
         self.receptor_mol = None
         self.ligand_mol = None
         self.inventory = None
@@ -2183,7 +2193,253 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         """
         QtCore.QTimer.singleShot(0, self._apply_dock_proportions)
 
-    # -- the console --------------------------------------------------------
+    # -- the protocol tab ---------------------------------------------------
+
+    def _build_protocol_tab(self):
+        """The current settings as a shareable protocol: Save / Load / Compare.
+
+        The tab is a *view* of what the other tabs say. Nothing here holds
+        settings of its own: :meth:`current_protocol` reads the widgets, so a
+        protocol can never describe something the workbench is not set to do, and
+        saving cannot record a value the user has not seen.
+        """
+        panel = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(panel)
+
+        self.protocol_caption = QtWidgets.QLabel(tr("protocol.caption"))
+        self.protocol_caption.setWordWrap(True)
+        self.protocol_caption.setObjectName("dashboardCaption")
+        layout.addWidget(self.protocol_caption)
+
+        self.protocol_view = QtWidgets.QPlainTextEdit()
+        self.protocol_view.setReadOnly(True)
+        self.protocol_view.setObjectName("protocolView")
+        self.protocol_view.setLineWrapMode(QtWidgets.QPlainTextEdit.LineWrapMode.NoWrap)
+        self.protocol_view.setMinimumHeight(120)
+        layout.addWidget(self.protocol_view, 1)
+
+        row = QtWidgets.QHBoxLayout()
+        self._act_row_button(row, tr("btn.protocol_save"), self._save_protocol_action)
+        self._act_row_button(row, tr("btn.protocol_load"), self._load_protocol_action)
+        self._act_row_button(row, tr("btn.protocol_diff"), self._compare_protocol_action)
+        layout.addLayout(row)
+
+        template_row = QtWidgets.QHBoxLayout()
+        template_row.addWidget(QtWidgets.QLabel(tr("protocol.template")))
+        self.protocol_template = QtWidgets.QComboBox()
+        self.protocol_template.setObjectName("protocolTemplate")
+        self.protocol_template.addItem(tr("protocol.template_none"), None)
+        for template in self._protocol_templates():
+            self.protocol_template.addItem(template.name, template.name)
+        self.protocol_template.currentIndexChanged.connect(
+            lambda _index: self._refresh_protocol_tab()
+        )
+        template_row.addWidget(self.protocol_template, 1)
+        layout.addLayout(template_row)
+
+        self.protocol_template_diff = QtWidgets.QLabel("")
+        self.protocol_template_diff.setWordWrap(True)
+        self.protocol_template_diff.setObjectName("dashboardCaption")
+        layout.addWidget(self.protocol_template_diff)
+        self._protocol_page = panel
+        return panel
+
+    def _act_row_button(self, row, text, slot):
+        button = QtWidgets.QPushButton(text)
+        button.clicked.connect(lambda _checked=False: slot())
+        row.addWidget(button)
+        return button
+
+    def _protocol_templates(self) -> List["protocol.Protocol"]:
+        """The shipped templates, or an empty list when none are installed."""
+        try:
+            return protocol.list_templates()
+        except Exception:  # pragma: no cover - a broken template must not crash
+            return []
+
+    def _on_inspector_tab_changed(self, index: int) -> None:
+        widget = self.inspector.widget(index)
+        if widget is self._protocol_tab_widget():
+            self._refresh_protocol_tab()
+
+    #: The Engine tab lists these labels in this order; the protocol records the
+    #: *value* the kernel takes (``cli.py``'s `--search` choices), never the
+    #: translated label the user read.
+    SEARCH_VALUES = ("monte_carlo", "lga", "lga_solis")
+
+    def current_protocol(self) -> "protocol.Protocol":
+        """The settings the inspector is showing, as a protocol.
+
+        Built from the widgets themselves — the box spins, the engine controls,
+        the seed, the interaction thresholds — through
+        :func:`odock.protocol.capture_session`, so the document and the panels
+        cannot disagree about what the workbench is set to.
+
+        What the GUI has no control for (whether water and hetero groups are kept,
+        the library filters, the preparation flags) stays at the documented
+        default in the captured document: a protocol must not claim the workbench
+        is set to something it has no widget for. The CLI's
+        ``protocol save --set section.field=value`` is how those are chosen.
+        """
+        box = self._current_box()
+        payload = {
+            "box": (
+                {
+                    "source": self._box_source,
+                    "center": list(box.center),
+                    "size": list(box.size),
+                    "spacing": float(box.spacing),
+                }
+                if box is not None
+                else {"source": self._box_source}
+            ),
+            "engine": {
+                "scoring": self.engine.currentText(),
+                "search": self.SEARCH_VALUES[
+                    max(0, min(self.search.currentIndex(), len(self.SEARCH_VALUES) - 1))
+                ],
+                "exhaustiveness": int(self.exhaustiveness.value()),
+                "num_poses": int(self.poses.value()),
+                "energy_range": float(self.energy_range.value()),
+                "islands": int(self.islands.value()),
+                "population": int(self.population.value()),
+                "generations": int(self.generations.value()),
+                "use_grid": bool(self.use_grid.isChecked()),
+            },
+            "execution": {"seed": int(self.seed.value()), "jobs": int(self.threads.value())},
+            "thresholds": {"interactions": dict(self.interaction_thresholds)},
+        }
+        return protocol.capture_session(payload, name=self._protocol_name())
+
+    def _protocol_name(self) -> str:
+        """A name a user will recognise in a directory listing."""
+        receptor = self._pending.get("receptor")
+        stem = Path(str(receptor)).stem if receptor else "session"
+        return f"{stem}-{'box' if self.scene.box is not None else 'nobox'}"
+
+    def _refresh_protocol_tab(self) -> None:
+        try:
+            captured = self.current_protocol()
+        except Exception as exc:  # pragma: no cover - reported, never fatal
+            self.protocol_view.setPlainText(str(exc))
+            return
+        self._protocol_view = captured
+        self.protocol_view.setPlainText("\n".join(captured.summary_lines()))
+        template = self.protocol_template.currentData()
+        if not template:
+            self.protocol_template_diff.setText(tr("protocol.template_none"))
+            return
+        chosen = next(
+            (item for item in self._protocol_templates() if item.name == template), None
+        )
+        if chosen is None:  # pragma: no cover - the combo is filled from the same list
+            self.protocol_template_diff.setText(tr("protocol.template_none"))
+            return
+        differences = protocol.diff_protocols(chosen, captured)
+        settings = [item for item in differences if item["kind"] == "setting"]
+        if not settings:
+            self.protocol_template_diff.setText(
+                tr("protocol.template_same", name=chosen.name)
+            )
+        else:
+            self.protocol_template_diff.setText(
+                tr("protocol.template_differs", n=len(settings), name=chosen.name)
+            )
+        self.protocol_template_diff.setToolTip(
+            protocol.protocol_diff_text(chosen, captured, differences)
+        )
+
+    def _save_protocol_action(self) -> None:
+        """Write the live settings as a protocol, validated before it is written."""
+        try:
+            captured = self.current_protocol()
+        except Exception as exc:
+            self._report_error(str(exc), True)
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, tr("btn.protocol_save"), f"{captured.name}.json", ""
+        )
+        if not path:
+            return
+        try:
+            protocol.save_protocol(captured, path)
+        except Exception as exc:
+            self._report_error(str(exc), True)
+            return
+        self._log(tr("log.protocol_saved", path=Path(path).name))
+        self._refresh_protocol_tab()
+
+    def _load_protocol_action(self) -> None:
+        """Apply a protocol to the *widgets*, so the panels show what will run."""
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, tr("btn.protocol_load"), "", ""
+        )
+        if not path:
+            return
+        try:
+            loaded = protocol.load_protocol(path)
+            loaded.validate(for_run=True)
+        except Exception as exc:
+            self._report_error(str(exc), True)
+            return
+        self._apply_protocol_to_widgets(loaded)
+        self._loaded_protocol = loaded
+        self._log(tr("log.protocol_loaded", path=Path(path).name))
+        self._refresh_protocol_tab()
+
+    def _apply_protocol_to_widgets(self, loaded: "protocol.Protocol") -> None:
+        """Put a protocol into the controls it describes.
+
+        Only what the GUI owns: the box, the engine and search settings, the seed,
+        the filter switch. Preparation flags and thresholds are carried in the
+        document but the *run* is what uses them, so loading cannot pretend the
+        GUI has applied something it does not hold.
+        """
+        if loaded.box.center and loaded.box.size:
+            self._set_box(
+                loaded.box.center, loaded.box.size, spacing=float(loaded.box.spacing)
+            )
+        self.engine.setCurrentText(str(loaded.engine.scoring))
+        if loaded.engine.search in self.SEARCH_VALUES:
+            self.search.setCurrentIndex(self.SEARCH_VALUES.index(loaded.engine.search))
+        self.exhaustiveness.setValue(int(loaded.engine.exhaustiveness))
+        self.poses.setValue(int(loaded.engine.num_poses))
+        self.energy_range.setValue(float(loaded.engine.energy_range))
+        self.islands.setValue(int(loaded.engine.islands))
+        self.population.setValue(int(loaded.engine.population))
+        self.generations.setValue(int(loaded.engine.generations))
+        self.use_grid.setChecked(bool(loaded.engine.use_grid))
+        self.seed.setValue(int(loaded.execution.seed))
+        self.threads.setValue(int(loaded.execution.jobs))
+        self.interaction_thresholds = dict(loaded.thresholds.interactions)
+        self._set_box_source(loaded.box.source)
+        self.viewport.refresh()
+
+    def _compare_protocol_action(self) -> None:
+        """The diff against a saved protocol, in the log and in the tab."""
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, tr("btn.protocol_diff"), "", ""
+        )
+        if not path:
+            return
+        try:
+            other = protocol.load_protocol(path)
+            captured = self.current_protocol()
+        except Exception as exc:
+            self._report_error(str(exc), True)
+            return
+        differences = protocol.diff_protocols(other, captured)
+        settings = [item for item in differences if item["kind"] == "setting"]
+        self._log(
+            tr("protocol.template_differs", n=len(settings), name=Path(path).name)
+            if settings
+            else tr("protocol.template_same", name=Path(path).name)
+        )
+        for line in protocol.protocol_diff_text(other, captured, differences).splitlines():
+            self._log(line)
+        self.protocol_view.setPlainText(
+            protocol.protocol_diff_text(other, captured, differences)
+        )
 
     def _build_console(self) -> None:
         """The console input line, at the bottom of the log panel.
@@ -2206,9 +2462,9 @@ class DockingWorkbench(QtWidgets.QMainWindow):
             prompt.fontMetrics().horizontalAdvance(console_input.PROMPT) + 4
         )
         self.console_prompt = prompt
-        console_input.textChanged.connect(
-            lambda _text: self.console_prompt.setText(console_input.prompt())
-        )
+        # The prompt follows the *block state* (a continued block shows `... `),
+        # which the widget announces — editing the line alone cannot know it.
+        console_input.promptChanged.connect(self.console_prompt.setText)
 
         self.console_row = QtWidgets.QWidget()
         row = QtWidgets.QHBoxLayout(self.console_row)
@@ -2279,6 +2535,14 @@ class DockingWorkbench(QtWidgets.QMainWindow):
             "undo": self.undo,
             "redo": self.redo,
             "log": self._log,
+            # Protocols, on the same code paths as the inspector tab: the console
+            # is how a user reaches a run without a library browser.
+            "current_protocol": self.current_protocol,
+            "load_protocol": protocol.load_protocol,
+            "save_protocol": protocol.save_protocol,
+            "diff_protocols": protocol.diff_protocols,
+            "run_protocol": protocol.run_protocol,
+            "list_templates": protocol.list_templates,
         }
         namespace["help"] = self.console_help
         return namespace
@@ -2312,9 +2576,14 @@ class DockingWorkbench(QtWidgets.QMainWindow):
             namespace = self._console_globals = {"__name__": "__odock_console__"}
         namespace.update(self.console_namespace())
         out, err = io.StringIO(), io.StringIO()
-        first = source.strip().splitlines()[0] if source.strip() else ""
-        if first:
-            self.log.appendPlainText(f"{dashboard.ConsoleInput.PROMPT}{first}")
+        lines = source.splitlines()
+        # Echo the block the way a REPL does: `>>>` on the first line and the
+        # continuation prompt on the rest, so the transcript shows what was typed.
+        if lines and lines[0].strip():
+            self.log.appendPlainText(f"{dashboard.ConsoleInput.PROMPT}{lines[0]}")
+            for extra in lines[1:]:
+                self.log.appendPlainText(f"{dashboard.ConsoleInput.CONTINUED}{extra}")
+        first = lines[0].strip() if lines else ""
         error = ""
         try:
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
@@ -2591,6 +2860,11 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         self.inspector.addTab(self._build_ligand_tab(), tr("tab.ligand"))
         self.inspector.addTab(self._build_grid_tab(), tr("tab.grid"))
         self.inspector.addTab(self._build_engine_tab(), tr("tab.engine"))
+        self.inspector.addTab(self._build_protocol_tab(), tr("tab.protocol"))
+        # The view is rebuilt when the tab is opened rather than on every widget
+        # change: the *document* is always captured live at Save/Compare time, so
+        # only the on-screen list could ever be a moment stale.
+        self.inspector.currentChanged.connect(self._on_inspector_tab_changed)
         # The Grid tab's three-column spin grid wants ~810 px on its own, which
         # would stop the user narrowing the inspector (and the window). Inside a
         # scroll area the panel is as narrow as the user likes and the wide tab
@@ -4338,6 +4612,14 @@ class DockingWorkbench(QtWidgets.QMainWindow):
     def _box_is_default(self) -> bool:
         return self.scene.box is None
 
+    def _set_box_source(self, source: str) -> None:
+        """Record how the box was derived, so a protocol can say so."""
+        self._box_source = str(source)
+
+    def _protocol_tab_widget(self):
+        """The protocol tab's page, if it was built (it always is)."""
+        return getattr(self, "_protocol_page", None)
+
     def _current_box(self):
         import odock
 
@@ -4472,6 +4754,7 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         box = odock.box_from_points(
             [[a.x, a.y, a.z] for a in self.scene.ligand], buffer=0.0
         )
+        self._set_box_source("ligand")
         self._set_box(box.center, self._current_size(), self.spacing.value())
         self._log(tr("log.box_centred"))
 
@@ -4491,6 +4774,7 @@ class DockingWorkbench(QtWidgets.QMainWindow):
             buffer=8.0,
             spacing=self.spacing.value(),
         )
+        self._set_box_source("ligand")
         self._set_box(box.center, box.size, box.spacing)
         self._log(tr("log.box_fitted", x=box.size[0], y=box.size[1], z=box.size[2]))
 
@@ -4503,6 +4787,7 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         hi = [max(a.x for a in atoms), max(a.y for a in atoms), max(a.z for a in atoms)]
         center = [(lo[i] + hi[i]) / 2 for i in range(3)]
         size = [max(4.0, hi[i] - lo[i] + 2.0) for i in range(3)]
+        self._set_box_source("receptor")
         self._set_box(center, size, self.spacing.value())
         self._log(tr("log.box_whole"))
 
@@ -6811,15 +7096,31 @@ class DockingWorkbench(QtWidgets.QMainWindow):
                 )
             )
             lines.append("")
-            lines.append(
-                tr(
-                    "sasa.total",
-                    total=f"{report.total_area:.1f}",
-                    reference=f"{report.reference_total:.1f}",
-                    buried=f"{report.buried_area:.1f}",
-                    share=f"{100.0 * report.buried_fraction:.1f}%",
+            # The two references answer different questions, so the summary line
+            # says which one produced it. For "free" there is no single buried
+            # total to quote (see BurialReport: the reference is a sum of every
+            # residue measured in isolation), so the row reports the per-residue
+            # sum under its own name instead of a number that looks like a
+            # surface.
+            if report.buried_area is None:
+                lines.append(
+                    tr(
+                        "sasa.total.free",
+                        total=f"{report.total_area:.1f}",
+                        isolated=f"{report.reference_total:.1f}",
+                        summed=f"{report.summed_buried_area:.1f}",
+                    )
                 )
-            )
+            else:
+                lines.append(
+                    tr(
+                        "sasa.total",
+                        total=f"{report.total_area:.1f}",
+                        reference=f"{report.reference_total:.1f}",
+                        buried=f"{report.buried_area:.1f}",
+                        share=f"{100.0 * report.buried_fraction:.1f}%",
+                    )
+                )
             if ligand_record is not None:
                 lines.append(
                     tr(
@@ -6846,8 +7147,20 @@ class DockingWorkbench(QtWidgets.QMainWindow):
                 tr(
                     "log.sasa_report",
                     residues=len(report.residues),
-                    buried=f"{report.buried_area:.1f}",
-                    share=f"{100.0 * report.buried_fraction:.1f}%",
+                    buried=(
+                        f"{report.summed_buried_area:.1f}"
+                        if report.buried_area is None
+                        else f"{report.buried_area:.1f}"
+                    ),
+                    share=(
+                        f"{100.0 * report.summed_buried_area / report.reference_total:.1f}%"
+                        if report.buried_area is None and report.reference_total
+                        else (
+                            "—"
+                            if report.buried_fraction is None
+                            else f"{100.0 * report.buried_fraction:.1f}%"
+                        )
+                    ),
                 )
             )
 

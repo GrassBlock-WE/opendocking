@@ -128,10 +128,10 @@ DOCUMENTED_FILES: Tuple[str, ...] = (
     "benchmark/baseline.json",
     "tools/inspect_dist.py",
     ".github/ISSUE_TEMPLATE/bug_report.yml",
-    "demo/3ptb/receptor.pdbqt",
-    "demo/3ptb/ligand.pdbqt",
-    "demo/3ptb/poses.pdbqt",
-    "demo/3ptb/box.json",
+    "demo/systems/3ptb/receptor.pdbqt",
+    "demo/systems/3ptb/ligand.pdbqt",
+    "demo/systems/3ptb/poses.pdbqt",
+    "demo/systems/3ptb/box.json",
     "tests/data/3PTB.pdb",
 )
 
@@ -1616,7 +1616,7 @@ def gate_smoke_dock(
     if base is None:
         gate["detail"] = "no checkout next to this package, so there is no bundled demo"
         return gate
-    demo = base / "demo" / "3ptb"
+    demo = base / "demo" / "systems" / "3ptb"
     needed = ("receptor.pdbqt", "ligand.pdbqt", "box.json")
     missing = [name for name in needed if not (demo / name).exists()]
     if missing:

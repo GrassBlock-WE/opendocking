@@ -122,7 +122,7 @@ FAILED tests/... - the bundled demo fixtures are missing: run `make demo`
 
 that is the guard doing its job.
 
-`demo/library.smi` is the one hand-maintained file in that directory: it is the
+`demo/libraries/library.smi` is the one hand-maintained file in that directory: it is the
 screening library used by [`docs/SCREENING.md`](docs/SCREENING.md) and by the
 screening tests, and it is explicitly tracked by `.gitignore`.
 

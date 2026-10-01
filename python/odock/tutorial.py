@@ -12,7 +12,7 @@ The chain, each step asserted for shape (not for a value, which is what the reco
 is for):
 
 1. prepare the receptor from ``tests/data/3PTB.pdb`` → a PDBQT
-2. build and prepare the ligand from ``demo/library.smi``
+2. build and prepare the ligand from ``demo/libraries/library.smi``
 3. derive the search box from the ligand
 4. dock (a small, seeded run)
 5. rank the poses and cluster them
@@ -176,9 +176,9 @@ def run_tutorial(root=None, *, workdir=None, quiet: bool = True) -> TutorialReco
     from odock import analysis, htmlreport, prepare, project
 
     base = Path(root).resolve() if root is not None else _default_root()
-    demo = base / "demo" / "3ptb"
+    demo = base / "demo" / "systems" / "3ptb"
     receptor_source = base / "tests" / "data" / "3PTB.pdb"
-    library = base / "demo" / "library.smi"
+    library = base / "demo" / "libraries" / "library.smi"
     _check(receptor_source.is_file(), f"the bundled receptor is missing: {receptor_source}",
            fix="run `make demo` (the fixtures are generated, not committed)")
     _check(library.is_file(), f"the bundled ligand library is missing: {library}",
