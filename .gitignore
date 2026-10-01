@@ -28,7 +28,7 @@ python/odock/*.dll
 /.rust-tmp
 *.log
 *.npy
-/tmp*/
+/tmp*
 
 # A release snapshot of this repository, staged at its own root by the release
 # process. It is not part of the project and must not be committed or packaged
@@ -67,3 +67,6 @@ python/odock/*.dll
 # contain, which `out/verify/release_check.py` reported as a failure. Ignore the
 # binary, not the data.
 /demo/**/vina.exe
+
+# Local release backups (archives of published versions)
+/backup/

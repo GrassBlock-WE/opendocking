@@ -1,0 +1,141 @@
+# A hand-curated, property-diverse pool for decoy selection (offline).
+#
+# Why this file exists: an enrichment number is only as good as its decoys, and
+# a decoy set that is not property-matched to the actives inflates every metric.
+# Downloading DUD-E is not possible in this repository (no network in the test
+# environment, and a vendor catalogue would not be redistributable), so the pool
+# is written out by hand: common metabolites, drugs, fragments and amino acids
+# chosen to span the property ranges of the demo library's actives (roughly
+# 90-250 Da, LogP -3 to +3, 0-5 donors, 0-8 acceptors, 0-6 rotatable bonds).
+#
+# It is a *pool*, not a decoy set: `odock.decoys.match_decoys` picks the members
+# that match each active on MW/LogP/HBD/HBA/RotB/charge within stated tolerances
+# and rejects any that is topologically too similar to an active. Nothing here is
+# claimed to be inactive against any target - see docs/LBVS.md.
+#
+# SMILES name
+Nc1ccccc1 aniline
+Oc1ccccc1 phenol
+Cc1ccccc1 toluene
+O=Cc1ccccc1 benzaldehyde
+OC(=O)c1ccccc1 benzoic_acid
+COc1ccccc1 anisole
+O=[N+]([O-])c1ccccc1 nitrobenzene
+c1ccncc1 pyridine
+OC(=O)c1cccnc1 nicotinic_acid
+Nc1ccc(C(=O)O)cc1 p_aminobenzoic_acid
+Nc1ccccc1C(=O)O anthranilic_acid
+NC(=O)c1ccccc1O salicylamide
+COc1cc(C=O)ccc1O vanillin
+C=CCc1ccc(O)c(OC)c1 eugenol
+OC(=O)/C=C/c1ccccc1 cinnamic_acid
+OC(=O)/C=C/c1ccc(O)c(O)c1 caffeic_acid
+c1ccc2ccccc2c1 naphthalene
+c1ccc2ncccc2c1 quinoline
+c1ccc2cnccc2c1 isoquinoline
+c1ccc2[nH]ccc2c1 indole
+c1ccc2occc2c1 benzofuran
+c1ccc2sccc2c1 benzothiophene
+O=c1ccc2ccccc2o1 coumarin
+O=c1ccoc2ccccc12 chromone
+O=C1c2ccccc2C(=O)N1 phthalimide
+O=C1NS(=O)(=O)c2ccccc21 saccharin
+O=c1cc[nH]c(=O)[nH]1 uracil
+Cc1c[nH]c(=O)[nH]c1=O thymine
+Nc1cc[nH]c(=O)n1 cytosine
+Nc1ncnc2[nH]cnc12 adenine
+Cn1c(=O)c2[nH]cnc2n(C)c1=O theophylline
+Cn1cnc2c1c(=O)[nH]c(=O)n2C theobromine
+c1c[nH]cn1 imidazole
+c1cc[nH]n1 pyrazole
+c1nc[nH]n1 triazole
+C1COCCN1 morpholine
+C1CNCCN1 piperazine
+C1CCNCC1 piperidine
+NC(=O)N urea
+CC(=O)N acetamide
+CN(C)C=O dimethylformamide
+CC(C)=O acetone
+CS(C)=O dimethyl_sulfoxide
+CCOC(C)=O ethyl_acetate
+CC#N acetonitrile
+NCC(=O)O glycine
+C[C@@H](N)C(=O)O alanine
+C[C@@H](O)C(=O)O lactic_acid
+OC(=O)CCC(=O)O succinic_acid
+OC(=O)/C=C/C(=O)O fumaric_acid
+OC(=O)CC(=O)O malonic_acid
+OCC(O)CO glycerol
+OC(=O)CC(O)(CC(=O)O)C(=O)O citric_acid
+N[C@@H](Cc1ccccc1)C(=O)O phenylalanine
+N[C@@H](Cc1ccc(O)cc1)C(=O)O tyrosine
+N[C@@H](Cc1c[nH]c2ccccc12)C(=O)O tryptophan
+N[C@@H](Cc1c[nH]cn1)C(=O)O histidine
+NCCc1ccc(O)c(O)c1 dopamine
+NCCc1c[nH]c2ccc(O)cc12 serotonin
+Nc1ccc(S(N)(=O)=O)cc1 sulfanilamide
+CC(=O)Nc1nnc(s1)S(N)(=O)=O acetazolamide
+CCOC(=O)c1ccc(N)cc1 benzocaine
+CCN(CC)CC(=O)Nc1c(C)cccc1C lidocaine
+CN(C)CCOC(c1ccccc1)c1ccccc1 diphenhydramine
+COc1ccc2cc(C(C)C(=O)O)ccc2c1 naproxen
+OC(=O)Cc1ccccc1Nc1c(Cl)cccc1Cl diclofenac
+CC(C)NCC(O)COc1cccc2ccccc12 propranolol
+COCCc1ccc(OCC(O)CNC(C)C)cc1 metoprolol
+CC(C)NCC(O)COc1ccc(CC(N)=O)cc1 atenolol
+CN(C)C(=N)NC(=N)N metformin
+O=C1NC(=O)C(c2ccccc2)(c2ccccc2)N1 phenytoin
+Nc1ccccc1O 2_aminophenol
+Nc1cccc(O)c1 3_aminophenol
+Nc1ccc(O)cc1 4_aminophenol
+NCc1ccccc1 benzylamine
+NCCc1ccccc1 phenethylamine
+NCCc1ccc(O)cc1 tyramine
+NCc1ccccn1 2_aminomethylpyridine
+NCc1ccncc1 4_aminomethylpyridine
+Nc1ccccn1 2_aminopyridine
+Nc1ccncc1 4_aminopyridine
+Nc1ncccn1 2_aminopyrimidine
+Nc1cnccn1 2_aminopyrazine
+Nc1nccs1 2_aminothiazole
+Nc1cc[nH]n1 3_aminopyrazole
+NC(=O)c1ccccc1N anthranilamide
+NC(=O)c1ccc(N)cc1 4_aminobenzamide
+Nc1cccc(C(=O)O)c1 3_aminobenzoic_acid
+Nc1nc2ccccc2s1 2_aminobenzothiazole
+c1ccc2[nH]cnc2c1 benzimidazole
+Nc1cc(=O)[nH]c(=O)[nH]1 5_aminouracil
+NCCc1c[nH]cn1 histamine
+NCCc1c[nH]c2ccccc12 tryptamine
+NCc1ccccc1N 2_aminobenzylamine
+Cc1nc2ccccc2[nH]1 2_methylbenzimidazole
+NC(=O)c1ccccn1 picolinamide
+NC(=O)c1ccncc1 isonicotinamide
+NCCO ethanolamine
+CC(=O)NC n_methylacetamide
+C1CCNC1 pyrrolidine
+NCCCCN putrescine
+Nc1ncnc2n(C)cnc12 caffeine_analogue_n7_methyladenine
+CN1C=NC2=C1C(=O)N(C)C(=O)N2C caffeine_n9_variant
+OC(=O)c1ccncc1O 4_hydroxynicotinic_acid
+Nc1ccccc1C(F)(F)F 2_trifluoromethylaniline
+COc1ccccc1N 2_anisidine
+CSc1ccccc1N 2_methylthioaniline
+Oc1ccncc1 4_hydroxypyridine
+Nc1ccc(F)cc1 4_fluoroaniline
+Nc1cccc(F)c1 3_fluoroaniline
+NCc1cccc(N)c1 3_aminobenzylamine
+NCc1ccc(N)cc1 4_aminobenzylamine
+NCc1ccc(O)cc1 4_hydroxybenzylamine
+NCc1cccc(O)c1 3_hydroxybenzylamine
+NC(c1ccccc1)CO 2_amino_2_phenylethanol
+NCc1ccccc1CO 2_aminomethylbenzyl_alcohol
+NCCc1ccc(N)cc1 4_2_aminoethyl_aniline
+NCCc1cccc(N)c1 3_2_aminoethyl_aniline
+NCCc1ccc(F)cc1 4_fluorophenethylamine
+Nc1ccc(CO)cc1 4_aminobenzyl_alcohol
+Nc1ccc(CCO)cc1 4_aminophenethyl_alcohol
+Nc1ccc(C)cc1 p_toluidine
+Nc1ccccc1C o_toluidine
+Nc1ccc(OC)cc1 p_anisidine
+NC(=O)c1ccc(O)cc1 4_hydroxybenzamide

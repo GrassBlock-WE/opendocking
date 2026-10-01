@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import sys
 from pathlib import Path
@@ -776,3 +777,763 @@ def test_every_subcommand_documents_itself(capsys):
             main(["export", name, "--help"])
         assert excinfo.value.code == 0
         assert "usage: odock export" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# The ligand-chemistry commands: similar, diverse, scaffolds, rgroups
+# ---------------------------------------------------------------------------
+
+#: A six-molecule library with three scaffolds: three benzamidines, two
+#: pyridines and caffeine.  Small enough that every expected number below can be
+#: checked by hand.
+CHEM_LIBRARY = (
+    "c1ccc(cc1)C(=N)N benzamidine\n"
+    "N=C(N)c1ccc(O)cc1 hydroxybenzamidine\n"
+    "N=C(N)c1ccc(F)cc1 fluorobenzamidine\n"
+    "NC(=O)c1cccnc1 nicotinamide\n"
+    "OC(=O)c1ccncc1 isonicotinic_acid\n"
+    "Cn1cnc2c1c(=O)n(C)c(=O)n2C caffeine\n"
+)
+
+
+@pytest.fixture
+def chemistry_library(tmp_path):
+    path = tmp_path / "chemistry.smi"
+    path.write_text(CHEM_LIBRARY, encoding="utf-8")
+    return path
+
+
+@pytest.fixture
+def chemistry_affinities(tmp_path):
+    """A results file in the shape `odock screen` writes, with docked values."""
+    path = tmp_path / "results.jsonl"
+    values = {
+        "benzamidine": -5.9,
+        "hydroxybenzamidine": -6.42,
+        "fluorobenzamidine": -6.23,
+        "caffeine": -5.33,
+    }
+    with path.open("w", encoding="utf-8") as handle:
+        for name, affinity in values.items():
+            handle.write(
+                json.dumps(
+                    {
+                        "receptor": "receptor",
+                        "ligand": name,
+                        "name": name,
+                        "status": "ok",
+                        "affinity": affinity,
+                    }
+                )
+                + "\n"
+            )
+    return path
+
+
+def test_cli_similar_ranks_the_analogues(chemistry_library, capsys):
+    code, out, _ = run_cli(
+        [
+            "similar",
+            "-q", "c1ccc(cc1)C(=N)N",
+            "-i", str(chemistry_library),
+            "--cutoff", "0.4",
+        ],
+        capsys,
+    )
+    assert code == 0
+    # 4/7 = 0.5714 for the 4-hydroxy analogue, 6/11 = 0.5455 for the 4-fluoro one,
+    # and nothing else clears 0.4 in this library.
+    assert "hydroxybenzamidine" in out and "0.5714" in out
+    assert "fluorobenzamidine" in out and "0.5455" in out
+    assert "caffeine" not in out
+    assert "3 of 6 molecule(s) at tanimoto >= 0.40 (morgan)" in out
+    assert "6 comparison(s)" in out
+
+
+def test_cli_similar_writes_json_and_the_matrix(chemistry_library, tmp_path, capsys):
+    target = tmp_path / "similar.json"
+    code, out, _ = run_cli(
+        [
+            "similar",
+            "-q", "c1ccc(cc1)C(=N)N",
+            "-i", str(chemistry_library),
+            "--cutoff", "0.4",
+            "--name", "benzamidine",
+            "--matrix",
+            "--json-out", str(target),
+        ],
+        capsys,
+    )
+    assert code == 0
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    assert payload["query"] == "benzamidine"
+    assert payload["n_hits"] == 3 and payload["n_library"] == 6
+    assert payload["hits"][0]["name"] == "benzamidine"
+    assert payload["fingerprint"]["kind"] == "morgan"
+    assert payload["matrix"]["names"][0] == "benzamidine"
+    assert len(payload["matrix"]["values"]) == 6
+    assert "off-diagonal" in out and "similarity matrix" in out
+
+
+def test_cli_similar_3d_reports_what_it_costs(chemistry_library, capsys):
+    code, out, _ = run_cli(
+        [
+            "similar",
+            "-q", "c1ccc(cc1)C(=N)N",
+            "-i", str(chemistry_library),
+            "--3d",
+            "--conformers", "2",
+            "--cutoff", "0.0",
+        ],
+        capsys,
+    )
+    assert code == 0
+    assert "pharmacophore" in out
+    assert "best over 2 conformer(s) per molecule" in out
+    # 2 query conformers x 2 library conformers x 6 molecules = 24 comparisons.
+    assert "24 comparison(s)" in out
+
+
+def test_cli_similar_rejects_a_bad_query(chemistry_library, capsys):
+    with pytest.raises(SystemExit, match="neither an existing file nor a parsable SMILES"):
+        run_cli(["similar", "-q", "not a molecule", "-i", str(chemistry_library)], capsys)
+
+
+def test_cli_diverse_picks_a_representative_subset(chemistry_library, tmp_path, capsys):
+    """Three MaxMin picks of six molecules: benzamidine, caffeine and
+    isonicotinic acid cover all three scaffolds (100 %) for 50 % of the
+    molecules, with a tightest internal similarity of 0.222."""
+    target = tmp_path / "subset.sdf"
+    payload_path = tmp_path / "diverse.json"
+    code, out, err = run_cli(
+        [
+            "diverse",
+            "-i", str(chemistry_library),
+            "-n", "3",
+            "-o", str(target),
+            "--json-out", str(payload_path),
+        ],
+        capsys,
+    )
+    assert code == 0
+    assert "diversity: 3 of 6 molecule(s) (50.0%)" in out
+    assert "scaffold space: 3 of 3 scaffold(s) covered (100.0%)" in out
+    payload = json.loads(payload_path.read_text(encoding="utf-8"))
+    assert payload["indices"] == [0, 5, 4]
+    assert payload["names"] == ["benzamidine", "caffeine", "isonicotinic_acid"]
+    assert payload["scaffold_coverage"]["n_library_scaffolds"] == 3.0
+    assert payload["scaffold_coverage"]["coverage"] == pytest.approx(1.0)
+    # The written subset is a real library the rest of the tool can read.
+    from odock.chem.ligand import read_ligands
+
+    subset = read_ligands(target, embed=False)
+    assert [mol.GetProp("_Name") for mol in subset] == [
+        "benzamidine",
+        "caffeine",
+        "isonicotinic_acid",
+    ]
+    assert "wrote" in err
+    assert "odock_diverse_rank" in target.read_text(encoding="utf-8")
+
+
+def test_cli_diverse_sphere_needs_a_cutoff(chemistry_library, capsys):
+    with pytest.raises(SystemExit, match="needs --cutoff"):
+        run_cli(
+            ["diverse", "-i", str(chemistry_library), "-n", "3", "--method", "sphere"],
+            capsys,
+        )
+
+
+def test_cli_scaffolds_counts_the_library(chemistry_library, chemistry_affinities, capsys):
+    code, out, err = run_cli(
+        [
+            "scaffolds",
+            "-i", str(chemistry_library),
+            "--affinities", str(chemistry_affinities),
+        ],
+        capsys,
+    )
+    assert code == 0
+    assert "scaffolds: 3 distinct Murcko scaffold(s) for 6 molecule(s)" in out
+    assert "largest series: 3 molecule(s) on c1ccccc1" in out
+    assert "best scaffold by affinity" in out
+    assert "series: 3 scaffold family(ies) at tanimoto >= 0.65" in out
+    assert "affinities: 4 molecule(s) from 4 result record(s)" in err
+
+
+def test_cli_scaffolds_report_prints_the_chemistry_page(
+    chemistry_library, chemistry_affinities, tmp_path, capsys
+):
+    target = tmp_path / "scaffolds.json"
+    code, out, _ = run_cli(
+        [
+            "scaffolds",
+            "-i", str(chemistry_library),
+            "--affinities", str(chemistry_affinities),
+            "--core", "N=C(N)c1ccccc1",
+            "--report",
+            "--json-out", str(target),
+        ],
+        capsys,
+    )
+    assert code == 0
+    for heading in ("SCAFFOLDS", "SERIES", "R-GROUPS", "MATCHED PAIRS"):
+        assert heading in out
+    assert "LIGAND CHEMISTRY" in out
+    assert "docking noise this project measured" in out
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    assert payload["n_molecules"] == 6
+    assert payload["rgroups"]["core"] == "N=C(N)c1ccccc1"
+    assert payload["matched_pairs"]["n_pairs"] >= 1
+    assert payload["series"]["n_series"] == 3
+
+
+def test_cli_rgroups_writes_the_matrix_and_the_matched_pairs(
+    chemistry_library, chemistry_affinities, tmp_path, capsys
+):
+    target = tmp_path / "rgroups.csv"
+    json_target = tmp_path / "rgroups.json"
+    code, out, err = run_cli(
+        [
+            "rgroups",
+            "-i", str(chemistry_library),
+            "--core", "N=C(N)c1ccccc1",
+            "--affinities", str(chemistry_affinities),
+            "--mmp",
+            "-o", str(target),
+            "--json-out", str(json_target),
+        ],
+        capsys,
+    )
+    assert code == 0
+    assert "core: N=C(N)c1ccccc1 (given)" in out
+    # Only the para position is substituted anywhere in this library, so RDKit
+    # finds one attachment point; the three benzamidines match it.
+    assert "R-groups: 1 attachment point(s) (R1)" in out
+    assert "3 of 6 molecule(s) matched (50%)" in out
+    assert "matched pairs: 3 single-point substitution(s)" in out
+    # The para H -> OH delta of the measured affinities: -6.42 - (-5.90) = -0.52.
+    assert "-0.520" in out
+    assert "+1" in out, "H -> OH adds one heavy atom, and the table says so"
+    assert "wrote" in err
+    rows = list(csv.reader(target.open(encoding="utf-8", newline="")))
+    assert rows[0][:3] == ["name", "affinity", "matched"]
+    assert len(rows) == 7
+    payload = json.loads(json_target.read_text(encoding="utf-8"))
+    assert payload["labels"] == rows[0][3:] == ["R1"]
+    assert payload["matched_pairs"]["pairs"][0]["name_a"] == "benzamidine"
+    assert payload["matched_pairs"]["pairs"][0]["delta"] == pytest.approx(-0.52)
+    assert payload["matched_pairs"]["pairs"][0]["added_heavy_atoms"] == 1
+
+
+def test_cli_rgroups_xlsx_has_a_series_sheet(
+    chemistry_library, chemistry_affinities, tmp_path, capsys
+):
+    openpyxl = pytest.importorskip("openpyxl")
+    target = tmp_path / "rgroups.xlsx"
+    code, _, _ = run_cli(
+        [
+            "rgroups",
+            "-i", str(chemistry_library),
+            "--core", "N=C(N)c1ccccc1",
+            "--affinities", str(chemistry_affinities),
+            "-o", str(target),
+        ],
+        capsys,
+    )
+    assert code == 0
+    workbook = openpyxl.load_workbook(target)
+    assert "R-groups" in workbook.sheetnames
+    assert "series" in workbook.sheetnames
+
+
+def test_cli_rgroups_reports_an_unparsable_core(chemistry_library, capsys):
+    with pytest.raises(SystemExit):
+        run_cli(["rgroups", "-i", str(chemistry_library), "--core", "not a core"], capsys)
+
+
+def test_cli_rgroups_reports_a_missing_results_file(chemistry_library, tmp_path, capsys):
+    with pytest.raises(SystemExit, match="no such results file"):
+        run_cli(
+            [
+                "rgroups",
+                "-i", str(chemistry_library),
+                "--affinities", str(tmp_path / "nope.jsonl"),
+            ],
+            capsys,
+        )
+
+
+def test_the_new_commands_are_advertised(capsys):
+    from odock.cli import _subcommands, build_parser, main
+
+    names = _subcommands(build_parser())
+    assert {"similar", "diverse", "scaffolds", "rgroups"} <= set(names)
+    with pytest.raises(SystemExit) as excinfo:
+        main(["screen", "--help"])
+    assert excinfo.value.code == 0
+    help_text = capsys.readouterr().out
+    for flag in ("--diverse", "--diverse-method", "--diverse-cutoff", "--diverse-start"):
+        assert flag in help_text, flag
+
+
+def test_screen_diverse_replaces_the_library_with_the_subset(demo_3ptb, tmp_path, capsys):
+    """`--diverse N` selects before the campaign starts, writes the subset in the
+    output directory, and does not rewrite it on a second run — otherwise its
+    mtime would change the library hash and break the resume."""
+    from odock.cli import main
+
+    outdir = tmp_path / "campaign"
+    argv = [
+        "screen",
+        "-r", str(demo_3ptb["receptor.pdbqt"]),
+        "-i", str(Path(__file__).resolve().parent.parent / "demo" / "library.smi"),
+        "--box", str(demo_3ptb["box.json"]),
+        "-o", str(outdir),
+        "--diverse", "4",
+        "--dry-run",
+    ]
+    assert main(argv) == 0
+    captured = capsys.readouterr()
+    assert "--diverse:" in captured.err
+    assert "scaffold space" in captured.err
+    subset = outdir / "library_diverse.sdf"
+    assert subset.exists()
+    from odock.chem.ligand import read_ligands
+
+    molecules = read_ligands(subset, embed=False)
+    assert len(molecules) == 4
+    payload = json.loads((outdir / "diverse.json").read_text(encoding="utf-8"))
+    assert payload["n_selected"] == 4
+    assert payload["n_library"] == 15, "the two molecules the filters remove are not eligible"
+    assert payload["scaffold_coverage"]["n_library_scaffolds"] >= 1
+    first_mtime = subset.stat().st_mtime_ns
+    assert main(argv) == 0
+    capsys.readouterr()
+    assert subset.stat().st_mtime_ns == first_mtime, "an unchanged subset is left alone"
+
+
+# ---------------------------------------------------------------------------
+# `odock pharmacophore build|screen|show`
+# ---------------------------------------------------------------------------
+
+#: Five members of the benzamidine series, the evidence a model is built from.
+PHARMACOPHORE_MEMBERS = (
+    "c1ccc(cc1)C(=N)N benzamidine\n"
+    "N=C(N)c1ccc(O)cc1 hydroxybenzamidine\n"
+    "N=C(N)c1ccc(F)cc1 fluorobenzamidine\n"
+    "N=C(N)c1ccccc1Cl chloro_benzamidine\n"
+    "c1ccc(cc1)C(=N)NC benzamidine_methyl\n"
+)
+#: A library to screen: the five actives plus three molecules that should not fit.
+PHARMACOPHORE_LIBRARY = PHARMACOPHORE_MEMBERS + (
+    "Cn1cnc2c1c(=O)n(C)c(=O)n2C caffeine\n"
+    "CC(=O)Oc1ccccc1C(=O)O aspirin\n"
+    "NC(=O)c1cccnc1 nicotinamide\n"
+)
+
+
+@pytest.fixture
+def pharmacophore_inputs(tmp_path):
+    members = tmp_path / "members.smi"
+    members.write_text(PHARMACOPHORE_MEMBERS, encoding="utf-8")
+    library = tmp_path / "library.smi"
+    library.write_text(PHARMACOPHORE_LIBRARY, encoding="utf-8")
+    actives = tmp_path / "actives.smi"
+    actives.write_text(PHARMACOPHORE_MEMBERS, encoding="utf-8")
+    return {"members": members, "library": library, "actives": actives}
+
+
+def test_cli_pharmacophore_build_screen_and_show(pharmacophore_inputs, tmp_path, capsys):
+    model_path = tmp_path / "model.json"
+    code, out, err = run_cli(
+        [
+            "pharmacophore", "build",
+            "-i", str(pharmacophore_inputs["members"]),
+            "--core", "N=C(N)c1ccccc1",
+            "-o", str(model_path),
+        ],
+        capsys,
+    )
+    assert code == 0
+    assert "5 feature(s) from 5 of 5 member(s)" in out or "4 feature(s) from 5 of 5" in out
+    assert "donor" in out and "aromatic" in out and "envelope" in out
+    assert "meaningful" in out
+    assert "wrote" in err
+    payload = json.loads(model_path.read_text(encoding="utf-8"))
+    assert payload["n_used"] == 5 and payload["meaningful"] is True
+    assert payload["core"] == "N=C(N)c1ccccc1"
+
+    scores = tmp_path / "scores.csv"
+    screen_json = tmp_path / "screen.json"
+    code, out, _ = run_cli(
+        [
+            "pharmacophore", "screen",
+            "-m", str(model_path),
+            "-i", str(pharmacophore_inputs["library"]),
+            "--conformers", "2",
+            "--actives", str(pharmacophore_inputs["actives"]),
+            "--scores-out", str(scores),
+            "--json-out", str(screen_json),
+        ],
+        capsys,
+    )
+    assert code == 0
+    assert "screen: 8 molecule(s) scored" in out
+    assert "enrichment:" in out
+    assert "too small a labelled set" in out
+    rows = list(csv.reader(scores.open(encoding="utf-8", newline="")))
+    assert rows[0][:4] == ["rank", "name", "fit", "matched"]
+    assert len(rows) == 9
+    report = json.loads(screen_json.read_text(encoding="utf-8"))
+    assert report["n_library"] == 8
+    assert report["enrichment"]["n_actives"] == 5
+    assert report["enrichment"]["enrichment_factor"] >= 1.0
+    # The five members are the top five: they are the model's own evidence.
+    assert sorted(hit["name"] for hit in report["hits"][:5]) == sorted(
+        ["benzamidine", "benzamidine_methyl", "hydroxybenzamidine",
+         "fluorobenzamidine", "chloro_benzamidine"]
+    )
+    assert report["hits"][0]["fit"] > report["hits"][-1]["fit"]
+
+    code, out, _ = run_cli(
+        ["pharmacophore", "show", "-m", str(model_path)], capsys
+    )
+    assert code == 0
+    assert "pharmacophore model: 4 feature(s) from 5 of 5 member(s)" in out
+    assert "meaningful: 5 of 5 member(s) contributed" in out
+
+
+def test_cli_pharmacophore_flags_an_anecdote(tmp_path, capsys):
+    """Two members are not evidence, and the command says so twice: in the table
+    and on stderr."""
+    members = tmp_path / "two.smi"
+    members.write_text(
+        "c1ccc(cc1)C(=N)N benzamidine\nN=C(N)c1ccc(O)cc1 hydroxybenzamidine\n",
+        encoding="utf-8",
+    )
+    code, out, err = run_cli(
+        ["pharmacophore", "build", "-i", str(members), "--core", "N=C(N)c1ccccc1"],
+        capsys,
+    )
+    assert code == 0
+    assert "ANECDOTE" in out
+    assert "fewer than the 3" in out
+    assert "not evidence" in err
+
+
+def test_cli_pharmacophore_screen_reports_a_missing_model(tmp_path, capsys):
+    with pytest.raises(SystemExit):
+        run_cli(
+            [
+                "pharmacophore", "screen",
+                "-m", str(tmp_path / "missing.json"),
+                "-i", str(tmp_path / "library.smi"),
+            ],
+            capsys,
+        )
+
+
+def test_cli_pharmacophore_rejects_a_bad_core(tmp_path, capsys):
+    members = tmp_path / "m.smi"
+    members.write_text("c1ccc(cc1)C(=N)N benzamidine\n", encoding="utf-8")
+    with pytest.raises(SystemExit):
+        run_cli(["pharmacophore", "build", "-i", str(members), "--core", "zzz"], capsys)
+
+
+# ---------------------------------------------------------------------------
+# `odock decoys` and `odock lbvs`: the ligand-based benchmark
+# ---------------------------------------------------------------------------
+
+
+def test_cli_decoys_selects_and_reports_the_matching(tmp_path, capsys):
+    actives = tmp_path / "actives.smi"
+    actives.write_text(
+        "c1ccc(cc1)C(=N)N benzamidine\n"
+        "N=C(N)c1ccc(O)cc1 hydroxybenzamidine\n"
+        "N=C(N)c1ccc(F)cc1 fluorobenzamidine\n",
+        encoding="utf-8",
+    )
+    pool = tmp_path / "pool.smi"
+    pool.write_text(
+        "Nc1ccccc1O 2_aminophenol\n"
+        "NCc1ccccc1 benzylamine\n"
+        "NCCc1ccccc1 phenethylamine\n"
+        "Nc1ncccn1 2_aminopyrimidine\n"
+        "c1ccc2ccccc2c1 naphthalene\n"
+        "OC(=O)CCC(=O)O succinic_acid\n",
+        encoding="utf-8",
+    )
+    target = tmp_path / "decoys.smi"
+    payload = tmp_path / "decoys.json"
+    code, out, err = run_cli(
+        [
+            "decoys",
+            "-a", str(actives),
+            "-p", str(pool),
+            "-n", "1",
+            "-o", str(target),
+            "--json-out", str(payload),
+        ],
+        capsys,
+    )
+    assert code == 0
+    assert "decoys:" in out and "selected from" in out
+    assert "SMD" in out and "max |SMD|" in out
+    assert "wrote" in err
+    selected = json.loads(payload.read_text(encoding="utf-8"))
+    assert selected["n_decoys"] >= 1
+    assert selected["quality"]["properties"]["MW"]["actives_mean"] > 0
+    lines = [line for line in target.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(lines) == selected["n_decoys"]
+    assert all(line.split()[1] for line in lines), "every written decoy keeps its name"
+
+
+def test_cli_lbvs_reports_the_metrics_with_their_controls(tmp_path, capsys):
+    actives = tmp_path / "actives.smi"
+    actives.write_text(
+        "c1ccc(cc1)C(=N)N benzamidine\n"
+        "N=C(N)c1ccc(O)cc1 hydroxybenzamidine\n"
+        "N=C(N)c1ccc(F)cc1 fluorobenzamidine\n",
+        encoding="utf-8",
+    )
+    decoys = tmp_path / "decoys.smi"
+    decoys.write_text(
+        "Nc1ccccc1O 2_aminophenol\n"
+        "NCc1ccccc1 benzylamine\n"
+        "Nc1ncccn1 2_aminopyrimidine\n"
+        "NCc1ccccn1 2_aminomethylpyridine\n",
+        encoding="utf-8",
+    )
+    payload = tmp_path / "lbvs.json"
+    code, out, _ = run_cli(
+        [
+            "lbvs",
+            "-a", str(actives),
+            "-d", str(decoys),
+            "--methods", "fingerprint",
+            "--conformers", "1",
+            "--bootstrap", "10",
+            "--prefilter", "0.5",
+            "--json-out", str(payload),
+        ],
+        capsys,
+    )
+    assert code == 0
+    assert "EF1%" in out and "BEDROC" in out and "95% CI" in out
+    assert "random" in out and "property_MW" in out
+    assert "pre-filter at 50%" in out and "saved" in out
+    report = json.loads(payload.read_text(encoding="utf-8"))
+    assert report["n_actives"] == 3 and report["n_decoys"] == 4
+    assert {result["method"] for result in report["results"]} >= {
+        "fingerprint_morgan", "random", "property_MW"
+    }
+    assert report["prefilter"]["n_library"] == 7
+    for result in report["results"]:
+        assert 0.0 <= result["stats"]["auc"] <= 1.0
+        assert len(result["intervals"]["auc"]) == 2
+
+
+def test_cli_decoys_and_lbvs_are_advertised(capsys):
+    from odock.cli import _subcommands, build_parser
+
+    names = _subcommands(build_parser())
+    assert {"decoys", "lbvs"} <= set(names)
+
+
+# ---------------------------------------------------------------------------
+# `odock ensemble`: docking against several receptor conformations
+# ---------------------------------------------------------------------------
+
+
+def ensemble_pair(data_dir):
+    """``(3ERT, 1ERE chain A)``: the ERα antagonist and agonist structures.
+
+    The same protein with a real binding-site difference (helix 12 moves), which
+    is what an ensemble is for; both files ship in ``tests/data``.
+    """
+    antagonist = data_dir / "3ERT.pdb"
+    agonist = data_dir / "1ERE_A.pdb"
+    if not antagonist.exists() or not agonist.exists():
+        pytest.skip("missing the bundled ERα structures")
+    return antagonist, agonist
+
+
+def test_cli_ensemble_is_listed_and_documents_itself(capsys):
+    from odock.cli import main
+
+    with pytest.raises(SystemExit) as excinfo:
+        main(["--help"])
+    assert excinfo.value.code == 0
+    assert "ensemble" in capsys.readouterr().out
+
+    with pytest.raises(SystemExit) as excinfo:
+        main(["ensemble", "--help"])
+    assert excinfo.value.code == 0
+    help_text = capsys.readouterr().out
+    for kind in ("align", "dock", "screen"):
+        assert kind in help_text
+
+    for kind, flags in (
+        ("align", ("--site", "--site-ligand", "--site-radius", "--min-identity",
+                   "--max-site-residues", "--json-out")),
+        ("dock", ("--box-ligand", "--cluster-rmsd", "--no-cross", "--consensus",
+                  "--site-atoms", "--reference")),
+        ("screen", ("--box-ligand", "--robustness-top", "--cluster-rmsd", "--no-cross",
+                    "--top", "--jobs", "--no-resume", "--consensus")),
+    ):
+        with pytest.raises(SystemExit) as excinfo:
+            main(["ensemble", kind, "--help"])
+        assert excinfo.value.code == 0
+        text = capsys.readouterr().out
+        for flag in flags:
+            assert flag in text, f"`odock ensemble {kind} --help` does not document {flag}"
+
+
+def test_cli_ensemble_align_reports_the_alignment(data_dir, tmp_path, capsys):
+    """The refusal/acceptance numbers the docs quote come from this command."""
+    from odock.cli import main
+
+    antagonist, agonist = ensemble_pair(data_dir)
+    target = tmp_path / "alignment.json"
+    code = main(
+        [
+            "ensemble", "align",
+            "-r", str(antagonist), str(agonist),
+            "--box-ligand", "OHT",
+            "--json-out", str(target),
+        ]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "OpenDocking ensemble — 2 conformation(s)" in out
+    # Sequence identity, site RMSD and the residue that moves most, all measured.
+    assert "0.944" in out and "4.551" in out
+    assert "LEU525 A" in out and "ASP351 A" in out
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    assert payload["site"] and len(payload["site"]) == 14
+    assert payload["alignments"][1]["identity"] == pytest.approx(0.944, abs=0.005)
+    assert payload["alignments"][1]["site_rmsd"] == pytest.approx(0.444, abs=0.05)
+    assert payload["alignments"][1]["displacement"]["LEU525 A"] == pytest.approx(2.010, abs=0.05)
+    assert payload["alignments"][0]["reference_frame"] is True
+
+
+def test_cli_ensemble_align_writes_the_aligned_receptors(data_dir, tmp_path, capsys):
+    from odock.cli import main
+
+    antagonist, agonist = ensemble_pair(data_dir)
+    outdir = tmp_path / "aligned"
+    code = main(
+        [
+            "ensemble", "align",
+            "-r", str(antagonist), str(agonist),
+            "--box-ligand", "OHT",
+            "--outdir", str(outdir),
+            "--pdbqt",
+            "-q",
+        ]
+    )
+    assert code == 0
+    capsys.readouterr()
+    assert (outdir / "3ERT.pdb").exists() and (outdir / "1ERE_A.pdb").exists()
+    for stem in ("3ERT", "1ERE_A"):
+        text = (outdir / f"{stem}.pdbqt").read_text(encoding="utf-8")
+        assert "ATOM" in text
+        # The co-crystallised ligand is gone: it would sit in the site being docked into.
+        assert "OHT" not in text and "EST" not in text
+
+
+def test_cli_ensemble_align_refuses_a_different_protein(data_dir, capsys):
+    from odock.cli import main
+
+    antagonist, _agonist = ensemble_pair(data_dir)
+    other = data_dir / "3PTB.pdb"
+    if not other.exists():
+        pytest.skip("missing 3PTB")
+    code = main(
+        [
+            "ensemble", "align",
+            "-r", str(antagonist), str(other),
+            "--site", "MET343,LEU345,ASP351",
+        ]
+    )
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "not the same receptor" in err
+    # The refusal carries the numbers, not just a verdict.
+    assert "identity" in err and "aligned columns" in err
+
+
+@pytest.mark.slow
+def test_cli_ensemble_dock_merges_the_conformations(data_dir, tmp_path, capsys):
+    """Two trypsins that differ by almost nothing: same answer, twice."""
+    from odock.cli import main
+
+    first = data_dir / "3PTB.pdb"
+    second = data_dir / "2PTN.pdb"
+    ligand = data_dir / "BTN.sdf"
+    if not second.exists():
+        pytest.skip("missing 2PTN")
+    poses = tmp_path / "ensemble.pdbqt"
+    report = tmp_path / "ensemble.json"
+    code = main(
+        [
+            "ensemble", "dock",
+            "-r", str(first), str(second),
+            "--box-ligand", "BEN", "--buffer", "8",
+            "-l", str(ligand),
+            "-e", "1", "-n", "1", "--seed", "42",
+            "-o", str(poses),
+            "--json-out", str(report),
+            "-q",
+        ]
+    )
+    assert code == 0
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert payload["labels"] == ["3PTB", "2PTN"]
+    assert payload["winning_conformation"] in {"3PTB", "2PTN"}
+    assert set(payload["best_per_conformation"]) == {"3PTB", "2PTN"}
+    # The two structures are nearly identical, so the affinities agree closely.
+    values = list(payload["best_per_conformation"].values())
+    assert max(values) - min(values) < 0.5
+    assert payload["robustness"]["score"] > 0.0
+    assert payload["rescoring"]["n_scores"] == 2 * 2
+    # The merged pose file is a real multi-model PDBQT the toolkit can read back.
+    text = poses.read_text(encoding="utf-8")
+    assert text.count("MODEL") == len(payload["poses"])
+    assert "ODOCK ENSEMBLE: conformation=" in text
+    from odock.cli import _read_poses
+
+    read_back = _read_poses(poses)
+    assert len(read_back) == len(payload["poses"])
+    assert all(pose["affinity"] is not None for pose in read_back)
+
+
+def test_cli_ensemble_dock_explains_a_missing_box(data_dir, tmp_path, capsys):
+    from odock.cli import main
+
+    antagonist, agonist = ensemble_pair(data_dir)
+    with pytest.raises(SystemExit, match="no search box"):
+        main(
+            [
+                "ensemble", "dock",
+                "-r", str(antagonist), str(agonist),
+                "-l", str(data_dir / "EST.sdf"),
+            ]
+        )
+
+
+def test_cli_ensemble_screen_requires_its_inputs(capsys):
+    """`ensemble screen` is argparse-complete: no options, no crash, exit 2."""
+    from odock.cli import main
+
+    for argv in (
+        ["ensemble", "screen"],
+        ["ensemble", "screen", "-r", "rec.pdb"],
+        ["ensemble", "screen", "-r", "rec.pdb", "-i", "lib.smi"],
+    ):
+        with pytest.raises(SystemExit) as excinfo:
+            main(argv)
+        assert excinfo.value.code == 2
+        assert "required" in capsys.readouterr().err
+

@@ -4,6 +4,102 @@ All notable changes to OpenDocking are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.2.1 — 2026-10-01
+
+The ligand side of the science, ensembles instead of one rigid structure, runs
+that can be reopened and reproduced, and a CLI that cannot silently lose a
+command. 1063 → 1398 tests.
+
+### Added — ligand cheminformatics
+
+* `odock.ligandsim` — six fingerprint kinds behind one RDKit-free type
+  (Morgan/ECFP, RDKit path, atom pair, torsion, MACCS, 3-D pharmacophore) with
+  Tanimoto/Dice/Tversky, a blocked similarity matrix, analogue search, and
+  best-over-conformers 3-D search that reports its cost.
+* `odock.scaffold` — Murcko and generic skeletons, scaffold groups and series,
+  an MCS core, **R-group decomposition** into positional `R1..Rk` with
+  unmatched rows reported, and **matched molecular pairs** with affinity deltas.
+* Library diversity: MaxMin and sphere exclusion, Butina clustering (checked
+  against RDKit's own implementation), and `odock screen --diverse N`.
+* `odock.pharmacophore` — models built from **recurring features with per-feature
+  member support**, scored against a library with a documented fit and an
+  envelope constraint. Measured on the five ring-amidines: four features, every
+  one supported 5/5, sweeping ranks 1–5 at 0.918–0.944 against a best decoy of
+  0.497; warfarin is rejected with 18 of its 23 heavy atoms outside the envelope.
+* `odock.decoys` + `odock.lbvs` — property-matched decoy generation with a
+  Tanimoto ceiling, and an enrichment benchmark reporting **EF1 %, EF5 %, AUC and
+  BEDROC with bootstrap intervals** alongside random and property-only controls.
+  The quality report says when its own decoy set is not matched rather than
+  hiding it.
+
+### Added — ensembles and cryptic pockets
+
+* `odock.ensemble` — several receptor conformations validated as the same
+  protein (sequence identity, site superposition, a named refusal when they are
+  not) and docked against a shared box, with **pose clustering across
+  conformations** and a per-ligand **robustness score**. Measured: on ERα
+  (3ERT/1ERE_A) the winning conformation is the receptor rather than the seed,
+  and equal-affinity ligands separate on robustness (caffeine 0.814 vs
+  benzamidine 0.004).
+* `odock.pockets` across an ensemble — per-conformation cavities mapped into a
+  common frame and tracked across structures, with **closure / narrowed /
+  detector disagreement** verdicts and the detector's own noise floor reported
+  beside every claim. Measured: three cavities close when the agonist binds
+  (410→4, 352→22, 366→4 Å³, each 5.4–5.7× the local resolution) while the
+  trypsin control yields **zero** candidates (largest apparent change 40 Å³
+  against a 39 Å³ resolution).
+* `odock ensemble {align,dock,screen,pockets}`; a ligand-free conformation is
+  refused for box derivation with the reason named.
+
+### Added — reproducible, presentable runs
+
+* `odock.project` — a self-contained `.odockproj` (inputs with SHA-256, every
+  setting, the seed, the poses, a schema version), with save / open / verify /
+  info / extract. A flipped byte is caught and named.
+* `odock project reproduce` — re-runs the docking from the recorded inputs and
+  reports **PASS / FAIL / INCONCLUSIVE** with the numbers; the default tolerance
+  is **exactly zero** because the engine is deterministic (measured
+  `max |Δaffinity| = 0.000`, `top-pose RMSD = 0.000 Å`, two reproductions
+  byte-identical).
+* `odock project compare` and `odock project index` — several runs side by side
+  with the differing settings named field by field, and a campaign index page.
+* `odock report-html` — a single self-contained HTML report (inline SVG, base64
+  figures, zero external references) with an explicit "what this run does not
+  establish" section.
+
+### Fixed
+
+* **`odock <cmd> --help` crashed for every subcommand.** argparse `%`-formats
+  help strings, and a new command's one-line help contained a literal `EF1%`.
+  Every `format_help` raised `ValueError: unsupported format character ','`,
+  which also broke `odock` with no arguments and `odock --help`.
+* **A symmetric core was ring-shifted during pharmacophore alignment.** Taking
+  RDKit's *first* core match left para analogues' amidines on the wrong side,
+  costing them both donor features (fit 0.00, ranks 16–17 beside 0.94
+  analogues); matches are now enumerated and the lowest RMSD kept.
+* **Self-similarity leaked into the ligand-based benchmark.** With the actives
+  as their own queries all three methods scored AUC and BEDROC 1.000 for free;
+  leave-one-out is now the API default for fingerprint, pharmacophore and shape.
+* **A verdict rule fired on its own counterexample** in the pocket tracker: a
+  track absent where the free volume was *higher* is detector disagreement, not
+  a cryptic site, and is now excluded from the candidate list.
+* A test pinned a **suite count** rather than the shape of the result, so the
+  documentation guard broke whenever any test landed anywhere.
+* `docs/VALIDATION.md` and the README were brought back in step with the tree,
+  and internal-document citations were removed from the shipped sources at the
+  source rather than only in the staged copy.
+
+### Added — engineering
+
+* `tests/test_cli_surface.py` — the complete expected subcommand set asserted in
+  **both** directions, that building the parser emits no registration warning,
+  that every registrar ran, and that every command has a help page. It exists
+  because a cleanup script once deleted a region of `cli.py` and took two other
+  workstreams' registration calls with it, dropping six subcommands while the
+  suite stayed green.
+* `python/odock/cli_ext.py` — one extension entry point, so contributed
+  subcommands register in their own modules and `cli.py` is edited once.
+
 ## 0.2.0 — 2026-10-01
 
 Screening at library scale, the numbers needed to judge a pose, a real

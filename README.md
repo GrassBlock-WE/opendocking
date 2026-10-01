@@ -57,6 +57,21 @@ replaces, drops the C++/CUDA toolchain lock-in, and adds a modern Python API.
 * **Interaction fingerprints**: a fixed-length (residue, interaction-type) vector
   per pose, a similarity matrix across poses, the recurring contacts of the top
   poses, and water-mediated bridges.
+* **Ligand cheminformatics**: circular and path fingerprints, Tanimoto/Dice/
+  Tversky similarity, analogue search, Murcko scaffolds and series, R-group
+  decomposition and matched molecular pairs with affinity deltas, MaxMin and
+  sphere-exclusion diversity picking, and Butina clustering — see
+  [`docs/CHEMINFORMATICS.md`](docs/CHEMINFORMATICS.md).
+* **Ensemble docking**: dock against a *set* of receptor conformations, superposed
+  on their binding site so one box means the same thing in every frame; merge and
+  cluster the poses across conformations and measure how robust a binding mode is
+  to the receptor moving (cross-receptor rescoring at fixed coordinates, with its
+  sample sizes) — see [`docs/ENSEMBLE.md`](docs/ENSEMBLE.md).
+* **Cryptic and transient pockets**: detect the cavities of every conformation,
+  map them into the common frame, match them across structures by their lining
+  residues, and report which sites open and close — separated from the pocket
+  detector's own measured noise floor, so "we found a cryptic site" and "we found
+  noise" are different answers — see [`docs/POCKETS.md`](docs/POCKETS.md).
 * A `odock` command-line interface for scripts and pipelines.
 * A PyQt6 + ModernGL workbench: drag the grid box, watch the score live, browse
   poses.
@@ -187,7 +202,8 @@ crates/dock-py/             PyO3 + NumPy bindings
 python/odock/               Python API, CLI, preparation, GUI
 tests/                      Python integration and validation tests
 docs/                       architecture, data structures, scoring derivation,
-                            science layer, user guide, screening
+                            science layer, user guide, screening, cheminformatics,
+                            receptor ensembles and cryptic pockets
 ```
 
 ## Design notes
@@ -322,6 +338,16 @@ that remain. `tests/simulate_workbench.py` drives the real window through **48
 user steps** with Qt input events — the startup layout and the 3-D viewport, then
 the File, Receptor, Ligand, Grid, Docking, Poses, Analysis and View menus — and
 writes an illustrated report to `out/simulation/report.md`.
+
+**Reproducible runs and reports.** A finished run can be saved as one verifiable
+file (`odock project save`), reopened anywhere without its original paths
+(`odock project open`), re-run and checked against its own record
+(`odock project reproduce`), compared with another run field by field
+(`odock project compare`), indexed across a whole campaign (`odock project
+index`) and turned into one self-contained HTML document with the figures inside
+it (`odock report-html`). [`docs/PROJECTS.md`](docs/PROJECTS.md) documents the
+container, the verification semantics, the schema version as the compatibility
+contract, and what a reproduction does and does not establish.
 
 ## Status and known limitations
 

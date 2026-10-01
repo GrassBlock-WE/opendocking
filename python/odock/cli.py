@@ -10,6 +10,10 @@ does can also be scripted::
     odock box --ligand ligand.pdbqt --out box.json --buffer 8
     odock pocket -r receptor.pdbqt --json-out pockets.json
     odock filter -i library.sdf -i more.smi
+    odock similar -q 'N=C(N)c1ccccc1' -i library.sdf --cutoff 0.5
+    odock diverse -i library.sdf -n 100 -o subset.sdf
+    odock scaffolds -i library.sdf --affinities results.jsonl
+    odock rgroups -i library.sdf --core 'N=C(N)c1ccccc1' -o rgroups.xlsx
     odock dock -r receptor.pdbqt -l ligand.pdbqt --box box.json -o poses.pdbqt -v
     odock screen -r receptor.pdbqt -i library.sdf --box box.json -o results --top 50
     odock score -r receptor.pdbqt -l poses.pdbqt
@@ -36,7 +40,9 @@ import sys
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
 
+from .ligandcli import attach_ligand_chemistry  # `odock similar/diverse/scaffolds/rgroups`
 from .prepare import BoxSpec
+from .project import add_report_parsers  # `odock project ...` and `odock report-html`
 
 
 def _eprint(*args, **kwargs) -> None:
@@ -273,6 +279,11 @@ def cmd_screen(args) -> int:
 
     box = _screen_box(args)
     _eprint(f"box: {box}")
+
+    # `--diverse N` is added by odock.ligandcli, which wraps this command: it
+    # replaces the library with a representative subset *before* the campaign
+    # starts, so the resumable results, the manifest and the resume keys all
+    # describe the subset that was actually docked.
 
     payload = _screen_config(args, screen, box)
     try:
@@ -767,6 +778,536 @@ def cmd_filter(args) -> int:
             },
         )
     return 0
+
+
+# ---------------------------------------------------------------------------
+# The ligand-chemistry commands: similarity, diversity, scaffolds, R-groups
+# ---------------------------------------------------------------------------
+
+
+def _read_library(sources: Sequence[str]):
+    """Read every molecule of every library file; returns ``(mols, names)``.
+
+    The chemistry commands only need chemistry, never a conformer, so the read is
+    asked not to embed: triaging 100 000 molecules must not generate 100 000 3-D
+    structures.
+    """
+    ligand = _lazy("odock.chem.ligand", "ligand reading")
+
+    mols: List[object] = []
+    for source in sources:
+        try:
+            mols.extend(ligand.read_ligands(source, embed=False))
+        except (OSError, ValueError) as exc:
+            raise SystemExit(f"error: cannot read {source}: {exc}")
+    if not mols:
+        raise SystemExit("error: no ligand was found in the given files")
+    names = []
+    for index, mol in enumerate(mols):
+        try:
+            label = mol.GetProp("_Name").strip()
+        except Exception:  # pragma: no cover - defensive
+            label = ""
+        names.append(label or f"ligand_{index + 1}")
+    return mols, names
+
+
+def _read_query(text: str):
+    """A query molecule, from a file path or a SMILES string."""
+    path = Path(text)
+    if path.exists() and path.is_file():
+        mols, _ = _read_library([text])
+        return mols[0]
+    from rdkit import Chem
+
+    mol = Chem.MolFromSmiles(text)
+    if mol is None:
+        raise SystemExit(
+            f"error: the query {text!r} is neither an existing file nor a parsable SMILES"
+        )
+    return mol
+
+
+def _load_affinities(path) -> dict:
+    """``{ligand name: kcal/mol}`` from a screening run's results file."""
+    if not path:
+        return {}
+    target = Path(path)
+    if not target.exists():
+        raise SystemExit(f"error: no such results file: {path}")
+    screen = _lazy("odock.screen", "reading the screening results")
+    scaffold = _lazy("odock.scaffold", "ligand chemistry")
+    try:
+        records = screen.read_records(target)
+    except Exception as exc:  # pragma: no cover - defensive
+        raise SystemExit(f"error: cannot read {path}: {exc}")
+    if not records:
+        raise SystemExit(f"error: no result record in {path}")
+    values = scaffold.affinities_from_records(records)
+    _eprint(
+        f"affinities: {len(values)} molecule(s) from {len(records)} result record(s) "
+        f"in {path}"
+    )
+    return values
+
+
+def _fingerprint_options(args) -> dict:
+    """The fingerprint parameters every chemistry command shares."""
+    return {
+        "kind": getattr(args, "fingerprint", "morgan"),
+        "radius": int(getattr(args, "radius", 2)),
+        "n_bits": int(getattr(args, "bits", 2048)),
+        "use_features": bool(getattr(args, "features", False)),
+        "use_chirality": bool(getattr(args, "chirality", False)),
+    }
+
+
+def cmd_similar(args) -> int:
+    """Find the library members similar to a query molecule.
+
+    The search is 2-D (Morgan/ECFP by default) and cut-off based: it reports
+    every molecule at or above ``--cutoff`` Tanimoto, ranked, with the number of
+    comparisons it made.  ``--3d`` switches to the best-over-conformers
+    pharmacophore search, which is conformer-dependent and pays for it — the
+    reported ``pairs`` count makes that cost visible.
+    """
+    sim = _lazy("odock.ligandsim", "ligand similarity")
+
+    mols, names = _read_library(args.input)
+    options = _fingerprint_options(args)
+    query = _read_query(args.query)
+    query_name = args.name or ""
+    if not query_name:
+        try:
+            query_name = query.GetProp("_Name").strip()
+        except Exception:  # pragma: no cover - defensive
+            query_name = ""
+    if not query_name:
+        query_name = args.query[:30]
+
+    if args.three_d or options["kind"] == "pharmacophore":
+        three_d_options = dict(options)
+        three_d_options["kind"] = "pharmacophore"
+        hits = _chemistry_guard(
+            sim.find_analogues_3d,
+            query,
+            mols,
+            cutoff=args.cutoff,
+            metric=args.metric,
+            top=int(args.top or 0),
+            n_query_confs=int(args.conformers),
+            n_library_confs=int(args.conformers),
+            seed=int(args.seed),
+            name=query_name,
+        )
+    else:
+        three_d_options = dict(options)
+        library = _chemistry_guard(
+            sim.fingerprint_set,
+            mols,
+            names=names,
+            smiles=True,
+            source=", ".join(args.input),
+            **options,
+        )
+        hits = _chemistry_guard(
+            sim.find_analogues,
+            query,
+            library,
+            cutoff=args.cutoff,
+            metric=args.metric,
+            top=int(args.top or 0),
+            name=query_name,
+            **options,
+        )
+
+    print(f"query: {query_name}")
+    print(hits.table())
+    print()
+    detail = (
+        f"{hits.n_hits} of {hits.n_library} molecule(s) at {hits.metric} >= "
+        f"{hits.cutoff:.2f} ({hits.kind})"
+    )
+    if hits.conformers > 1:
+        detail += f"; best over {hits.conformers} conformer(s) per molecule"
+    detail += f"; {hits.n_pairs} comparison(s) in {hits.seconds:.3f} s"
+    print(detail)
+    for note in hits.notes:
+        print(f"  note: {note}")
+
+    matrix = None
+    if args.matrix:
+        if hits.kind == "pharmacophore":
+            raise SystemExit(
+                "error: --matrix is the 2-D similarity matrix; drop --3d (or the "
+                "pharmacophore fingerprint) to use it"
+            )
+        import numpy as np
+
+        library = sim.fingerprint_set(
+            mols, names=names, smiles=True, source=", ".join(args.input), **options
+        )
+        matrix = sim.similarity_matrix(library, metric=args.metric)
+        header = "           " + " ".join(f"{i:>6d}" for i in range(len(names)))
+        print()
+        print("similarity matrix (rows = library order)")
+        print(header)
+        for index, name in enumerate(names):
+            cells = " ".join(f"{matrix[index, j]:6.3f}" for j in range(len(names)))
+            print(f"{index:>4d} {name[:6]:<6} {cells}")
+        off = matrix[~np.eye(len(names), dtype=bool)]
+        print(
+            f"off-diagonal: mean {off.mean():.3f}, max {off.max():.3f}, "
+            f"min {off.min():.3f}"
+        )
+
+    if args.json_out:
+        payload = hits.as_dict()
+        payload["input"] = [str(source) for source in args.input]
+        payload["fingerprint"] = three_d_options
+        if matrix is not None:
+            payload["matrix"] = {
+                "names": list(names),
+                "values": [[round(float(v), 6) for v in row] for row in matrix],
+            }
+        _write_json(args.json_out, payload)
+    return 0
+
+
+def cmd_diverse(args) -> int:
+    """Pick a representative subset of a library and say what it covers.
+
+    MaxMin picking (the default) chooses ``-n`` molecules that are as mutually
+    dissimilar as possible; ``--method sphere --cutoff X`` keeps every molecule
+    below ``X`` similarity of the ones already kept.  Both report the *tightest*
+    redundancy inside the subset, and the scaffold-space coverage against the
+    full library — a subset of 20 % of the molecules that covers 60 % of the
+    scaffolds is doing its job, one that covers 20 % is not.
+    """
+    sim = _lazy("odock.ligandsim", "library diversity selection")
+
+    mols, names = _read_library(args.input)
+    options = _fingerprint_options(args)
+    library = _chemistry_guard(
+        sim.fingerprint_set,
+        mols,
+        names=names,
+        smiles=True,
+        source=", ".join(args.input),
+        **options,
+    )
+    if args.method == "sphere" and args.cutoff is None:
+        raise SystemExit("error: --method sphere needs --cutoff")
+    start: object = int(args.start) if str(args.start).isdigit() else args.start
+    selection = _chemistry_guard(
+        sim.diversity_subset,
+        library,
+        int(args.n),
+        method=args.method,
+        cutoff=args.cutoff,
+        metric=args.metric,
+        start=start,
+    )
+    coverage = sim.scaffold_coverage(selection, mols, generic=args.generic)
+
+    rows = []
+    for position, index in enumerate(selection.indices):
+        nearest = selection.min_similarity[position]
+        rows.append(
+            [
+                str(position + 1),
+                selection.names[position][:28],
+                "" if position == 0 else f"{nearest:.3f}",
+                selection.smiles[position][:40] if selection.smiles else "",
+            ]
+        )
+    print(
+        _table(
+            ["pick", "name", "nearest", "smiles"],
+            rows,
+        )
+    )
+    print()
+    print(
+        f"diversity: {selection.n_selected} of {selection.n_library} molecule(s) "
+        f"({selection.fraction:.1%}) by {selection.method} ({selection.metric}); "
+        f"tightest pair inside the subset {selection.worst_pairwise_similarity:.3f}, "
+        f"{selection.n_pairs} comparison(s) in {selection.seconds:.3f} s"
+    )
+    print(
+        f"scaffold space: {coverage['n_subset_scaffolds']:.0f} of "
+        f"{coverage['n_library_scaffolds']:.0f} scaffold(s) covered "
+        f"({coverage['coverage']:.1%}) by {coverage['subset_fraction']:.1%} of the molecules"
+    )
+    if not args.generic:
+        print(
+            "  (Murcko scaffolds; --generic counts generic skeletons instead, which "
+            "groups benzene with pyridine)"
+        )
+
+    if args.out:
+        target = _write_subset(Path(args.out), library, selection)
+        _eprint(f"wrote {target} ({selection.n_selected} molecule(s))")
+    if args.json_out:
+        payload = selection.as_dict()
+        payload["input"] = [str(source) for source in args.input]
+        payload["fingerprint"] = options
+        payload["scaffold_coverage"] = {k: round(v, 6) for k, v in coverage.items()}
+        _write_json(args.json_out, payload)
+    return 0
+
+
+def _write_subset(path: Path, library, selection):
+    """Write a selected subset as SDF (properties preserved) or SMILES."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.suffix.lower() in (".smi", ".smiles", ".ism"):
+        text = "\n".join(
+            f"{library.smiles_of(index)} {library.name_of(index)}"
+            for index in selection.indices
+        )
+        path.write_text(text + "\n", encoding="utf-8")
+        return path
+    from rdkit import Chem
+
+    writer = Chem.SDWriter(str(path))
+    try:
+        for rank, index in enumerate(selection.indices, start=1):
+            smiles = library.smiles_of(index)
+            mol = Chem.MolFromSmiles(smiles) if smiles else None
+            if mol is None:  # pragma: no cover - defensive
+                continue
+            mol.SetProp("_Name", library.name_of(index))
+            mol.SetProp("odock_diverse_rank", str(rank))
+            mol.SetProp("odock_diverse_method", selection.method)
+            writer.write(mol)
+    finally:
+        writer.close()
+    return path
+
+
+def cmd_scaffolds(args) -> int:
+    """Group a library by Murcko scaffold and cluster those scaffolds into series.
+
+    Two columns matter: *how many* molecules share each scaffold (the largest
+    series is the library's main chemotype) and *how many distinct scaffolds*
+    the library has.  ``--report`` prints the whole chemistry page instead —
+    scaffolds, series, the R-group table and the matched pairs.
+    """
+    scaffold = _lazy("odock.scaffold", "ligand chemistry")
+
+    mols, names = _read_library(args.input)
+    affinities = _load_affinities(args.affinities)
+
+    if args.report:
+        print(
+            _chemistry_guard(
+                scaffold.report_section,
+                mols,
+                affinities=affinities,
+                names=names,
+                core=args.core,
+                generic=args.generic,
+                cutoff=args.series_cutoff,
+                top_scaffolds=int(args.top),
+            )
+        )
+        if args.json_out:
+            _write_json(
+                args.json_out,
+                {
+                    "input": [str(source) for source in args.input],
+                    "n_molecules": len(mols),
+                    "scaffolds": [
+                        group.as_dict()
+                        for group in scaffold.scaffold_groups(
+                            mols, generic=args.generic, names=names, affinities=affinities
+                        )
+                    ],
+                    "series": scaffold.scaffold_clusters(
+                        mols,
+                        cutoff=args.series_cutoff,
+                        generic=args.generic,
+                        names=names,
+                        affinities=affinities,
+                    ).as_dict(),
+                    "rgroups": scaffold.rgroups(
+                        mols, core=args.core, generic=args.generic, names=names,
+                        affinities=affinities,
+                    ).as_dict(),
+                    "matched_pairs": scaffold.matched_pairs(
+                        mols, affinities, core=args.core, generic=args.generic, names=names
+                    ).as_dict(),
+                },
+            )
+        return 0
+
+    groups = scaffold.scaffold_groups(
+        mols, generic=args.generic, names=names, affinities=affinities
+    )
+    rows = []
+    for group in groups[: int(args.top)] if args.top else groups:
+        best = group.best_affinity
+        rows.append(
+            [
+                str(group.count),
+                "" if best is None else f"{best:.3f}",
+                group.key or "(acyclic)",
+                group.representative_name[:28],
+            ]
+        )
+    print(_table(["count", "best dA", "scaffold", "representative"], rows))
+    n_scaffolds = sum(1 for group in groups if group.key)
+    n_acyclic = sum(group.count for group in groups if not group.key)
+    print()
+    print(
+        f"scaffolds: {n_scaffolds} distinct Murcko scaffold(s) for {len(mols)} "
+        f"molecule(s)"
+        + (f", {n_acyclic} acyclic molecule(s) have none" if n_acyclic else "")
+    )
+    print(f"largest series: {groups[0].count} molecule(s) on {groups[0].key or '(acyclic)'}")
+    if affinities:
+        scored = [group for group in groups if group.best_affinity is not None]
+        if scored:
+            best = min(scored, key=lambda group: group.best_affinity)
+            print(f"best scaffold by affinity: {best.key} ({best.best_affinity:.3f})")
+
+    clustering = scaffold.scaffold_clusters(
+        mols,
+        cutoff=args.series_cutoff,
+        generic=args.generic,
+        names=names,
+        affinities=affinities,
+    )
+    print()
+    print(
+        f"series: {clustering.n_clusters} scaffold family(ies) at {clustering.metric} "
+        f">= {args.series_cutoff:.2f}"
+    )
+    print(clustering.table(limit=int(args.top) if args.top else 20))
+    for note in clustering.notes:
+        print(f"  note: {note}")
+
+    if args.json_out:
+        _write_json(
+            args.json_out,
+            {
+                "input": [str(source) for source in args.input],
+                "n_molecules": len(mols),
+                "n_scaffolds": n_scaffolds,
+                "largest_series": groups[0].count if groups else 0,
+                "scaffolds": [group.as_dict() for group in groups],
+                "series": clustering.as_dict(),
+            },
+        )
+    return 0
+
+
+def cmd_rgroups(args) -> int:
+    """Decompose a library into R-groups around a common core.
+
+    The core is the most common Murcko scaffold by default, ``--core mcs`` uses
+    the maximum common substructure, and ``--core SMILES`` pins it.  The output
+    is the molecule x R-group matrix a medicinal chemist asks for first, with
+    ``-o table.xlsx`` (or ``.csv``) writing it out and ``--mmp`` adding the
+    matched molecular pairs and their affinity deltas.
+    """
+    scaffold = _lazy("odock.scaffold", "ligand chemistry")
+
+    mols, names = _read_library(args.input)
+    affinities = _load_affinities(args.affinities)
+    decomposition = _chemistry_guard(
+        scaffold.rgroups,
+        mols,
+        core=args.core,
+        generic=args.generic,
+        names=names,
+        affinities=affinities,
+    )
+    print(
+        f"core: {decomposition.core} ({decomposition.core_source})"
+        + (
+            f"  [{decomposition.core_with_labels}]"
+            if decomposition.core_with_labels != decomposition.core
+            else ""
+        )
+    )
+    print(decomposition.table(limit=int(args.top) if args.top else 0))
+    print()
+    print(
+        f"R-groups: {len(decomposition.labels)} attachment point(s) "
+        f"({', '.join(decomposition.labels) or 'none'}); "
+        f"{decomposition.n_matched} of {decomposition.n_molecules} molecule(s) matched "
+        f"({decomposition.match_rate:.0%})"
+    )
+    for note in decomposition.notes:
+        print(f"  note: {note}")
+
+    if args.mmp:
+        pairs = scaffold.matched_pairs(
+            mols, affinities, core=args.core, generic=args.generic, names=names
+        )
+        print()
+        print(
+            f"matched pairs: {pairs.n_pairs} single-point substitution(s) from "
+            f"{pairs.n_matched} matched molecule(s), {pairs.n_pairs_considered} pair(s) "
+            f"considered"
+        )
+        print(pairs.table(limit=int(args.top) if args.top else 20))
+        print(
+            f"  {pairs.n_significant} pair(s) have |dA| >= {pairs.noise:.1f} kcal/mol, "
+            "the docking noise this project measured; a smaller delta is not a "
+            "structure-activity result"
+        )
+    else:
+        pairs = None
+
+    if args.out:
+        target = Path(args.out)
+        if target.suffix.lower() in (".xlsx", ".xlsm"):
+            series = None
+            if affinities:
+                series = scaffold.series_table(
+                    mols, affinities, core=args.core, generic=args.generic, names=names
+                )
+            written = scaffold.write_rgroup_xlsx(target, decomposition, series=series)
+        else:
+            written = scaffold.write_rgroup_csv(target, decomposition)
+        _eprint(f"wrote {written}")
+
+    if args.json_out:
+        payload = decomposition.as_dict()
+        payload["input"] = [str(source) for source in args.input]
+        if pairs is not None:
+            payload["matched_pairs"] = pairs.as_dict()
+        if affinities:
+            payload["series"] = scaffold.series_table(
+                mols, affinities, core=args.core, generic=args.generic, names=names
+            ).as_dict()
+        _write_json(args.json_out, payload)
+    return 0
+
+
+def _read_json(path: Path):
+    """A JSON object from ``path``, or ``None`` when it is absent or broken."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _chemistry_guard(action, *args, **kwargs):
+    """Run a chemistry call, turning its ``ValueError`` into a clean message.
+
+    Every ligand-chemistry entry point validates what it is given (an unknown
+    fingerprint kind, a core that is not a core, a molecule that cannot be
+    embedded).  A command line has to answer those with one sentence and exit
+    status 2, not a traceback.
+    """
+    try:
+        return action(*args, **kwargs)
+    except (ValueError, RuntimeError, IndexError) as exc:
+        raise SystemExit(f"error: {exc}")
 
 
 def _dominant_pose_shape(poses: List[dict]) -> List[dict]:
@@ -1656,6 +2197,15 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("-l", "--ligand", help="ligand PDBQT to load")
     g.add_argument("-p", "--poses", help="pose PDBQT written by `odock dock`")
     g.set_defaults(func=cmd_gui)
+
+    # -- extension subcommands ---------------------------------------------
+    # Every contributed subcommand group (similar/diverse/scaffolds/rgroups,
+    # ensemble, project/report-html) registers through this single call; see
+    # odock/cli_ext.py for why the per-workstream calls that used to live here
+    # were collapsed into one. Add new groups to cli_ext.py, not here.
+    from .cli_ext import register_extensions
+
+    register_extensions(sub)
 
     return p
 

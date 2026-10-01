@@ -849,3 +849,57 @@ def test_filter_result_summary_and_dict():
     failed = filters.lipinski(Chem.MolFromSmiles("C" * 40))
     assert "fail" in failed.summary()
     json.dumps(failed.as_dict())
+
+
+# ---------------------------------------------------------------------------
+# Reading a library for the ligand-chemistry commands
+# ---------------------------------------------------------------------------
+#
+# `odock similar/diverse/scaffolds/rgroups` fingerprint a whole library, so they
+# read it with `embed=False`: a 100 000-compound triage must not generate 100 000
+# three-dimensional structures.  These tests pin the two properties those
+# commands rely on — no conformers are made, and the file order and titles
+# survive — plus the SMILES round trip the `--diverse -o subset.smi` writer uses.
+
+
+def test_read_ligands_without_embedding_leaves_a_flat_library_flat(tmp_path: Path):
+    path = tmp_path / "library.smi"
+    path.write_text("CCO ethanol\nc1ccccc1 benzene\n", encoding="utf-8")
+    flat = read_ligands(path, embed=False)
+    assert [mol.GetNumConformers() for mol in flat] == [0, 0]
+    # The default still embeds, which is what the docking path needs.
+    embedded = read_ligands(path)
+    assert all(mol.GetConformer().Is3D() for mol in embedded)
+    assert [mol.GetProp("_Name") for mol in embedded] == ["ethanol", "benzene"]
+
+
+def test_read_ligands_keeps_library_order_and_titles_with_spaces(tmp_path: Path):
+    """A name is everything after the first field, spaces included — the format
+    the chemistry commands write a diverse subset in."""
+    path = tmp_path / "library.smi"
+    path.write_text(
+        "CCO ethanol\nc1ccccc1 benzene, pure\n\n# a comment\nCCC propane\n",
+        encoding="utf-8",
+    )
+    mols = read_ligands(path, embed=False)
+    assert [mol.GetProp("_Name") for mol in mols] == [
+        "ethanol",
+        "benzene, pure",
+        "propane",
+    ]
+
+
+def test_a_smiles_library_round_trips_through_the_writer_convention(tmp_path: Path):
+    """`SMILES name` lines read back with the same molecules and titles, which is
+    what makes a written subset a usable library again."""
+    source = read_ligands("N=C(N)c1ccccc1 benzamidine\nCn1cnc2c1c(=O)n(C)c(=O)n2C caffeine", embed=False)
+    text = "\n".join(
+        f"{Chem.MolToSmiles(mol)} {mol.GetProp('_Name')}" for mol in source
+    )
+    path = tmp_path / "subset.smi"
+    path.write_text(text + "\n", encoding="utf-8")
+    again = read_ligands(path, embed=False)
+    assert [mol.GetProp("_Name") for mol in again] == ["benzamidine", "caffeine"]
+    assert [Chem.MolToSmiles(mol) for mol in again] == [
+        Chem.MolToSmiles(mol) for mol in source
+    ]

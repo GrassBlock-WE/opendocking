@@ -31,7 +31,7 @@ python tests/simulate_workbench.py
 |---|---|---|
 | Rust kernel | `cargo test --workspace` | **116 passed** (+ 5 integration tests in `crates/dock-core/tests/real_ligand.rs`, + 1 doc test) |
 | Rust, GPU backend | `cargo test -p dock-core --features gpu` | **116 passed** |
-| Python | `.venv/Scripts/python.exe -m pytest tests -q` | **1053 passed, 1 skipped** (259 s) |
+| Python | `.venv/Scripts/python.exe -m pytest tests -q` | **1294 passed, 1 skipped** (557 s, measured 2026-10-01) |
 | Workbench session | `python tests/simulate_workbench.py` | **48 steps, 48 passed, 0 failed** |
 | Benchmark | `python -m odock.benchmark` | 5 systems × 3 seeds, see [§4](#4-the-re-docking-benchmark) |
 
@@ -367,6 +367,15 @@ Known limitations, stated so that they cannot be mistaken for oversights:
    accuracy on them is a regression signal, not a capability claim.
 10. **No AutoDockTools (ADT / MGLTools) code was read, borrowed or copied.**
     Everything PDBQT-related is written from the format specification plus RDKit.
+11. **Ligand-based methods are not validated against activity data.** The
+    cheminformatics layer ([`CHEMINFORMATICS.md`](CHEMINFORMATICS.md)) and the
+    pharmacophore layer ([`PHARMACOPHORE.md`](PHARMACOPHORE.md)) are validated
+    against hand-computed arithmetic and the bundled library, not against an
+    assay: a Tanimoto similarity, a Murcko scaffold, a matched-pair delta and a
+    pharmacophore fit are all *structural* statements. The one labelled set this
+    repository contains is six actives in seventeen molecules, which cannot
+    establish enrichment, and both the API and the documents say so where the
+    numbers are quoted.
 
 ---
 
