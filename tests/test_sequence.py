@@ -755,7 +755,10 @@ def test_the_pose_dock_sits_side_by_side_and_can_stack(window):
     left, right = splitter.widget(0), splitter.widget(1)
     assert left is not None and right is not None
     assert left.findChild(QtWidgets.QTableWidget) is window.table
-    assert left.findChild(QtWidgets.QSlider) is window.pose_slider
+    # The pose slider was removed on purpose: the table is how a pose is chosen,
+    # and the summary label that used to share its row now spans it.
+    assert left.findChild(QtWidgets.QSlider) is None
+    assert window.lbl_pose.parent() is left
     assert right is window.log
 
     window.stack_action.setChecked(True)
@@ -1027,7 +1030,7 @@ def test_the_first_pose_load_frames_the_pocket_once(qapp):
             assert built.viewport.camera.distance < whole
             camera = built.viewport.camera
             numbers = (camera.azimuth, camera.elevation, camera.distance, tuple(camera.target))
-            built.pose_slider.setValue(1)
+            built.set_pose(1)
             qapp.processEvents()
             assert (
                 camera.azimuth,
@@ -1051,7 +1054,7 @@ def test_changing_the_pose_keeps_every_camera_number_and_the_clip(window):
     qapp = QtWidgets.QApplication.instance()
     qapp.processEvents()
     camera = viewport.camera
-    window.pose_slider.setValue(0)
+    window.set_pose(0)
     qapp.processEvents()
     window.sequence.select_keys([window.sequence.blocks()[3].key])
     qapp.processEvents()
@@ -1067,7 +1070,7 @@ def test_changing_the_pose_keeps_every_camera_number_and_the_clip(window):
     rows_before = window.selection_table.rowCount()
     frame_before = _rendered_frame(window)
 
-    window.pose_slider.setValue(2)
+    window.set_pose(2)
     qapp.processEvents()
 
     assert (
@@ -1225,7 +1228,7 @@ def test_the_interaction_focus_is_sticky_across_poses(window):
         window.scene.front_clip,
     )
     for index in range(len(window.pose_models)):
-        window.pose_slider.setValue(index)
+        window.set_pose(index)
         qapp.processEvents()
         assert window.scene.interactions, "the dashes follow the pose"
         assert list(window.scene.interaction_focus) == list(window.interactions), (
@@ -1261,7 +1264,7 @@ def test_the_interaction_focus_is_sticky_across_poses(window):
     assert window.scene.interaction_focus == []
     assert window.scene.interactions == []
     if window.pose_models:
-        window.pose_slider.setValue(1)
+        window.set_pose(1)
         qapp.processEvents()
         assert window.scene.interaction_focus == [], "cleared means cleared"
 
@@ -1428,8 +1431,17 @@ def test_the_ruler_takes_the_palette_of_the_active_theme(window):
 
 
 def test_contact_marks_name_the_residues_a_pose_touches(window):
-    """Loading a pose marks its contacts on the ruler, from the coordinates."""
+    """The ruler marks belong to the *opt-in* interaction drawing.
+
+    Nothing is marked while the drawing is off (the pose contacts are reported in
+    the label and the table, not drawn), and Analysis ▸ Show interactions turns
+    the marks on; Clear annotations takes them away again.
+    """
     ruler = window.sequence
+    assert not ruler.marked_keys("contact"), "off by default: nothing is drawn"
+    window._annotate_interactions(quiet=True)
+    qapp = QtWidgets.QApplication.instance()
+    qapp.processEvents()
     marked = ruler.marked_keys("contact")
     assert marked, "the imported ligand touches residues"
     # Every mark is a residue the ruler actually draws, and BEN (the ligand)
@@ -1448,10 +1460,9 @@ def test_contact_marks_name_the_residues_a_pose_touches(window):
 
     # Browsing poses recomputes them for the pose on screen.
     window.load_poses((DEMO / "poses.pdbqt").read_text(encoding="utf-8"))
-    qapp = QtWidgets.QApplication.instance()
     qapp.processEvents()
     for index in range(len(window.pose_models)):
-        window.pose_slider.setValue(index)
+        window.set_pose(index)
         qapp.processEvents()
         current = ruler.marked_keys("contact")
         assert current, f"pose {index + 1} touches nothing?"

@@ -662,7 +662,7 @@ EN: Dict[str, str] = {
     "plot.best": "best {value}",
     # -- measurements ------------------------------------------------------
     "measure.empty": "No measurements yet: pick the measure tool and click two atoms.",
-    "measure.count": "{n} distances measured",
+    "measure.count": "{n} measurements",
     "measure.col.a": "Atom A",
     "measure.col.b": "Atom B",
     "measure.col.value": "Distance (Å)",
@@ -700,6 +700,23 @@ EN: Dict[str, str] = {
     "palette.placeholder": "Type a command…",
     "palette.hint": "{n} commands · {shown} shown · Enter runs the selected one",
     "palette.empty": "No menu entry matches that",
+    # -- interaction lines -------------------------------------------------
+    "tab.interactions": "Interactions",
+    "menu.interaction_lines": "Lines drawn",
+    "action.interaction_all": "Show every kind",
+    "interactions.empty": (
+        "No interaction lines yet — Analysis ▸ Show interactions draws them from "
+        "the displayed pose."
+    ),
+    "interactions.count": "{n} lines in the view",
+    "interactions.hidden": "{n} hidden by the filter",
+    "interactions.col.kind": "Type",
+    "interactions.col.receptor": "Receptor atom",
+    "interactions.col.ligand": "Ligand atom",
+    "interactions.col.distance": "Distance (Å)",
+    "interaction.legend_convention": "each dash joins a ligand atom to a residue atom",
+    "log.interaction_filter": "drawing {shown} of {total} interaction lines",
+    "log.interactions_copied": "copied {n} interaction lines to the clipboard",
     # -- themes, density, layouts and the session --------------------------
     "menu.theme": "Theme",
     "menu.density": "Density",
@@ -773,6 +790,34 @@ EN: Dict[str, str] = {
     "action.surface_cut_clear": "Remove the cut",
     "action.surface_stats": "Surface statistics",
     "action.surface_legend": "Colour bar",
+    # The dielectric model of the potential, and the value of the potential
+    # decomposed by residue. Both are statements about the *model*, so both
+    # spell out their parameters in the label.
+    "menu.surface_dielectric": "Dielectric",
+    "action.surface_dielectric_distance": "Distance (ε=4r)",
+    "action.surface_dielectric_uniform": "Uniform (ε=4)",
+    "action.surface_esp_breakdown": "Potential breakdown…",
+    "esp.header": "Electrostatic potential at the surface, by residue",
+    "esp.model": "model: point charges, dielectric {dielectric}, ε = {epsilon}",
+    "esp.charges": (
+        "charge column: {nonzero} of {atoms} atoms non-zero, sum {total} e "
+        "(a column that does not sum to the molecule's net charge makes this map "
+        "relative, not absolute)"
+    ),
+    "esp.points": "sampled {points} of {available} surface points",
+    "esp.focus_total": "potential at the site centre: {value} kcal/(mol·e)",
+    "esp.focus_at": "site centre: {x}, {y}, {z}",
+    "esp.table": "residue        n   charge   at site   share      mean",
+    "log.surface_dielectric": "dielectric: {model}",
+    "log.esp_breakdown": (
+        "{residues} residues contribute; the largest at the site is {top} "
+        "({value} kcal/(mol·e))"
+    ),
+    "log.surface_open": "the surface is open, so it encloses no volume to report",
+    "log.surface_volume": (
+        "enclosed volume {volume} Å³ ({cap} lid triangles, {cap_area} Å² of lid)"
+    ),
+    "dialog.esp_breakdown": "Potential breakdown",
     "action.sasa_report": "SASA & burial…",
     "action.ligand_burial": "Ligand burial",
     "action.burial_per_pose": "Burial per pose",
@@ -788,6 +833,8 @@ EN: Dict[str, str] = {
     "legend.unit.hydrophobicity": "0 polar → 1 apolar",
     "legend.unit.electrostatic": "kcal/(mol·e)",
     "legend.scale": "{length:.0f} Å",
+    "legend.charge_warning": "charges: may not carry formal charge",
+    "log.surface_charge_warning": "charge column: {detail}",
     "log.surface_building": "building the {mode} surface for {atoms} atoms…",
     "log.surface_built": (
         "{mode}: {triangles} triangles, {area} Å², grid {spacing} Å, "
@@ -846,6 +893,87 @@ EN: Dict[str, str] = {
     "sasa.poses": "pose  affinity  buried Å²  buried %",
     "btn.save_figure": "Save figure…",
     "log.figure_saved": "figure written to {name}",
+    # The measurement-history table's columns and its CSV button. Added while
+    # that table is being built, so the window keeps constructing; the wording
+    # matches the measurement tool's own vocabulary.
+    "measure.col.kind": "kind",
+    "measure.col.atoms": "atoms",
+    "measure.csv": "CSV…",
+    # The console dock: a Python prompt bound to the live session.
+    "dock.console": "Console",
+    "console.banner": (
+        "Bound to the live session: window, scene, viewport, receptor, ligand, "
+        "poses, box, interactions — plus dock(), set_box_center(), "
+        "save_project(), frame_binding_site(), export_pymol(). Type help for the list."
+    ),
+    "console.help_title": "Bound names and helpers",
+    "console.no_sandbox": (
+        "This console runs in the workbench process with full access — there is "
+        "no sandbox."
+    ),
+    "console.error": "error: {message}",
+    "console.continued": "… ",
+    "action.console_clear": "Clear console",
+    "log.console": "console: {line}",
+    # Viewer annotations and undo/redo. These were written against the call
+    # sites in app.py while that feature was being added, so the placeholders
+    # are the ones the code passes; the wording is deliberately plain.
+    "annotation.default": "annotation",
+    "annotation.empty": "there is nothing to annotate yet",
+    "annotation.on_measurement": "on measurement {index}",
+    "log.annotation_added": "annotation added: {text}",
+    "log.annotation_no_anchor": "click an atom or pick a residue first",
+    "log.annotation_none": "no annotations to copy",
+    "log.annotations_copied": "copied {n} annotations",
+    "log.annotations_hidden": "annotations hidden",
+    "log.annotations_shown": "annotations shown",
+    "action.undo": "Undo",
+    "action.undo_name": "Undo {name}",
+    "action.redo": "Redo",
+    "action.redo_name": "Redo {name}",
+    "log.undone": "undid {name}",
+    "log.redone": "redid {name}",
+    "log.nothing_to_undo": "nothing to undo",
+    "log.nothing_to_redo": "nothing to redo",
+    "undo.add_measurement": "add {kind} measurement",
+    "undo.remove_measurement": "remove measurement",
+    "undo.clear_measurements": "clear measurements",
+    "undo.add_annotation": "add annotation",
+    "undo.edit_annotation": "edit annotation",
+    "undo.remove_annotation": "remove annotation",
+    "log.measure_csv": "wrote {n} measurements to the CSV",
+    "log.measure_degenerate": "those atoms are degenerate: the measurement is undefined",
+    "log.measure_kind": "measuring {kind}",
+    "log.measure_needs": "{kind} needs {need} atoms, {have} picked",
+    "log.measurement": "{kind} {value} ({atoms})",
+    "status.measure_pick": "{kind}: pick {have} / {need} atoms",
+    "annotation.col.text": "text",
+    "annotation.col.anchor": "anchor",
+    "annotation.col.shown": "shown",
+    "annotation.yes": "yes",
+    "annotation.no": "no",
+    "annotation.count": "{n} annotations",
+    # The measurement kinds, the two new submenus and the label dialog. Neither
+    # menu title carries an accelerator: the menu bar's eight accelerated
+    # titles are fixed by a test.
+    "measure.kind.distance": "Distance",
+    "measure.kind.angle": "Angle",
+    "measure.kind.dihedral": "Dihedral",
+    "measure.kind.centroid": "Centroid",
+    "measure.kind.plane": "Plane",
+    "measure.kind.plane_angle": "Plane ↔ plane",
+    "measure.kind.plane_bond": "Plane ↔ bond",
+    "menu.measure": "Measure",
+    "menu.annotate": "Annotate",
+    "action.measure_selection": "Measure selection",
+    "action.annotate_add": "Add label…",
+    "action.annotate_edit": "Edit label…",
+    "action.annotate_delete": "Delete label",
+    "action.annotate_show": "Show labels",
+    "annotation.dialog.title": "Label",
+    "annotation.dialog.text": "Text",
+    "annotation.dialog.colour": "Colour",
+    "annotation.dialog.anchor": "Anchored to",
 }
 
 # ---------------------------------------------------------------------------
@@ -1446,7 +1574,7 @@ ZH: Dict[str, str] = {
     "plot.best": "最佳 {value}",
     # -- measurements ------------------------------------------------------
     "measure.empty": "尚无测量：选择测量工具并点击两个原子。",
-    "measure.count": "已测量 {n} 个距离",
+    "measure.count": "已测量 {n} 项",
     "measure.col.a": "原子 A",
     "measure.col.b": "原子 B",
     "measure.col.value": "距离 (Å)",
@@ -1480,6 +1608,20 @@ ZH: Dict[str, str] = {
     "palette.placeholder": "输入命令…",
     "palette.hint": "共 {n} 条命令 · 显示 {shown} 条 · 回车执行所选",
     "palette.empty": "没有匹配的菜单项",
+    # -- interaction lines -------------------------------------------------
+    "tab.interactions": "相互作用",
+    "menu.interaction_lines": "绘制的连线",
+    "action.interaction_all": "显示全部类型",
+    "interactions.empty": "尚无相互作用连线 — 使用「分析 ▸ 显示相互作用」按当前构象绘制。",
+    "interactions.count": "视图中有 {n} 条连线",
+    "interactions.hidden": "{n} 条被筛选隐藏",
+    "interactions.col.kind": "类型",
+    "interactions.col.receptor": "受体原子",
+    "interactions.col.ligand": "配体原子",
+    "interactions.col.distance": "距离 (Å)",
+    "interaction.legend_convention": "每条虚线连接一个配体原子与一个残基原子",
+    "log.interaction_filter": "显示 {total} 条相互作用中的 {shown} 条",
+    "log.interactions_copied": "已复制 {n} 条相互作用到剪贴板",
     # -- themes, density, layouts and the session --------------------------
     "menu.theme": "主题",
     "menu.density": "密度",
@@ -1551,6 +1693,25 @@ ZH: Dict[str, str] = {
     "action.surface_cut_clear": "取消剖切",
     "action.surface_stats": "表面统计",
     "action.surface_legend": "色标",
+    "menu.surface_dielectric": "介电常数",
+    "action.surface_dielectric_distance": "距离依赖 (ε=4r)",
+    "action.surface_dielectric_uniform": "固定介电 (ε=4)",
+    "action.surface_esp_breakdown": "电势分解…",
+    "esp.header": "表面静电势的残基分解",
+    "esp.model": "模型：点电荷，介电 {dielectric}，ε = {epsilon}",
+    "esp.charges": (
+        "电荷列：{atoms} 个原子中 {nonzero} 个非零，总和 {total} e"
+        "（若总和不等于分子净电荷，该图为相对值而非绝对值）"
+    ),
+    "esp.points": "在 {available} 个表面点中采样 {points} 个",
+    "esp.focus_total": "位点中心电势：{value} kcal/(mol·e)",
+    "esp.focus_at": "位点中心：{x}, {y}, {z}",
+    "esp.table": "残基          原子数  电荷   位点处   占比      均值",
+    "log.surface_dielectric": "介电模型：{model}",
+    "log.esp_breakdown": "{residues} 个残基有贡献；位点处最大者为 {top}（{value} kcal/(mol·e)）",
+    "log.surface_open": "表面未闭合，无法给出体积",
+    "log.surface_volume": "封闭体积 {volume} Å³（{cap} 个封盖三角形，{cap_area} Å² 封盖）",
+    "dialog.esp_breakdown": "电势分解",
     "action.sasa_report": "SASA 与包埋…",
     "action.ligand_burial": "配体包埋面积",
     "action.burial_per_pose": "逐构象包埋面积",
@@ -1566,6 +1727,8 @@ ZH: Dict[str, str] = {
     "legend.unit.hydrophobicity": "0 亲水 → 1 疏水",
     "legend.unit.electrostatic": "kcal/(mol·e)",
     "legend.scale": "{length:.0f} Å",
+    "legend.charge_warning": "电荷：可能未体现形式电荷",
+    "log.surface_charge_warning": "电荷列：{detail}",
     "log.surface_building": "正在为 {atoms} 个原子构建 {mode} 表面…",
     "log.surface_built": (
         "{mode}：{triangles} 个三角形，{area} Å²，网格 {spacing} Å，"
@@ -1621,6 +1784,74 @@ ZH: Dict[str, str] = {
     "sasa.poses": "构象  亲和力  包埋 Å²  包埋 %",
     "btn.save_figure": "保存图…",
     "log.figure_saved": "图已写入 {name}",
+    "measure.col.kind": "类型",
+    "measure.col.atoms": "原子",
+    "measure.csv": "CSV…",
+    "dock.console": "终端",
+    "console.banner": (
+        "已绑定当前会话：window、scene、viewport、receptor、ligand、poses、box、"
+        "interactions，以及 dock()、set_box_center()、save_project()、"
+        "frame_binding_site()、export_pymol()。输入 help 查看列表。"
+    ),
+    "console.help_title": "已绑定的名称与便捷函数",
+    "console.no_sandbox": "该终端在工作台进程内运行，拥有完整权限 —— 没有沙箱。",
+    "console.error": "错误：{message}",
+    "console.continued": "… ",
+    "action.console_clear": "清空终端",
+    "log.console": "终端：{line}",
+    "annotation.default": "标注",
+    "annotation.empty": "当前没有可标注的对象",
+    "annotation.on_measurement": "测量 {index}",
+    "log.annotation_added": "已添加标注：{text}",
+    "log.annotation_no_anchor": "请先点击原子或选择残基",
+    "log.annotation_none": "没有可复制的标注",
+    "log.annotations_copied": "已复制 {n} 条标注",
+    "log.annotations_hidden": "已隐藏标注",
+    "log.annotations_shown": "已显示标注",
+    "action.undo": "撤销",
+    "action.undo_name": "撤销 {name}",
+    "action.redo": "重做",
+    "action.redo_name": "重做 {name}",
+    "log.undone": "已撤销 {name}",
+    "log.redone": "已重做 {name}",
+    "log.nothing_to_undo": "没有可撤销的操作",
+    "log.nothing_to_redo": "没有可重做的操作",
+    "undo.add_measurement": "添加{kind}测量",
+    "undo.remove_measurement": "删除测量",
+    "undo.clear_measurements": "清空测量",
+    "undo.add_annotation": "添加标注",
+    "undo.edit_annotation": "编辑标注",
+    "undo.remove_annotation": "删除标注",
+    "log.measure_csv": "已将 {n} 条测量写入 CSV",
+    "log.measure_degenerate": "所选原子退化，该测量无定义",
+    "log.measure_kind": "正在测量{kind}",
+    "log.measure_needs": "{kind} 需要 {need} 个原子，已选 {have} 个",
+    "log.measurement": "{kind} {value}（{atoms}）",
+    "status.measure_pick": "{kind}：已选 {have} / {need} 个原子",
+    "annotation.col.text": "文本",
+    "annotation.col.anchor": "锚点",
+    "annotation.col.shown": "显示",
+    "annotation.yes": "是",
+    "annotation.no": "否",
+    "annotation.count": "{n} 条标注",
+    "measure.kind.distance": "距离",
+    "measure.kind.angle": "角度",
+    "measure.kind.dihedral": "二面角",
+    "measure.kind.centroid": "质心",
+    "measure.kind.plane": "平面",
+    "measure.kind.plane_angle": "平面↔平面",
+    "measure.kind.plane_bond": "平面↔键",
+    "menu.measure": "测量",
+    "menu.annotate": "标注",
+    "action.measure_selection": "测量所选",
+    "action.annotate_add": "添加标注…",
+    "action.annotate_edit": "编辑标注…",
+    "action.annotate_delete": "删除标注",
+    "action.annotate_show": "显示标注",
+    "annotation.dialog.title": "标注",
+    "annotation.dialog.text": "文本",
+    "annotation.dialog.colour": "颜色",
+    "annotation.dialog.anchor": "锚定于",
 }
 
 

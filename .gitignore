@@ -70,3 +70,6 @@ python/odock/*.dll
 
 # Local release backups (archives of published versions)
 /backup/
+
+# Stray scratch directories written by tools whose temp directory was not# writable: the process falls back to the working directory, so families like# odock-chrome-<rand> (a PDF converter's profile) and odock-ensemble-<rand># (a validation probe's outputs) appear at the root. Deny the shape rather# than the names we happened to notice - two families have shipped already.
+odock-*/

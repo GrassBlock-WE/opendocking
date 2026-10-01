@@ -54,6 +54,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 
+from .i18n import EN as _EN
 from .i18n import tr
 
 __all__ = [
@@ -61,12 +62,21 @@ __all__ = [
     "DENSITIES",
     "LIGHT",
     "LAYOUT_PRESETS",
+    "MEASUREMENT_KINDS",
+    "MEASUREMENT_ORDER",
     "PHASES",
     "THEMES",
+    "Annotation",
+    "Command",
     "CommandPalette",
+    "CommandStack",
+    "ConsoleInput",
+    "ConsoleWidget",
     "Contact",
     "EnergyTrace",
     "FingerprintDiff",
+    "InteractionTable",
+    "Measurement",
     "MeasurementHistory",
     "PaletteEntry",
     "PhaseRecord",
@@ -79,16 +89,27 @@ __all__ = [
     "SessionHistory",
     "SessionStore",
     "Theme",
+    "angle_degrees",
     "atom_readout",
+    "centroid",
     "classify_structure",
     "collect_entries",
     "compare_poses",
+    "consolidate_by_residue",
     "contact_map",
+    "dihedral_degrees",
     "fingerprint_diff",
+    "format_measurement",
     "fuzzy_score",
-    "format_duration",
-    "format_energy",
-    "layout_preset",
+    "line_plane_angle",
+    "measurement_expected_atoms",
+    "measurement_kind_label",
+    "measurement_unit",
+    "measurement_value",
+    "measurements_csv",
+    "plane_normal",
+    "plane_plane_angle",
+    "point_plane_distance",
     "rank_entries",
     "stylesheet",
     "symmetry_aware_rmsd",
@@ -1524,6 +1545,914 @@ def atom_readout_text(atom, *, kind: str = "", index: int = -1) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Geometry: the arithmetic behind every measurement
+# ---------------------------------------------------------------------------
+#
+# Plain functions on plain coordinate triples, so the numbers can be checked
+# against hand-computed values without a window anywhere near them. Every angle
+# is in degrees, every distance in ångström, and the conventions are stated per
+# function because a dihedral without its convention is three different numbers.
+
+
+def _vec(point) -> Tuple[float, float, float]:
+    return (float(point[0]), float(point[1]), float(point[2]))
+
+
+def _sub(a, b):
+    return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
+
+
+def _dot(a, b) -> float:
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+
+def _cross(a, b):
+    return (
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    )
+
+
+def _norm(a) -> float:
+    return math.sqrt(_dot(a, a))
+
+
+def _unit(a):
+    length = _norm(a)
+    if length < 1e-12:
+        return (0.0, 0.0, 0.0)
+    return (a[0] / length, a[1] / length, a[2] / length)
+
+
+def angle_degrees(first, vertex, third) -> float:
+    """The angle ``first–vertex–third`` in degrees, 0…180.
+
+    The angle that is *measured at* ``vertex``, which is the middle atom the user
+    clicked — the same convention the previous single-distance tool used for its
+    atom order.
+    """
+    a = _sub(_vec(first), _vec(vertex))
+    b = _sub(_vec(third), _vec(vertex))
+    denominator = _norm(a) * _norm(b)
+    if denominator < 1e-12:
+        return 0.0
+    cosine = max(-1.0, min(1.0, _dot(a, b) / denominator))
+    return math.degrees(math.acos(cosine))
+
+
+def dihedral_degrees(p0, p1, p2, p3) -> float:
+    """The ``p0–p1–p2–p3`` torsion in degrees, in ``(-180, 180]``.
+
+    The IUPAC sign convention: looking down the ``p1→p2`` axis, a clockwise
+    rotation of the far bond is positive. A planar *syn* arrangement is 0° and a
+    planar *anti* arrangement is ±180°.
+    """
+    b0 = _sub(_vec(p0), _vec(p1))
+    b1 = _sub(_vec(p2), _vec(p1))
+    b2 = _sub(_vec(p3), _vec(p2))
+    b1u = _unit(b1)
+    if _norm(b1) < 1e-12:
+        return 0.0
+    v = _sub(b0, tuple(b1u[axis] * _dot(b0, b1u) for axis in range(3)))
+    w = _sub(b2, tuple(b1u[axis] * _dot(b2, b1u) for axis in range(3)))
+    x = _dot(v, w)
+    y = _dot(_cross(b1u, v), w)
+    if abs(x) < 1e-12 and abs(y) < 1e-12:
+        return 0.0
+    return math.degrees(math.atan2(y, x))
+
+
+def centroid(points) -> Optional[Tuple[float, float, float]]:
+    """The arithmetic mean of ``points`` (``None`` for an empty selection)."""
+    if not points:
+        return None
+    count = float(len(points))
+    return (
+        sum(_vec(p)[0] for p in points) / count,
+        sum(_vec(p)[1] for p in points) / count,
+        sum(_vec(p)[2] for p in points) / count,
+    )
+
+
+def plane_normal(points) -> Optional[Tuple[float, float, float]]:
+    """A unit normal of the best-fit plane through ``points``.
+
+    Three points define the plane exactly (the cross product of two edges); more
+    than three use the smallest singular vector of the centred coordinate
+    matrix, which is the plane that minimises the squared out-of-plane distance —
+    the honest thing to draw through a ring or a side chain.
+    """
+    points = [_vec(p) for p in points]
+    if len(points) < 3:
+        return None
+    middle = centroid(points)
+    if len(points) == 3:
+        normal = _cross(_sub(points[1], points[0]), _sub(points[2], points[0]))
+    else:
+        import numpy as np
+
+        centred = np.asarray(
+            [[p[0] - middle[0], p[1] - middle[1], p[2] - middle[2]] for p in points],
+            dtype=float,
+        )
+        try:
+            _u, _s, vt = np.linalg.svd(centred, full_matrices=False)
+        except np.linalg.LinAlgError:  # pragma: no cover - degenerate input
+            return None
+        normal = tuple(float(value) for value in vt[-1])
+    length = _norm(normal)
+    if length < 1e-12:
+        return None
+    return (normal[0] / length, normal[1] / length, normal[2] / length)
+
+
+def plane_plane_angle(first, second) -> Optional[float]:
+    """The acute angle between two planes, in degrees, 0…90.
+
+    Computed from the normals as ``arccos(|n1·n2|)``: parallel planes are 0° and
+    perpendicular planes are 90°, which is what a chemist means by "the angle
+    between these two rings".
+    """
+    n1 = _vec(first)
+    n2 = _vec(second)
+    denominator = _norm(n1) * _norm(n2)
+    if denominator < 1e-12:
+        return None
+    cosine = abs(_dot(n1, n2) / denominator)
+    return math.degrees(math.acos(max(-1.0, min(1.0, cosine))))
+
+
+def line_plane_angle(direction, normal) -> Optional[float]:
+    """The acute angle between a line and a plane, in degrees, 0…90.
+
+    ``0`` means the bond lies *in* the plane, ``90`` means it is perpendicular to
+    it — the convention `line-plane angle` always has, and the opposite of the
+    angle between the line and the *normal*.
+    """
+    d = _vec(direction)
+    n = _vec(normal)
+    denominator = _norm(d) * _norm(n)
+    if denominator < 1e-12:
+        return None
+    sine = abs(_dot(_unit(d), _unit(n)))
+    return math.degrees(math.asin(max(0.0, min(1.0, sine))))
+
+
+def point_plane_distance(point, origin, normal) -> Optional[float]:
+    """The signed distance from ``point`` to the plane through ``origin``."""
+    n = _unit(_vec(normal))
+    if _norm(n) < 1e-12:
+        return None
+    return _dot(_sub(_vec(point), _vec(origin)), n)
+
+
+# ---------------------------------------------------------------------------
+# Measurements
+# ---------------------------------------------------------------------------
+
+#: Every measurable quantity: ``kind -> atoms it consumes``. ``split`` marks where
+#: the second group starts for the compound kinds (plane↔plane, plane↔bond).
+MEASUREMENT_KINDS: Dict[str, Dict[str, object]] = {
+    "distance": {"atoms": 2, "unit": "Å", "split": None},
+    "angle": {"atoms": 3, "unit": "°", "split": None},
+    "dihedral": {"atoms": 4, "unit": "°", "split": None},
+    "centroid": {"atoms": 1, "unit": "xyz", "split": None},
+    "plane": {"atoms": 3, "unit": "normal", "split": None},
+    "plane_angle": {"atoms": 6, "unit": "°", "split": 3},
+    "plane_bond": {"atoms": 5, "unit": "°", "split": 3},
+}
+
+#: The order the measure menu offers them in.
+MEASUREMENT_ORDER = (
+    "distance",
+    "angle",
+    "dihedral",
+    "centroid",
+    "plane",
+    "plane_angle",
+    "plane_bond",
+)
+
+
+def measurement_unit(kind: str) -> str:
+    """The unit of ``kind``: Å, degrees, or a word for the composite answers."""
+    return str(MEASUREMENT_KINDS.get(kind, {}).get("unit", ""))
+
+
+def measurement_expected_atoms(kind: str) -> int:
+    """How many atoms ``kind`` consumes before it can be evaluated."""
+    return int(MEASUREMENT_KINDS.get(kind, {}).get("atoms", 2))  # type: ignore[arg-type]
+
+
+def measurement_split(kind: str) -> Optional[int]:
+    """Where the second group of a compound measurement begins."""
+    split = MEASUREMENT_KINDS.get(kind, {}).get("split")
+    return None if split is None else int(split)  # type: ignore[arg-type]
+
+
+def measurement_value(kind: str, points: Sequence, split: Optional[int] = None):
+    """The value of ``kind`` for the coordinates ``points``.
+
+    Returns a float for the numeric kinds and a tuple for the composite ones
+    (a centroid is three numbers, a plane is its origin and normal), or ``None``
+    when there are not enough points or they are degenerate.
+    """
+    points = [_vec(point) for point in points]
+    if kind == "distance":
+        if len(points) < 2:
+            return None
+        return math.dist(points[0], points[1])
+    if kind == "angle":
+        if len(points) < 3:
+            return None
+        return angle_degrees(points[0], points[1], points[2])
+    if kind == "dihedral":
+        if len(points) < 4:
+            return None
+        return dihedral_degrees(points[0], points[1], points[2], points[3])
+    if kind == "centroid":
+        return centroid(points)
+    if kind == "plane":
+        return plane_normal(points)
+    if kind in ("plane_angle", "plane_bond"):
+        if split is None:
+            split = measurement_split(kind)
+        if split is None or len(points) < split + 2:
+            return None
+        first = plane_normal(points[:split])
+        if first is None:
+            return None
+        if kind == "plane_angle":
+            second = plane_normal(points[split:])
+            return None if second is None else plane_plane_angle(first, second)
+        direction = _sub(points[split + 1], points[split])
+        return line_plane_angle(direction, first)
+    return None  # pragma: no cover - unknown kind
+
+
+def format_measurement(kind: str, value) -> str:
+    """A value as the user reads it, with its unit and no false precision."""
+    unit = measurement_unit(kind)
+    if value is None:
+        return "—"
+    if kind == "centroid" and isinstance(value, tuple):
+        return f"{value[0]:.2f}  {value[1]:.2f}  {value[2]:.2f}"
+    if kind == "plane" and isinstance(value, tuple):
+        return f"normal {value[0]:+.3f} {value[1]:+.3f} {value[2]:+.3f}"
+    if not isinstance(value, (int, float)):  # pragma: no cover - defensive
+        return str(value)
+    if unit == "°":
+        return f"{float(value):.2f}°"
+    if unit == "Å":
+        return f"{float(value):.3f} Å"
+    return f"{float(value):.3f}"
+
+
+@dataclass
+class Measurement:
+    """One geometric question asked of the scene, with the atoms it asked about.
+
+    ``refs`` are ``("receptor" | "ligand", atom_index)`` pairs — the same
+    references the ruler, the selection table and the 3-D picker all produce, so
+    the entry paths cannot disagree about which atom was meant.
+    """
+
+    kind: str
+    refs: List[Tuple[str, int]] = field(default_factory=list)
+    label: str = ""
+    visible: bool = True
+    colour: Optional[Tuple[float, float, float]] = None
+
+    @property
+    def split(self) -> Optional[int]:
+        return measurement_split(self.kind)
+
+    @property
+    def expected_atoms(self) -> int:
+        return measurement_expected_atoms(self.kind)
+
+    @property
+    def unit(self) -> str:
+        return measurement_unit(self.kind)
+
+    def is_complete(self) -> bool:
+        return len(self.refs) >= self.expected_atoms
+
+    def value(self, points: Sequence) -> object:
+        return measurement_value(self.kind, points, self.split)
+
+    def to_dict(self) -> dict:
+        return {
+            "kind": self.kind,
+            "refs": [list(ref) for ref in self.refs],
+            "label": self.label,
+            "visible": bool(self.visible),
+            "colour": None if self.colour is None else list(self.colour),
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict) -> "Measurement":
+        colour = payload.get("colour")
+        return cls(
+            kind=str(payload.get("kind", "distance")),
+            refs=[(str(ref[0]), int(ref[1])) for ref in payload.get("refs", [])],
+            label=str(payload.get("label", "")),
+            visible=bool(payload.get("visible", True)),
+            colour=None if not colour else tuple(float(c) for c in colour),
+        )
+
+
+@dataclass
+class Annotation:
+    """A text label pinned to an atom, a residue or a measurement."""
+
+    text: str
+    #: ``("receptor"|"ligand", index)`` | ``("residue", chain, res_id, res_name)``
+    #: | ``("measurement", index)`` — one anchor, three spellings.
+    anchor: Tuple = ()
+    colour: Tuple[float, float, float] = (1.0, 0.85, 0.35)
+    visible: bool = True
+
+    ANCHOR_KINDS = ("atom", "residue", "measurement")
+
+    @property
+    def kind(self) -> str:
+        return str(self.anchor[0]) if self.anchor else "atom"
+
+    def to_dict(self) -> dict:
+        return {
+            "text": self.text,
+            "anchor": list(self.anchor),
+            "colour": list(self.colour),
+            "visible": bool(self.visible),
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict) -> "Annotation":
+        anchor = payload.get("anchor") or ()
+        return cls(
+            text=str(payload.get("text", "")),
+            anchor=tuple(anchor),
+            colour=tuple(float(c) for c in payload.get("colour", (1.0, 0.85, 0.35))),
+            visible=bool(payload.get("visible", True)),
+        )
+
+
+def measurements_csv(rows: Sequence[dict]) -> str:
+    """The measurement list as CSV, for the clipboard or a spreadsheet.
+
+    The header is written in English with ASCII units (``A``, ``deg``) so the
+    file is portable; the values are the same ones the table shows.
+    """
+    lines = ["kind,atoms,value,unit,label"]
+    for row in rows:
+        atoms = " ".join(str(item) for item in row.get("atoms", []))
+        label = str(row.get("label", "")).replace('"', "'")
+        lines.append(
+            f'{row.get("kind", "")},"{atoms}",{row.get("value", "")},'
+            f'{str(row.get("unit", "")).replace("Å", "A").replace("°", "deg")},"{label}"'
+        )
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Undo / redo
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Command:
+    """One reversible scene edit.
+
+    ``undo`` and ``redo`` are callables that put the scene (and the panels that
+    describe it) back and forward again. ``merge_key`` is what makes a slider
+    drag one step: two commands with the same non-``None`` key, pushed close
+    together in time, are merged by :meth:`Command.merge_into`.
+    """
+
+    name: str
+    undo: object
+    redo: object
+    merge_key: Optional[str] = None
+    stamp: float = field(default_factory=time.monotonic)
+
+    def merge_into(self, other: "Command") -> "Command":
+        """Fold ``other`` (the newer command) into this one.
+
+        The *oldest* undo is kept — undoing a drag must go back to where the drag
+        started — and the newest redo is taken, so redoing lands on the final
+        state. The merged step keeps this command's timestamp so a continuing
+        drag keeps coalescing.
+        """
+        return Command(
+            name=other.name or self.name,
+            undo=self.undo,
+            redo=other.redo,
+            merge_key=self.merge_key,
+            stamp=self.stamp,
+        )
+
+
+class CommandStack:
+    """A bounded undo/redo stack with time-windowed coalescing."""
+
+    def __init__(self, cap: int = 100, merge_window: float = 1.2) -> None:
+        self.cap = max(1, int(cap))
+        self.merge_window = max(0.0, float(merge_window))
+        self._undo: List[Command] = []
+        self._redo: List[Command] = []
+
+    # -- state --------------------------------------------------------------
+
+    @property
+    def undo_depth(self) -> int:
+        return len(self._undo)
+
+    @property
+    def redo_depth(self) -> int:
+        return len(self._redo)
+
+    def can_undo(self) -> bool:
+        return bool(self._undo)
+
+    def can_redo(self) -> bool:
+        return bool(self._redo)
+
+    def undo_name(self) -> str:
+        return self._undo[-1].name if self._undo else ""
+
+    def redo_name(self) -> str:
+        return self._redo[-1].name if self._redo else ""
+
+    def commands(self) -> List[Command]:
+        return list(self._undo)
+
+    def clear(self) -> None:
+        self._undo = []
+        self._redo = []
+
+    # -- editing ------------------------------------------------------------
+
+    def push(self, command: Command, *, execute: bool = True) -> Command:
+        """Run ``command`` (unless already done) and record it for undo."""
+        if execute:
+            command.redo()
+        if (
+            command.merge_key
+            and self.merge_window > 0
+            and self._undo
+            and self._undo[-1].merge_key == command.merge_key
+            and abs(command.stamp - self._undo[-1].stamp) <= self.merge_window
+        ):
+            self._undo[-1] = self._undo[-1].merge_into(command)
+        else:
+            self._undo.append(command)
+            if len(self._undo) > self.cap:
+                del self._undo[: len(self._undo) - self.cap]
+        # A new edit invalidates the redo branch, exactly like every editor.
+        self._redo = []
+        return self._undo[-1]
+
+    def undo(self) -> Optional[Command]:
+        if not self._undo:
+            return None
+        command = self._undo.pop()
+        command.undo()
+        self._redo.append(command)
+        return command
+
+    def redo(self) -> Optional[Command]:
+        if not self._redo:
+            return None
+        command = self._redo.pop()
+        command.redo()
+        self._undo.append(command)
+        return command
+
+
+#: Kinds whose *drawn* lines are reduced to one per receptor residue. The detector
+#: enumerates every hydrophobic-carbon pair inside the cut-off — the honest answer
+#: to "what touches what" — but seventeen near-parallel grey lines are unreadable,
+#: so the drawing shows the closest contact per residue while the table keeps every
+#: pair and the legend states both numbers.
+CONSOLIDATE_KINDS = ("hydrophobic",)
+
+
+def consolidate_by_residue(
+    interactions: Sequence, receptor: Sequence
+) -> Tuple[List, Dict[str, Tuple[int, int]]]:
+    """One line per receptor residue for the kinds in :data:`CONSOLIDATE_KINDS`.
+
+    Returns ``(drawn, counts)`` with ``counts[kind] = (detected, drawn)``. Every
+    other kind passes through untouched, and the *closest* contact of a residue is
+    the one drawn, so the line still shows the atom pair that matters.
+    """
+    drawn: List = []
+    best: Dict[Tuple[str, tuple], object] = {}
+    detected: Dict[str, int] = {}
+    for item in interactions:
+        kind = str(getattr(item, "kind", ""))
+        detected[kind] = detected.get(kind, 0) + 1
+        if kind not in CONSOLIDATE_KINDS:
+            drawn.append(item)
+            continue
+        key = (kind, _residue_of(item, receptor))
+        current = best.get(key)
+        if current is None or float(getattr(item, "distance", 1e9)) < float(
+            getattr(current, "distance", 1e9)
+        ):
+            best[key] = item
+    drawn.extend(best.values())
+    counts: Dict[str, Tuple[int, int]] = {}
+    for kind, total in detected.items():
+        if kind in CONSOLIDATE_KINDS:
+            counts[kind] = (total, sum(1 for key in best if key[0] == kind))
+        else:
+            counts[kind] = (total, total)
+    return drawn, counts
+
+
+def _residue_of(item, receptor: Sequence) -> tuple:
+    """The receptor residue an interaction belongs to, for the grouping above."""
+    residue = getattr(item, "residue", None)
+    if residue:
+        return tuple(residue)
+    try:
+        atom = receptor[int(getattr(item, "a", -1))]
+    except (IndexError, TypeError, ValueError):
+        return ("?", -1, "?")
+    return (str(atom.chain), int(atom.res_id), str(atom.res_name))
+
+
+# ---------------------------------------------------------------------------
+# The console
+# ---------------------------------------------------------------------------
+
+
+class ConsoleWidget(QtWidgets.QPlainTextEdit):
+    """A Python console bound to the live session.
+
+    Why a Python console and not a spawned CLI: ``odock dock`` starts a *new*
+    process and cannot see the receptor you have open, so typing command lines
+    would mean re-specifying everything on disk and would not replace the mouse.
+    A console against the live objects does replace it — it drives the same
+    ``window`` the menus drive, so the log, the undo stack and every panel stay in
+    sync, and an action that is undoable from a menu is undoable from here.
+
+    The widget owns the *interface* only (prompt, history, completion, captured
+    output); the executor is injected by the window, which is what keeps every
+    command on the workbench's own code paths.
+    """
+
+    #: Prompt for a fresh statement, and for a continued block.
+    PROMPT = ">>> "
+    CONTINUED = "... "
+
+    def __init__(self, executor, namespace=None, parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("consoleEdit")
+        self.setLineWrapMode(QtWidgets.QPlainTextEdit.LineWrapMode.NoWrap)
+        self._executor = executor
+        self._namespace = namespace or (lambda: {})
+        self._history: List[str] = []
+        self._history_index = 0
+        self._buffer: List[str] = []
+        self._prompt_at = 0
+        self._print_banner()
+        self._new_prompt()
+
+    # -- the transcript -----------------------------------------------------
+
+    def _write(self, text: str) -> None:
+        cursor = self.textCursor()
+        cursor.movePosition(QtGui.QTextCursor.MoveOperation.End)
+        self.setTextCursor(cursor)
+        self.insertPlainText(text)
+
+    def _print_banner(self) -> None:
+        self.appendPlainText(tr("console.banner"))
+        self.appendPlainText(tr("console.no_sandbox"))
+
+    def _new_prompt(self) -> None:
+        """Start a fresh input line (or continue a block)."""
+        prompt = self.CONTINUED if self._buffer else self.PROMPT
+        self.appendPlainText(prompt)
+        self._prompt_at = self.document().characterCount() - 1
+        cursor = self.textCursor()
+        cursor.movePosition(QtGui.QTextCursor.MoveOperation.End)
+        self.setTextCursor(cursor)
+
+    def current_input(self) -> str:
+        """The text typed after the current prompt."""
+        cursor = self.textCursor()
+        cursor.movePosition(QtGui.QTextCursor.MoveOperation.End)
+        cursor.setPosition(self._prompt_at, QtGui.QTextCursor.MoveMode.KeepAnchor)
+        return cursor.selectedText().replace("\u2029", "\n")
+
+    def prompt_position(self) -> int:
+        return self._prompt_at
+
+    # -- running ------------------------------------------------------------
+
+    def submit(self) -> str:
+        """Run what is on the prompt line; returns the text that was submitted."""
+        line = self.current_input()
+        if not line.strip() and not self._buffer:
+            self._new_prompt()
+            return ""
+        self._buffer.append(line)
+        source = "\n".join(self._buffer)
+        if _needs_continuation(source):
+            # A trailing colon (or an unclosed bracket) means the block is not
+            # finished: the classic ``for x in y:`` plus an indented body.
+            self._new_prompt()
+            return line
+        self._history.append(source)
+        self._history_index = len(self._history)
+        self._buffer = []
+        output, error = self._executor(source)
+        if output:
+            self.appendPlainText(output.rstrip("\n"))
+        if error:
+            self.appendPlainText(error.rstrip("\n"))
+        self._new_prompt()
+        return source
+
+    def execute(self, source: str) -> str:
+        """Run ``source`` as if it had been typed (used by tests and the menus)."""
+        self._write(source)
+        return self.submit()
+
+    # -- history and completion --------------------------------------------
+
+    def history(self) -> List[str]:
+        return list(self._history)
+
+    def recall(self, step: int) -> None:
+        """Replace the input line with a history entry (``step`` ±1)."""
+        if not self._history:
+            return
+        index = max(0, min(self._history_index + step, len(self._history)))
+        self._history_index = index
+        text = "" if index == len(self._history) else self._history[index]
+        cursor = self.textCursor()
+        cursor.movePosition(QtGui.QTextCursor.MoveOperation.End)
+        cursor.setPosition(self._prompt_at, QtGui.QTextCursor.MoveMode.KeepAnchor)
+        cursor.insertText(text)
+        self.setTextCursor(cursor)
+
+    def candidates(self, prefix: str) -> List[str]:
+        """Names matching ``prefix``, from the namespace or from an attribute."""
+        if not prefix:
+            return []
+        if "." in prefix:
+            head, _, tail = prefix.rpartition(".")
+            try:
+                value = eval(head, {"__builtins__": {}}, dict(self._namespace()))
+            except Exception:
+                return []
+            names = [name for name in dir(value) if not name.startswith("_")]
+            return [f"{head}.{name}" for name in names if name.startswith(tail)]
+        return sorted(
+            name
+            for name in self._namespace()
+            if name.startswith(prefix) and not name.startswith("_")
+        )
+
+    def complete(self) -> List[str]:
+        """Tab: complete the current word, or list the candidates."""
+        import re as _re
+
+        text = self.current_input()
+        prefix = _re.split(r"[^A-Za-z0-9_.]", text)[-1]
+        if not prefix:
+            return []
+        names = self.candidates(prefix)
+        if not names:
+            return []
+        common = names[0]
+        for name in names[1:]:
+            while common and not name.startswith(common):
+                common = common[:-1]
+        cursor = self.textCursor()
+        cursor.movePosition(QtGui.QTextCursor.MoveOperation.End)
+        if len(common) > len(prefix):
+            cursor.insertText(common[len(prefix):])
+        else:
+            # Ambiguous: list them, like a shell, and leave the line alone.
+            self.appendPlainText("  ".join(names))
+            cursor.movePosition(QtGui.QTextCursor.MoveOperation.End)
+        self.setTextCursor(cursor)
+        return names
+
+    # -- events -------------------------------------------------------------
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        key = event.key()
+        if key in (QtCore.Qt.Key.Key_Return, QtCore.Qt.Key.Key_Enter):
+            if event.modifiers() & QtCore.Qt.KeyboardModifier.ShiftModifier:
+                super().keyPressEvent(event)  # a literal newline inside the block
+                return
+            self.submit()
+            return
+        if key == QtCore.Qt.Key.Key_Up:
+            self.recall(-1)
+            return
+        if key == QtCore.Qt.Key.Key_Down:
+            self.recall(1)
+            return
+        if key == QtCore.Qt.Key.Key_Tab:
+            self.complete()
+            return
+        if key in (QtCore.Qt.Key.Key_Backspace, QtCore.Qt.Key.Key_Left):
+            # Never let editing walk back over the prompt: the text after it is
+            # what the executor is handed.
+            if self.textCursor().position() <= self._prompt_at:
+                return
+        super().keyPressEvent(event)
+
+
+def _needs_continuation(source: str) -> bool:
+    """Whether a block is unfinished (``:``, an open bracket, a trailing ``\\``)."""
+    text = source.rstrip()
+    if not text:
+        return False
+    if text.endswith("\\"):
+        return True
+    try:
+        compile(source + "\n", "<console>", "exec")
+    except SyntaxError as exc:
+        message = str(exc)
+        return (
+            "unexpected EOF" in message
+            or "was never closed" in message
+            or "expected an indented block" in message
+        )
+    except ValueError:  # pragma: no cover - a null byte and friends
+        return False
+    return False
+
+
+class ConsoleInput(QtWidgets.QLineEdit):
+    """The console's single input line, living inside the log panel.
+
+    The transcript is the log view itself — output on top, one line to type at the
+    bottom — so reading and typing happen in one place instead of two tabs. The
+    widget owns only the *interface*: prompt, history, completion and continuation
+    state. The executor is injected by the window, which is what keeps every
+    command on the workbench's own code paths (log, undo stack, panels).
+
+    Why a Python console and not a spawned CLI: ``odock dock`` starts a *new*
+    process and cannot see the receptor you have open, so typing command lines
+    would mean re-specifying everything on disk and would not replace the mouse. A
+    console against the live objects does replace it.
+    """
+
+    #: `>>>` for a fresh statement, `... ` for a continued block.
+    PROMPT = ">>> "
+    CONTINUED = "... "
+
+    def __init__(self, executor, namespace=None, parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("consoleInput")
+        # The prompt is a label beside the line (see the window), so no
+        # placeholder text is needed here: it would repeat the prompt.
+        self._executor = executor
+        self._namespace = namespace or (lambda: {})
+        self._history: List[str] = []
+        self._history_index = 0
+        self._buffer: List[str] = []
+        self.returnPressed.connect(self.submit)
+
+    # -- state --------------------------------------------------------------
+
+    def prompt(self) -> str:
+        """The prompt to show for the line being typed."""
+        return self.CONTINUED if self._buffer else self.PROMPT
+
+    def history(self) -> List[str]:
+        return list(self._history)
+
+    def current_input(self) -> str:
+        return self.text()
+
+    def pending(self) -> List[str]:
+        return list(self._buffer)
+
+    # -- running ------------------------------------------------------------
+
+    def submit(self) -> str:
+        """Run what is typed; returns the source that was submitted."""
+        line = self.text()
+        self.clear()
+        if not line.strip() and not self._buffer:
+            return ""
+        self._buffer.append(line)
+        source = "\n".join(self._buffer)
+        if _needs_continuation(source):
+            # A trailing colon (or an unclosed bracket) means the block is not
+            # finished: the classic ``for x in y:`` plus an indented body.
+            return line
+        self._history.append(source)
+        self._history_index = len(self._history)
+        self._buffer = []
+        self._executor(source)
+        return source
+
+    def execute(self, source: str) -> str:
+        """Run ``source`` as if it had been typed (used by tests and the menus)."""
+        self.setText(source)
+        return self.submit()
+
+    # -- history and completion --------------------------------------------
+
+    def recall(self, step: int) -> None:
+        """Replace the input line with a history entry (``step`` ±1)."""
+        if not self._history:
+            return
+        index = max(0, min(self._history_index + step, len(self._history)))
+        self._history_index = index
+        self.setText("" if index == len(self._history) else self._history[index])
+
+    def candidates(self, prefix: str) -> List[str]:
+        """Names matching ``prefix``, from the namespace or from an attribute."""
+        if not prefix:
+            return []
+        if "." in prefix:
+            head, _, tail = prefix.rpartition(".")
+            try:
+                value = eval(head, {"__builtins__": {}}, dict(self._namespace()))
+            except Exception:
+                return []
+            names = [name for name in dir(value) if not name.startswith("_")]
+            return [f"{head}.{name}" for name in names if name.startswith(tail)]
+        return sorted(
+            name
+            for name in self._namespace()
+            if name.startswith(prefix) and not name.startswith("_")
+        )
+
+    def complete(self) -> List[str]:
+        """Tab: complete the current word, or list the candidates in the log."""
+        import re as _re
+
+        text = self.current_input()
+        prefix = _re.split(r"[^A-Za-z0-9_.]", text)[-1]
+        if not prefix:
+            return []
+        names = self.candidates(prefix)
+        if not names:
+            return []
+        common = names[0]
+        for name in names[1:]:
+            while common and not name.startswith(common):
+                common = common[:-1]
+        if len(common) > len(prefix):
+            self.setText(text + common[len(prefix):])
+        else:
+            # Ambiguous: list them (the window prints them into the transcript).
+            self.completionHint.emit("  ".join(names))
+        return names
+
+    #: Emitted with the candidate list when Tab cannot complete a single name.
+    completionHint = QtCore.pyqtSignal(str)
+
+    # -- events -------------------------------------------------------------
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        key = event.key()
+        modifiers = event.modifiers()
+        if key == QtCore.Qt.Key.Key_Up:
+            self.recall(-1)
+            return
+        if key == QtCore.Qt.Key.Key_Down:
+            self.recall(1)
+            return
+        if key == QtCore.Qt.Key.Key_Tab:
+            self.complete()
+            return
+        if key == QtCore.Qt.Key.Key_Escape:
+            # Escape hands the keyboard back to the 3-D view: the shortcuts that
+            # live on the window must keep working while nobody is typing.
+            self.editingFinished.emit()
+            return
+        if modifiers & QtCore.Qt.KeyboardModifier.ControlModifier:
+            # Ctrl+C/V/X/A belong to the text line; every other Ctrl combination
+            # is a workbench shortcut (Ctrl+Z undo, Ctrl+K palette, …) and must
+            # reach the window instead of being swallowed here.
+            if key not in (
+                QtCore.Qt.Key.Key_C,
+                QtCore.Qt.Key.Key_V,
+                QtCore.Qt.Key.Key_X,
+                QtCore.Qt.Key.Key_A,
+            ):
+                event.ignore()
+                return
+        super().keyPressEvent(event)
+
+
+# ---------------------------------------------------------------------------
 # Widgets
 # ---------------------------------------------------------------------------
 
@@ -1842,10 +2771,17 @@ class EnergyTrace(QtWidgets.QWidget):
 
 
 class MeasurementHistory(QtWidgets.QWidget):
-    """The list of measured distances, with copy and clear."""
+    """Every measurement of the session: type, atoms it asked about, value.
+
+    One row per geometric answer — distance, angle, dihedral, centroid, plane or
+    a plane-versus-plane / plane-versus-bond angle — with the atoms named, so the
+    table and the overlays in the 3-D view describe the same thing. Copy gives
+    the table as text; Copy CSV gives a portable file body.
+    """
 
     clearRequested = QtCore.pyqtSignal()
     copyRequested = QtCore.pyqtSignal()
+    csvRequested = QtCore.pyqtSignal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -1855,12 +2791,13 @@ class MeasurementHistory(QtWidgets.QWidget):
 
         self.summary = QtWidgets.QLabel(tr("measure.empty"))
         self.summary.setObjectName("dashboardCaption")
+        self.summary.setWordWrap(True)
         layout.addWidget(self.summary)
 
         self.table = QtWidgets.QTableWidget(0, 3)
         self.table.setObjectName("measureTable")
         self.table.setHorizontalHeaderLabels(
-            [tr("measure.col.a"), tr("measure.col.b"), tr("measure.col.value")]
+            [tr("measure.col.kind"), tr("measure.col.atoms"), tr("measure.col.value")]
         )
         self.table.setSelectionBehavior(
             QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
@@ -1874,9 +2811,12 @@ class MeasurementHistory(QtWidgets.QWidget):
         row = QtWidgets.QHBoxLayout()
         self.btn_copy = QtWidgets.QPushButton(tr("measure.copy"))
         self.btn_copy.clicked.connect(self.copyRequested.emit)
+        self.btn_csv = QtWidgets.QPushButton(tr("measure.csv"))
+        self.btn_csv.clicked.connect(self.csvRequested.emit)
         self.btn_clear = QtWidgets.QPushButton(tr("measure.clear"))
         self.btn_clear.clicked.connect(self.clearRequested.emit)
         row.addWidget(self.btn_copy)
+        row.addWidget(self.btn_csv)
         row.addWidget(self.btn_clear)
         row.addStretch(1)
         layout.addLayout(row)
@@ -1884,17 +2824,23 @@ class MeasurementHistory(QtWidgets.QWidget):
         self._rows: List[dict] = []
 
     def rows(self) -> List[dict]:
-        return list(self._rows)
+        return [dict(item) for item in self._rows]
 
     def set_measurements(self, measurements: Sequence[dict]) -> None:
+        """Rows are ``{"kind", "atoms", "value", "unit", "label"}``."""
         self._rows = [dict(item) for item in measurements]
         self.table.setRowCount(len(self._rows))
         for index, item in enumerate(self._rows):
+            atoms = item.get("atoms") or []
+            if isinstance(atoms, str):
+                atoms = [atoms]
             value = item.get("value")
+            unit = str(item.get("unit", ""))
+            shown = "—" if value in (None, "") else f"{value}{(' ' + unit) if unit else ''}"
             cells = (
-                str(item.get("a", "")),
-                str(item.get("b", "")),
-                f"{float(value):.3f}" if value is not None else "—",
+                measurement_kind_label(str(item.get("kind", ""))),
+                ", ".join(str(atom) for atom in atoms),
+                str(shown).strip(),
             )
             for column, text in enumerate(cells):
                 entry = QtWidgets.QTableWidgetItem(text)
@@ -1902,8 +2848,13 @@ class MeasurementHistory(QtWidgets.QWidget):
                     QtCore.Qt.ItemFlag.ItemIsEnabled
                     | QtCore.Qt.ItemFlag.ItemIsSelectable
                 )
+                if item.get("label"):
+                    entry.setToolTip(str(item["label"]))
                 self.table.setItem(index, column, entry)
         self.table.resizeColumnsToContents()
+        self._refresh_summary()
+
+    def _refresh_summary(self) -> None:
         self.summary.setText(
             tr("measure.count", n=len(self._rows))
             if self._rows
@@ -1911,15 +2862,154 @@ class MeasurementHistory(QtWidgets.QWidget):
         )
 
     def as_text(self) -> str:
-        lines = ["\t".join([tr("measure.col.a"), tr("measure.col.b"), "Å"])]
+        lines = [
+            "\t".join(
+                [
+                    tr("measure.col.kind"),
+                    tr("measure.col.atoms"),
+                    tr("measure.col.value"),
+                ]
+            )
+        ]
         for item in self._rows:
+            atoms = item.get("atoms") or []
+            if isinstance(atoms, str):
+                atoms = [atoms]
+            unit = str(item.get("unit", ""))
             value = item.get("value")
+            shown = "—" if value in (None, "") else f"{value}{(' ' + unit) if unit else ''}"
             lines.append(
                 "\t".join(
                     [
-                        str(item.get("a", "")),
-                        str(item.get("b", "")),
-                        f"{float(value):.3f}" if value is not None else "—",
+                        measurement_kind_label(str(item.get("kind", ""))),
+                        ", ".join(str(atom) for atom in atoms),
+                        str(shown).strip(),
+                    ]
+                )
+            )
+        return "\n".join(lines)
+
+    def as_csv(self) -> str:
+        return measurements_csv(self._rows)
+
+    def retranslate(self) -> None:
+        self.table.setHorizontalHeaderLabels(
+            [tr("measure.col.kind"), tr("measure.col.atoms"), tr("measure.col.value")]
+        )
+        self.btn_copy.setText(tr("measure.copy"))
+        self.btn_csv.setText(tr("measure.csv"))
+        self.btn_clear.setText(tr("measure.clear"))
+        self._refresh_summary()
+
+
+def measurement_kind_label(kind: str) -> str:
+    """The translated name of a measurement kind (falls back to the code)."""
+    key = f"measure.kind.{kind}"
+    return tr(key) if key in _EN else str(kind)
+
+
+class AnnotationTable(QtWidgets.QWidget):
+    """The labels pinned to the scene, with where they are pinned.
+
+    Editing happens through the dialog (text and colour); this panel is the list
+    that says what exists, where it points, and whether it is currently drawn.
+    """
+
+    copyRequested = QtCore.pyqtSignal()
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("annotationTable")
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(4)
+
+        self.heading = QtWidgets.QLabel(tr("annotation.empty"))
+        self.heading.setObjectName("dashboardCaption")
+        self.heading.setWordWrap(True)
+        layout.addWidget(self.heading)
+
+        self.table = QtWidgets.QTableWidget(0, 3)
+        self.table.setObjectName("annotationRows")
+        self.table.setHorizontalHeaderLabels(
+            [
+                tr("annotation.col.text"),
+                tr("annotation.col.anchor"),
+                tr("annotation.col.shown"),
+            ]
+        )
+        self.table.setSelectionBehavior(
+            QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self.table.setEditTriggers(
+            QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        self.table.verticalHeader().setVisible(False)
+        layout.addWidget(self.table, 1)
+
+        row = QtWidgets.QHBoxLayout()
+        self.btn_copy = QtWidgets.QPushButton(tr("measure.copy"))
+        self.btn_copy.clicked.connect(self.copyRequested.emit)
+        row.addWidget(self.btn_copy)
+        row.addStretch(1)
+        layout.addLayout(row)
+
+        self._rows: List[dict] = []
+
+    def rows(self) -> List[dict]:
+        return [dict(item) for item in self._rows]
+
+    def set_annotations(self, annotations: Sequence[dict]) -> None:
+        self._rows = [dict(item) for item in annotations]
+        self.table.setRowCount(len(self._rows))
+        for index, item in enumerate(self._rows):
+            colour = item.get("colour") or (1.0, 0.85, 0.35)
+            cells = (
+                str(item.get("text", "")),
+                str(item.get("anchor", "")),
+                tr("annotation.yes") if item.get("visible", True) else tr("annotation.no"),
+            )
+            for column, text in enumerate(cells):
+                entry = QtWidgets.QTableWidgetItem(text)
+                entry.setFlags(
+                    QtCore.Qt.ItemFlag.ItemIsEnabled
+                    | QtCore.Qt.ItemFlag.ItemIsSelectable
+                )
+                if column == 0:
+                    entry.setForeground(
+                        QtGui.QColor(
+                            int(float(colour[0]) * 255),
+                            int(float(colour[1]) * 255),
+                            int(float(colour[2]) * 255),
+                        )
+                    )
+                self.table.setItem(index, column, entry)
+        self.table.resizeColumnsToContents()
+        self.heading.setText(
+            tr("annotation.count", n=len(self._rows))
+            if self._rows
+            else tr("annotation.empty")
+        )
+
+    def as_text(self) -> str:
+        lines = [
+            "\t".join(
+                [
+                    tr("annotation.col.text"),
+                    tr("annotation.col.anchor"),
+                    tr("annotation.col.shown"),
+                ]
+            )
+        ]
+        for item in self._rows:
+            lines.append(
+                "\t".join(
+                    [
+                        str(item.get("text", "")),
+                        str(item.get("anchor", "")),
+                        tr("annotation.yes")
+                        if item.get("visible", True)
+                        else tr("annotation.no"),
                     ]
                 )
             )
@@ -1927,15 +3017,207 @@ class MeasurementHistory(QtWidgets.QWidget):
 
     def retranslate(self) -> None:
         self.table.setHorizontalHeaderLabels(
-            [tr("measure.col.a"), tr("measure.col.b"), tr("measure.col.value")]
+            [
+                tr("annotation.col.text"),
+                tr("annotation.col.anchor"),
+                tr("annotation.col.shown"),
+            ]
         )
         self.btn_copy.setText(tr("measure.copy"))
-        self.btn_clear.setText(tr("measure.clear"))
-        self.summary.setText(
-            tr("measure.count", n=len(self._rows))
+        self.heading.setText(
+            tr("annotation.count", n=len(self._rows))
             if self._rows
-            else tr("measure.empty")
+            else tr("annotation.empty")
         )
+
+
+class InteractionTable(QtWidgets.QWidget):
+    """What every drawn interaction line connects, as a table.
+
+    This is the answer to "I can see the lines but not what they join": the
+    renderer draws a dash from a ligand atom to a receptor atom, and this panel
+    names both ends of every dash — kind, receptor atom, ligand atom, distance —
+    so a line in the 3-D view can be read off the table (and the other way
+    round). It also reports how many are hidden by the View ▸ Interaction lines
+    filter, so a filtered view can never be mistaken for "nothing found".
+    """
+
+    copyRequested = QtCore.pyqtSignal()
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("interactionTable")
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(4)
+
+        self.heading = QtWidgets.QLabel(tr("interactions.empty"))
+        self.heading.setObjectName("dashboardCaption")
+        self.heading.setWordWrap(True)
+        layout.addWidget(self.heading)
+
+        self.table = QtWidgets.QTableWidget(0, 4)
+        self.table.setObjectName("interactionRows")
+        self.table.setHorizontalHeaderLabels(
+            [
+                tr("interactions.col.kind"),
+                tr("interactions.col.receptor"),
+                tr("interactions.col.ligand"),
+                tr("interactions.col.distance"),
+            ]
+        )
+        self.table.setSelectionBehavior(
+            QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self.table.setEditTriggers(
+            QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        self.table.verticalHeader().setVisible(False)
+        layout.addWidget(self.table, 1)
+
+        row = QtWidgets.QHBoxLayout()
+        self.btn_copy = QtWidgets.QPushButton(tr("measure.copy"))
+        self.btn_copy.clicked.connect(self.copyRequested.emit)
+        row.addWidget(self.btn_copy)
+        row.addStretch(1)
+        layout.addLayout(row)
+
+        self._rows: List[dict] = []
+        self._hidden = 0
+
+    # -- contents -----------------------------------------------------------
+
+    def rows(self) -> List[dict]:
+        return [dict(row) for row in self._rows]
+
+    def set_interactions(
+        self,
+        interactions: Sequence,
+        receptor: Sequence,
+        ligand: Sequence,
+        *,
+        hidden: int = 0,
+        note: str = "",
+        shown: bool = True,
+    ) -> None:
+        """Fill the table from the interaction objects the renderer draws.
+
+        ``hidden`` is how many detected pairs the kind filter keeps out of the
+        3-D view; ``note`` spells out any other reduction in the heading's
+        tooltip; ``shown`` is whether the view is drawing contacts at all. The
+        rows always list every detection, so the table stays the full record even
+        while the drawing is switched off.
+        """
+        self._hidden = int(hidden)
+        self._note = str(note)
+        self._shown = bool(shown)
+        rows: List[dict] = []
+        for index, item in enumerate(interactions or ()):
+            rows.append(
+                {
+                    "kind": str(getattr(item, "kind", "")),
+                    "receptor": _atom_label(receptor, getattr(item, "a", -1)),
+                    "ligand": _atom_label(ligand, getattr(item, "b", -1)),
+                    "distance": getattr(item, "distance", None),
+                    "detail": str(getattr(item, "detail", "")),
+                    "index": index,
+                }
+            )
+        self.table.setRowCount(len(rows))
+        for index, row in enumerate(rows):
+            distance = row["distance"]
+            cells = (
+                interaction_label(row["kind"]),
+                row["receptor"],
+                row["ligand"],
+                f"{float(distance):.2f}" if distance is not None else "—",
+            )
+            for column, text in enumerate(cells):
+                entry = QtWidgets.QTableWidgetItem(text)
+                entry.setFlags(
+                    QtCore.Qt.ItemFlag.ItemIsEnabled
+                    | QtCore.Qt.ItemFlag.ItemIsSelectable
+                )
+                entry.setToolTip(row["detail"] or f"{row['receptor']} - {row['ligand']}")
+                self.table.setItem(index, column, entry)
+        self.table.resizeColumnsToContents()
+        self._rows = rows
+        self._refresh_heading()
+
+    def _refresh_heading(self) -> None:
+        if not getattr(self, "_shown", True):
+            # The drawing is off: say so and say how to turn it on, instead of
+            # showing an empty table that looks like a failure.
+            self.heading.setText(tr("interactions.empty"))
+            self.heading.setToolTip("")
+            return
+        if not self._rows:
+            self.heading.setText(tr("interactions.empty"))
+            self.heading.setToolTip("")
+            return
+        text = tr("interactions.count", n=len(self._rows))
+        if self._hidden:
+            text += " · " + tr("interactions.hidden", n=self._hidden)
+        self.heading.setText(text)
+        # The tooltip is where the *reason* goes: a kind filter and the
+        # one-line-per-residue reduction both reduce the drawing, and "17 → 3"
+        # has to be explainable without guessing which one did it.
+        self.heading.setToolTip(getattr(self, "_note", ""))
+
+    def as_text(self) -> str:
+        lines = [
+            "\t".join(
+                [
+                    tr("interactions.col.kind"),
+                    tr("interactions.col.receptor"),
+                    tr("interactions.col.ligand"),
+                    "Å",
+                ]
+            )
+        ]
+        for row in self._rows:
+            distance = row["distance"]
+            lines.append(
+                "\t".join(
+                    [
+                        interaction_label(row["kind"]),
+                        row["receptor"],
+                        row["ligand"],
+                        f"{float(distance):.2f}" if distance is not None else "—",
+                    ]
+                )
+            )
+        return "\n".join(lines)
+
+    def retranslate(self) -> None:
+        self.table.setHorizontalHeaderLabels(
+            [
+                tr("interactions.col.kind"),
+                tr("interactions.col.receptor"),
+                tr("interactions.col.ligand"),
+                tr("interactions.col.distance"),
+            ]
+        )
+        self.btn_copy.setText(tr("measure.copy"))
+        self._refresh_heading()
+
+
+def _atom_label(atoms: Sequence, index) -> str:
+    """``SER195:OG`` for an atom index, or ``—`` when it does not exist."""
+    try:
+        atom = atoms[int(index)]
+    except (IndexError, TypeError, ValueError):
+        return "—"
+    name = str(getattr(atom, "name", ""))
+    residue = str(getattr(atom, "res_name", ""))
+    res_id = getattr(atom, "res_id", "")
+    return f"{residue}{res_id}:{name}" if residue else name
+
+
+def interaction_label(kind: str) -> str:
+    """The translated name of an interaction kind (falls back to the code)."""
+    key = f"interaction.{kind}"
+    return tr(key) if key in _EN else str(kind)
 
 
 class RunDashboard(QtWidgets.QWidget):

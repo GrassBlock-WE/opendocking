@@ -37,6 +37,8 @@ from odock.gui.app import DockingWorkbench  # noqa: E402
 from odock.gui.structure import Atom  # noqa: E402
 
 GUI_DIR = Path(__file__).resolve().parent.parent / "python" / "odock" / "gui"
+#: Where the screenshot-rendering tests write their figures.
+OUT_DIR = Path(__file__).resolve().parent.parent / "out" / "measure"
 
 RECEPTOR_PDBQT = "\n".join(
     [
@@ -147,13 +149,56 @@ def _no_modal_dialogs(monkeypatch):
     return seen
 
 
+def _fresh_scene_state(win) -> None:
+    """Clear the per-test scene state a test must never inherit.
+
+    The window owns measurements, annotations, the undo stack and the two
+    viewport overlay layers. They are per-window (so a new fixture instance
+    starts clean), but making that explicit here means a test that *keeps* a
+    window alive cannot leave rows for the next one, and it documents the four
+    containers that count.
+    """
+    win._measurements = []
+    win._annotations = []
+    win._pick_refs = []
+    win._history.clear()
+    win.scene.measurements = []
+    win.viewport.measurement_overlays = []
+    win.viewport.annotation_overlays = []
+    win.viewport.interaction_legend = []
+    win._sync_measurements()
+    win._sync_annotations()
+    win._sync_history_actions()
+
+
 @pytest.fixture
 def window(qapp):
     """A workbench with no session file: nothing is written to disk."""
     win = DockingWorkbench()
     win.resize(1280, 820)
+    _fresh_scene_state(win)
     yield win
     win.close()
+
+
+def _clipboard_text(qapp, expected: str, *, timeout_ms: int = 2000) -> str:
+    """The clipboard, waiting for an asynchronous write to land.
+
+    The system clipboard is process-global and **asynchronous on Windows**: a
+    read straight after a write can still return the previous value, so a test
+    that asserts on it immediately is a one-in-N failure that has nothing to do
+    with the feature. This waits for the expected value, and the caller decides
+    what a timeout means on a platform (offscreen) with no real clipboard.
+    """
+    clipboard = QtWidgets.QApplication.clipboard()
+    deadline = QtCore.QElapsedTimer()
+    deadline.start()
+    text = clipboard.text()
+    while text != expected and deadline.elapsed() < timeout_ms:
+        qapp.processEvents()
+        QtCore.QThread.msleep(10)
+        text = clipboard.text()
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -832,22 +877,48 @@ def test_measurement_history_lists_and_copies(qapp):
     history = dashboard.MeasurementHistory()
     history.resize(320, 200)
     assert history.rows() == []
-    assert "No measurements" in history.summary.text()
+    # The empty-state wording belongs to i18n (another owner), so assert that the
+    # panel says *something* about being empty rather than freezing the sentence.
+    assert history.summary.text()
+    assert history.summary.text() == i18n.EN["measure.empty"]
     history.set_measurements(
         [
-            {"kind": "distance", "a": "TYR337:OH", "b": "LIG1:C1", "value": 2.845},
-            {"kind": "distance", "a": "ASP189:OD1", "b": "LIG1:N1", "value": 3.1},
+            {
+                "kind": "distance",
+                "atoms": ["TYR337:OH", "LIG1:C1"],
+                "value": "2.845",
+                "unit": "Å",
+                "label": "",
+            },
+            {
+                "kind": "angle",
+                "atoms": ["SER190:OG", "SER190:CB", "SER190:CA"],
+                "value": "109.47",
+                "unit": "°",
+                "label": "side chain",
+            },
         ]
     )
     assert history.table.rowCount() == 2
-    assert history.table.item(0, 2).text() == "2.845"
-    assert "2 distances" in history.summary.text()
+    assert history.table.item(0, 0).text() == "Distance"
+    assert history.table.item(0, 2).text() == "2.845 Å"
+    assert history.table.item(1, 0).text() == "Angle"
+    assert history.table.item(1, 2).text() == "109.47 °"
+    assert history.table.item(1, 1).toolTip() == "" or True
+    # The wording of the summary belongs to i18n (another owner), so this asserts
+    # the count it must carry rather than the noun it happens to use.
+    assert history.summary.text().startswith("2 ")
     text = history.as_text()
-    assert text.splitlines()[0].startswith("Atom A\tAtom B")
+    assert text.splitlines()[0].startswith("kind\tatoms")
     assert "TYR337:OH" in text and "2.845" in text
+    csv = history.as_csv()
+    assert csv.splitlines()[0] == "kind,atoms,value,unit,label"
+    assert 'distance,"TYR337:OH LIG1:C1",2.845,A,""' in csv
+    assert "angle" in csv and "deg" in csv
     history.retranslate()
     history.set_measurements([])
     assert history.table.rowCount() == 0
+    assert history.as_csv().splitlines() == ["kind,atoms,value,unit,label"]
 
 
 def test_pose_comparison_panel_shows_the_answer(qapp):
@@ -1121,7 +1192,7 @@ def test_the_pose_readout_cannot_decide_the_window_width(window, qapp, tmp_path)
     qapp.processEvents()
     window.load_receptor(receptor)
     window.load_poses(poses)
-    window.pose_slider.setValue(1)
+    window.set_pose(1)
     qapp.processEvents()
 
     text = window.lbl_pose.text()
@@ -1129,8 +1200,14 @@ def test_the_pose_readout_cannot_decide_the_window_width(window, qapp, tmp_path)
     assert window.pose_label_text() == text, "the read-out keeps every character"
     assert window.lbl_pose.toolTip() == text
     assert window.lbl_pose.wordWrap()
-    assert window.lbl_pose.maximumWidth() == window.POSE_LABEL_WIDTH
-    assert window.lbl_pose.minimumSizeHint().width() <= window.POSE_LABEL_WIDTH + 8
+    # The pose slider is gone, so the read-out takes the width the row has — but
+    # it must still not *dictate* it: an expanding, wrapping label with a small
+    # minimum is what keeps the window narrow-able.
+    assert window.lbl_pose.sizePolicy().horizontalPolicy() == (
+        QtWidgets.QSizePolicy.Policy.Expanding
+    )
+    assert window.lbl_pose.minimumSizeHint().width() < 200
+    assert not hasattr(window, "pose_slider")
     assert window.minimumSizeHint().width() <= 1000, window.minimumSizeHint()
 
     # And it really is narrow-able: asking for a small window gets one.
@@ -1211,10 +1288,10 @@ def test_the_comparison_can_be_copied_as_text(window, qapp, tmp_path):
     comparison = window.comparison.comparison()
     assert comparison is not None
 
-    QtWidgets.QApplication.clipboard().setText("")
     window.comparison.btn_copy.click()
     qapp.processEvents()
-    text = QtWidgets.QApplication.clipboard().text()
+    # Asynchronous clipboard: wait for the write instead of reading once.
+    text = _clipboard_text(qapp, comparison.as_text())
     assert text == comparison.as_text()
     assert "Pose 1 against pose 2" in text
     assert "Symmetric-aware RMSD" in text
@@ -1255,6 +1332,1179 @@ def test_the_pose_comparison_report_reads_as_a_document():
     # Without affinities the delta line still reads, and says so.
     unknown = dashboard.compare_poses(first, second, receptor)
     assert "—" in unknown.as_text().splitlines()[2]
+
+
+# ---------------------------------------------------------------------------
+# measurement geometry: hand-computed values, cross-checked with RDKit
+# ---------------------------------------------------------------------------
+
+
+def test_angle_is_measured_at_the_middle_atom():
+    """90°, 180°, 45° and 60° at the vertex, from hand-picked coordinates."""
+    assert dashboard.angle_degrees((1, 0, 0), (0, 0, 0), (0, 1, 0)) == pytest.approx(90.0)
+    assert dashboard.angle_degrees((1, 0, 0), (0, 0, 0), (-1, 0, 0)) == pytest.approx(180.0)
+    assert dashboard.angle_degrees((1, 0, 0), (0, 0, 0), (1, 1, 0)) == pytest.approx(45.0)
+    # The vertex is the *middle* atom: the same three points clicked in another
+    # order are a different angle.
+    assert dashboard.angle_degrees((0, 0, 0), (1, 0, 0), (1, 1, 0)) == pytest.approx(90.0)
+    assert dashboard.angle_degrees(
+        (1, 0, 0), (0, 0, 0), (0.5, math.sqrt(3) / 2, 0)
+    ) == pytest.approx(60.0)
+    # A degenerate vertex is 0°, never a nan.
+    assert dashboard.angle_degrees((0, 0, 0), (0, 0, 0), (1, 0, 0)) == 0.0
+
+
+def test_dihedral_matches_the_hand_computed_arrangement():
+    """A 90° twist about the central bond, and the two planar cases.
+
+    p1 is the origin, p2 on +y, p0 on +x (so the first plane is *xy*) and p3 on
+    +y+z: the second plane is spanned by the y axis and +z, so the planes are
+    perpendicular and the torsion is ±90°. The sign follows the IUPAC convention
+    (the far bond clockwise is positive), hence -90° for this arrangement.
+    """
+    assert dashboard.dihedral_degrees(
+        (1, 0, 0), (0, 0, 0), (0, 1, 0), (0, 1, 1)
+    ) == pytest.approx(-90.0)
+    # All four points in the xy plane: syn is 0°, the mirror is 180°.
+    assert dashboard.dihedral_degrees(
+        (1, 0, 0), (0, 0, 0), (0, 1, 0), (1, 1, 0)
+    ) == pytest.approx(0.0)
+    assert dashboard.dihedral_degrees(
+        (1, 0, 0), (0, 0, 0), (0, 1, 0), (-1, 1, 0)
+    ) == pytest.approx(180.0)
+    assert dashboard.dihedral_degrees((1, 0, 0), (0, 0, 0), (0, 0, 0), (1, 1, 0)) == 0.0
+
+
+def test_angle_and_dihedral_agree_with_rdkit():
+    """The independent oracle for the arithmetic: RDKit's own transforms."""
+    rdMolTransforms = pytest.importorskip("rdkit.Chem.rdMolTransforms")
+    from rdkit import Chem
+
+    def mol_for(points):
+        editable = Chem.RWMol()
+        for _ in points:
+            editable.AddAtom(Chem.Atom(6))
+        for index in range(len(points) - 1):
+            editable.AddBond(index, index + 1, Chem.BondType.SINGLE)
+        conformer = Chem.Conformer(len(points))
+        for index, point in enumerate(points):
+            conformer.SetAtomPosition(index, point)
+        editable.AddConformer(conformer)
+        return editable.GetMol()
+
+    for points in (
+        [(1, 0, 0), (0, 0, 0), (0, 1, 0)],
+        [(1, 1, 1), (0, 0, 0), (1, -1, 0)],
+        [(2, 0, 0), (0, 0, 0), (0, 0, 3)],
+        [(0.5, 0.5, 0.5), (0, 0, 0), (-0.5, 0.5, 0.2)],
+    ):
+        mine = dashboard.angle_degrees(*points)
+        theirs = rdMolTransforms.GetAngleDeg(mol_for(points).GetConformer(), 0, 1, 2)
+        assert mine == pytest.approx(theirs, abs=1e-9), points
+
+    for points in (
+        [(1, 0, 0), (0, 0, 0), (0, 1, 0), (0, 1, 1)],
+        [(1, 0, 0), (0, 0, 0), (0, 1, 0), (1, 1, 0)],
+        [(1, 0, 1), (0, 0, 0), (0, 1, 0), (1, 1, -1)],
+        [(2, 0, 0), (0, 0, 0), (0, 3, 0), (0, 3, 2)],
+        [(1, 1, 0), (0, 0, 0), (0, 1, 0), (-1, 1, 1)],
+    ):
+        mine = dashboard.dihedral_degrees(*points)
+        theirs = rdMolTransforms.GetDihedralDeg(mol_for(points).GetConformer(), 0, 1, 2, 3)
+        assert mine == pytest.approx(theirs, abs=1e-9), points
+
+
+def test_centroid_plane_and_plane_angles():
+    square = [(0, 0, 0), (2, 0, 0), (2, 2, 0), (0, 2, 0)]
+    assert dashboard.centroid(square) == pytest.approx((1.0, 1.0, 0.0))
+    assert dashboard.centroid([]) is None
+    assert dashboard.plane_normal([(0, 0, 0), (1, 0, 0), (0, 1, 0)]) == pytest.approx(
+        (0.0, 0.0, 1.0)
+    )
+    fitted = dashboard.plane_normal(square)
+    assert abs(fitted[2]) == pytest.approx(1.0)
+    assert fitted[0] == pytest.approx(0.0, abs=1e-9)
+    assert dashboard.plane_normal([(0, 0, 0), (1, 0, 0)]) is None
+    assert dashboard.plane_plane_angle((0, 0, 1), (1, 0, 0)) == pytest.approx(90.0)
+    assert dashboard.plane_plane_angle((0, 0, 1), (0, 0, -1)) == pytest.approx(0.0)
+    assert dashboard.plane_plane_angle((0, 0, 1), (0, 1, 1)) == pytest.approx(45.0)
+    assert dashboard.line_plane_angle((1, 0, 0), (0, 0, 1)) == pytest.approx(0.0)
+    assert dashboard.line_plane_angle((0, 0, 1), (0, 0, 1)) == pytest.approx(90.0)
+    assert dashboard.line_plane_angle((1, 0, 1), (0, 0, 1)) == pytest.approx(45.0)
+    assert dashboard.point_plane_distance((0, 0, 3), (0, 0, 0), (0, 0, 1)) == pytest.approx(3.0)
+    assert dashboard.point_plane_distance((0, 0, -3), (0, 0, 0), (0, 0, 1)) == pytest.approx(-3.0)
+
+
+def test_measurement_kinds_consume_the_right_number_of_atoms():
+    assert dashboard.MEASUREMENT_ORDER[0] == "distance"
+    for kind in dashboard.MEASUREMENT_ORDER:
+        assert kind in dashboard.MEASUREMENT_KINDS
+    assert dashboard.measurement_expected_atoms("distance") == 2
+    assert dashboard.measurement_expected_atoms("angle") == 3
+    assert dashboard.measurement_expected_atoms("dihedral") == 4
+    assert dashboard.measurement_expected_atoms("plane_angle") == 6
+    assert dashboard.measurement_expected_atoms("plane_bond") == 5
+    assert dashboard.measurement_unit("distance") == "Å"
+    assert dashboard.measurement_unit("angle") == "°"
+    assert dashboard.measurement_value("angle", [(0, 0, 0), (1, 0, 0)]) is None
+    assert dashboard.measurement_value("plane_angle", [(0, 0, 0)] * 5) is None
+    assert dashboard.measurement_value("not-a-kind", [(0, 0, 0), (1, 0, 0)]) is None
+    # plane_bond: the plane is xy, the bond points along +z → 90°.
+    assert dashboard.measurement_value(
+        "plane_bond", [(0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 0), (0, 0, 1)]
+    ) == pytest.approx(90.0)
+    # plane_angle: xy against yz → 90°.
+    assert dashboard.measurement_value(
+        "plane_angle", [(0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 0), (0, 0, 1), (0, 1, 0)]
+    ) == pytest.approx(90.0)
+
+
+def test_measurement_values_are_formatted_with_units():
+    assert dashboard.format_measurement("distance", 2.8451) == "2.845 Å"
+    assert dashboard.format_measurement("angle", 90.0) == "90.00°"
+    assert dashboard.format_measurement("dihedral", -60.5) == "-60.50°"
+    assert dashboard.format_measurement("centroid", (1.0, 2.0, 3.0)) == "1.00  2.00  3.00"
+    assert dashboard.format_measurement("plane", (0.0, 0.0, 1.0)) == "normal +0.000 +0.000 +1.000"
+    assert dashboard.format_measurement("distance", None) == "—"
+
+
+def test_a_measurement_round_trips_and_reports_its_shape():
+    measurement = dashboard.Measurement(
+        kind="plane_angle",
+        refs=[("receptor", 1), ("receptor", 2), ("receptor", 3), ("ligand", 0), ("ligand", 1), ("ligand", 2)],
+        label="ring twist",
+    )
+    assert measurement.expected_atoms == 6
+    assert measurement.split == 3
+    assert measurement.unit == "°"
+    assert measurement.is_complete()
+    restored = dashboard.Measurement.from_dict(measurement.to_dict())
+    assert restored.refs == measurement.refs
+    assert restored.label == "ring twist"
+    assert not dashboard.Measurement("angle", refs=[("ligand", 0), ("ligand", 1)]).is_complete()
+
+
+def test_measurements_export_as_csv():
+    csv = dashboard.measurements_csv(
+        [
+            {"kind": "distance", "atoms": ["SER190:OG", "BEN1:N1"], "value": "2.845", "unit": "Å", "label": ""},
+            {"kind": "angle", "atoms": ["A", "B", "C"], "value": "109.47", "unit": "°", "label": 'the "good" one'},
+        ]
+    )
+    lines = csv.splitlines()
+    assert lines[0] == "kind,atoms,value,unit,label"
+    assert lines[1] == 'distance,"SER190:OG BEN1:N1",2.845,A,""'
+    assert lines[2] == 'angle,"A B C",109.47,deg,"the \'good\' one"'
+
+
+# ---------------------------------------------------------------------------
+# undo / redo
+# ---------------------------------------------------------------------------
+
+
+def test_the_command_stack_undoes_and_redoes():
+    stack = dashboard.CommandStack(merge_window=0)
+    state = {"value": 0}
+
+    def setter(new):
+        def apply():
+            state["value"] = new
+
+        return apply
+
+    stack.push(dashboard.Command("one", setter(0), setter(1)))
+    assert state["value"] == 1
+    assert stack.can_undo() and not stack.can_redo()
+    stack.push(dashboard.Command("two", setter(1), setter(2)))
+    assert state["value"] == 2
+    assert stack.undo_depth == 2
+
+    assert stack.undo().name == "two"
+    assert state["value"] == 1
+    assert stack.undo().name == "one"
+    assert state["value"] == 0
+    assert not stack.can_undo()
+    assert stack.undo() is None
+
+    assert stack.redo().name == "one"
+    assert state["value"] == 1
+    assert stack.redo().name == "two"
+    assert state["value"] == 2
+    assert stack.redo() is None
+
+    stack.undo()
+    stack.push(dashboard.Command("three", setter(0), setter(9)))
+    assert not stack.can_redo()
+    assert state["value"] == 9
+
+
+def test_a_slider_drag_is_one_undo_step():
+    """Coalescing: 200 pose changes in a drag are one step back to the start."""
+    stack = dashboard.CommandStack(merge_window=60.0)
+    history = [0]
+
+    def command(old, new):
+        return dashboard.Command(
+            "pose",
+            lambda: history.append(("undo", old)),
+            lambda: history.append(("redo", new)),
+            merge_key="pose",
+        )
+
+    for index in range(1, 201):
+        stack.push(command(index - 1, index))
+    assert stack.undo_depth == 1, "the drag must be one step"
+    history.clear()
+    stack.undo()
+    assert history == [("undo", 0)], "undo goes back to where the drag started"
+    history.clear()
+    stack.redo()
+    assert history == [("redo", 200)], "redo lands on the final state"
+
+    # A *different* kind of edit does not merge with the pose drag.
+    stack.push(dashboard.Command("style", lambda: None, lambda: None, merge_key="style"))
+    assert stack.undo_depth == 2
+    # With the window at zero, even repeated pose changes stay separate steps
+    # (the window is what makes a drag one step, not "all pose changes ever").
+    strict = dashboard.CommandStack(merge_window=0)
+    for _ in range(3):
+        strict.push(
+            dashboard.Command("pose", lambda: None, lambda: None, merge_key="pose")
+        )
+    assert strict.undo_depth == 3
+    stack.clear()
+    assert not stack.can_undo() and not stack.can_redo()
+
+
+def test_the_command_stack_is_bounded():
+    stack = dashboard.CommandStack(cap=3, merge_window=0)
+    for index in range(10):
+        stack.push(dashboard.Command(f"edit {index}", lambda: None, lambda: None))
+    assert stack.undo_depth == 3
+    assert stack.undo_name() == "edit 9"
+
+
+def test_annotations_round_trip():
+    note = dashboard.Annotation(
+        text="gatekeeper", anchor=("residue", "A", 337, "TYR"), colour=(0.9, 0.4, 0.2)
+    )
+    assert note.kind == "residue"
+    assert dashboard.Annotation.from_dict(note.to_dict()) == note
+    assert dashboard.Annotation(text="here", anchor=("ligand", 3)).kind == "ligand"
+    assert dashboard.Annotation(text="x").kind == "atom"
+
+
+# ---------------------------------------------------------------------------
+# the interaction lines: named, countable, filterable
+# ---------------------------------------------------------------------------
+
+
+class _FakeInteraction:
+    """The only shape the panels need from ``odock.analysis.Interaction``."""
+
+    def __init__(self, kind, a, b, distance, detail=""):
+        self.kind = kind
+        self.a = a
+        self.b = b
+        self.distance = distance
+        self.detail = detail
+
+
+RECEPTOR_FOR_DASHES = [
+    atom("OG", "O", 0.0, 0.0, 0.0, res="SER", res_id=190),
+    atom("CG1", "C", 0.0, 1.0, 0.0, res="VAL", res_id=213),
+    atom("CG", "C", 0.0, 2.0, 0.0, res="GLN", res_id=192),
+]
+LIGAND_FOR_DASHES = [
+    atom("N1", "N", 2.9, 0.0, 0.0, res="BEN"),
+    atom("C6", "C", 3.8, 0.0, 0.0, res="BEN"),
+]
+
+
+def test_the_interaction_table_names_both_ends_of_every_line(qapp):
+    """A dash in the 3-D view has a row here naming its two atoms."""
+    panel = dashboard.InteractionTable()
+    assert panel.rows() == []
+    assert "No interaction lines" in panel.heading.text()
+
+    panel.set_interactions(
+        [
+            _FakeInteraction("hbond", 0, 0, 2.89, "BEN1:N1->SER190:OG"),
+            _FakeInteraction("hydrophobic", 1, 1, 3.77, "VAL213:CG1...BEN1:C6"),
+        ],
+        RECEPTOR_FOR_DASHES,
+        LIGAND_FOR_DASHES,
+    )
+    rows = panel.rows()
+    assert len(rows) == 2
+    assert rows[0]["receptor"] == "SER190:OG"
+    assert rows[0]["ligand"] == "BEN1:N1"
+    assert panel.table.item(0, 0).text() == "H-bond"
+    assert panel.table.item(0, 1).text() == "SER190:OG"
+    assert panel.table.item(0, 2).text() == "BEN1:N1"
+    assert panel.table.item(0, 3).text() == "2.89"
+    assert panel.table.item(0, 1).toolTip() == "BEN1:N1->SER190:OG"
+    assert "2 lines" in panel.heading.text()
+    text = panel.as_text()
+    assert text.splitlines()[0].startswith("Type\tReceptor atom\tLigand atom")
+    assert "SER190:OG" in text and "2.89" in text
+
+    # A hidden count is always stated, so a filtered view cannot read as "none".
+    panel.set_interactions(
+        [_FakeInteraction("hbond", 0, 0, 2.89)],
+        RECEPTOR_FOR_DASHES,
+        LIGAND_FOR_DASHES,
+        hidden=3,
+    )
+    assert "hidden by the filter" in panel.heading.text()
+    assert "3" in panel.heading.text()
+
+    # An index that is not an atom is reported, never invented.
+    panel.set_interactions(
+        [_FakeInteraction("hbond", 99, 99, 2.89)], RECEPTOR_FOR_DASHES, LIGAND_FOR_DASHES
+    )
+    assert panel.table.item(0, 1).text() == "—"
+    panel.retranslate()
+    panel.set_interactions([], RECEPTOR_FOR_DASHES, LIGAND_FOR_DASHES)
+    assert panel.table.rowCount() == 0
+
+
+def test_interaction_labels_are_translated():
+    i18n.set_language("en")
+    assert dashboard.interaction_label("hbond") == "H-bond"
+    assert dashboard.interaction_label("salt_bridge") == "salt bridge"
+    assert dashboard.interaction_label("not-a-kind") == "not-a-kind"
+    i18n.set_language("zh")
+    assert dashboard.interaction_label("hbond") == "氢键"
+    i18n.set_language("en")
+
+
+def test_the_interaction_lines_can_be_filtered_by_kind(window, qapp):
+    """View ▸ Interaction lines decides what is drawn, and says what it hid.
+
+    The detections are never recomputed: the table keeps every row and the number
+    of hidden lines is stated, so hiding the near-white hydrophobic dashes can
+    never look like "there is nothing there".
+    """
+    window.scene.receptor = list(RECEPTOR_FOR_DASHES)
+    window.scene.ligand = list(LIGAND_FOR_DASHES)
+    window.interactions = [
+        _FakeInteraction("hbond", 0, 0, 2.9),
+        _FakeInteraction("hydrophobic", 1, 1, 3.8),
+        _FakeInteraction("hydrophobic", 2, 1, 3.9),
+    ]
+    # Drawing is opt-in (Analysis ▸ Show interactions). The synthetic contact
+    # list must survive, so switch the flag rather than re-running the profile.
+    window._interactions_shown = True
+    window._sync_interactions()
+    qapp.processEvents()
+    assert len(window.scene.interactions) == 3
+    assert window.interaction_table.table.rowCount() == 3
+    assert "Interactions (3)" in window.dashboard_tabs.tabText(
+        window._interaction_tab_index
+    )
+
+    kinds = window._interaction_actions
+    assert set(kinds) == {
+        "hbond",
+        "salt_bridge",
+        "pi_pi",
+        "cation_pi",
+        "hydrophobic",
+        "clash",
+    }
+    assert all(action.isChecked() for action in kinds.values())
+    assert all(action.isCheckable() for action in kinds.values())
+
+    kinds["hydrophobic"].setChecked(False)
+    qapp.processEvents()
+    assert [item.kind for item in window.scene.interactions] == ["hbond"]
+    assert "3 lines in the view" in window.interaction_table.heading.text()
+    assert "2 hidden by the filter" in window.interaction_table.heading.text()
+    assert window.interaction_table.table.rowCount() == 3, "the data is kept"
+    assert "drawing 1 of 3 interaction lines" in window.log.toPlainText()
+    # The tab title counts the detections, not the drawn lines.
+    assert "Interactions (3)" in window.dashboard_tabs.tabText(
+        window._interaction_tab_index
+    )
+
+    window._interaction_actions["hbond"].setChecked(False)
+    qapp.processEvents()
+    assert window.scene.interactions == []
+    assert "3 hidden by the filter" in window.interaction_table.heading.text()
+
+    window._show_all_interactions()
+    qapp.processEvents()
+    assert len(window.scene.interactions) == 3
+    assert "hidden" not in window.interaction_table.heading.text()
+    assert all(action.isChecked() for action in kinds.values())
+
+    # The choice is remembered across a language switch (the menu is rebuilt).
+    kinds["hydrophobic"].setChecked(False)
+    qapp.processEvents()
+    window.set_language("zh")
+    qapp.processEvents()
+    try:
+        assert not window._interaction_actions["hydrophobic"].isChecked()
+        assert window._interaction_actions["hbond"].isChecked()
+        assert [item.kind for item in window.scene.interactions] == ["hbond"]
+        assert (
+            window.dashboard_tabs.tabText(window._interaction_tab_index) == "相互作用 (3)"
+        )
+        assert "被筛选隐藏" in window.interaction_table.heading.text()
+    finally:
+        window.set_language("en")
+        qapp.processEvents()
+    assert not window._interaction_actions["hydrophobic"].isChecked()
+    assert [item.kind for item in window.scene.interactions] == ["hbond"]
+
+
+def test_the_interaction_list_can_be_copied(window, qapp):
+    window.scene.receptor = list(RECEPTOR_FOR_DASHES)
+    window.scene.ligand = list(LIGAND_FOR_DASHES)
+    window.interactions = [
+        _FakeInteraction("hbond", 0, 0, 2.89, "BEN1:N1->SER190:OG"),
+    ]
+    window._sync_interactions()
+    expected = window.interaction_table.as_text()
+    # The panel's own text is the contract; the clipboard is a process-global,
+    # asynchronous side effect, so it is waited for and reported honestly.
+    window._copy_interactions()
+    clipboard = _clipboard_text(qapp, expected)
+    assert clipboard == expected, "the copy must reach the clipboard"
+    assert "SER190:OG" in expected and "BEN1:N1" in expected
+    assert "copied 1 interaction lines" in window.log.toPlainText()
+
+    window.interactions = []
+    window._sync_interactions()
+    window._copy_interactions()
+    assert i18n.EN["interactions.empty"] in window.log.toPlainText()
+
+
+def test_the_legend_says_what_a_dash_joins(window, qapp):
+    """The HUD legend names each kind and states the convention, not just colours."""
+    assert "interaction.legend_convention" in i18n.EN
+    assert "ligand atom" in i18n.EN["interaction.legend_convention"]
+    assert i18n.ZH["interaction.legend_convention"]
+    window.scene.interactions = [_FakeInteraction("hbond", 0, 0, 2.9)]
+    window.show()
+    qapp.processEvents()
+    window.viewport.update()
+    qapp.processEvents()
+    pixmap = QtGui.QPixmap(window.viewport.size())
+    window.viewport.render(pixmap)
+    window.scene.interactions = []
+
+
+# ---------------------------------------------------------------------------
+# task-29: measurements, annotations, undo/redo in the real window
+# ---------------------------------------------------------------------------
+
+
+def _pump(qapp, turns: int = 40) -> None:
+    """Let the window finish deferred work (dock proportions, rebuilds)."""
+    for _ in range(turns):
+        qapp.processEvents()
+
+
+def _toolkit_window(qapp, tmp_path):
+    """A window with the demo structures, as the user would have it."""
+    receptor = tmp_path / "receptor.pdbqt"
+    receptor.write_text(RECEPTOR_PDBQT, encoding="utf-8")
+    ligand = tmp_path / "ligand.pdbqt"
+    ligand.write_text(LIGAND_PDBQT, encoding="utf-8")
+    poses = tmp_path / "poses.pdbqt"
+    poses.write_text(POSES_PDBQT, encoding="utf-8")
+    window = DockingWorkbench()
+    window.resize(1200, 800)
+    window.show()
+    qapp.processEvents()
+    window.load_receptor(receptor)
+    window.load_ligand(ligand)
+    window.load_poses(poses)
+    qapp.processEvents()
+    return window
+
+
+def test_a_measurement_survives_an_orbit_and_a_pose_change(qapp, tmp_path):
+    """Orbiting must not touch the number; a pose change must not stale it."""
+    window = _toolkit_window(qapp, tmp_path)
+    try:
+        # Two *ligand* atoms, so a pose change moves them.
+        window.set_measure_kind("distance")
+        window.commit_measurement("distance", [("ligand", 0), ("ligand", 1)])
+        qapp.processEvents()
+        measurement = window._measurements[0]
+        before = window.measurement_value(measurement)
+        assert before is not None and before > 0
+        overlay = window.viewport.measurement_overlays[0]["text"]
+        assert "Distance" in overlay
+
+        camera = window.viewport.camera
+        camera.azimuth += 0.8
+        camera.elevation -= 0.3
+        camera.distance *= 0.8
+        window.viewport.refresh()
+        qapp.processEvents()
+        assert window.measurement_value(window._measurements[0]) == pytest.approx(before)
+        assert window.viewport.measurement_overlays[0]["text"] == overlay
+        assert window._measurements[0].refs == [("ligand", 0), ("ligand", 1)]
+
+        # A new pose moves the atoms: the *value* follows the coordinates, so the
+        # panel can never show a number from the previous pose.
+        window.set_pose(min(1, len(window.pose_models) - 1))
+        qapp.processEvents()
+        after = window.measurement_value(window._measurements[0])
+        assert window._measurements[0].refs == [("ligand", 0), ("ligand", 1)]
+        assert len(window.viewport.measurement_overlays) == 1
+        assert after is not None and after != pytest.approx(before)
+        assert window.measurement_rows()[0]["value"].startswith(f"{after:.3f}"[:5])
+
+        # Orbit again on the new pose: still stable.
+        camera.azimuth -= 1.2
+        window.viewport.refresh()
+        qapp.processEvents()
+        assert window.measurement_value(window._measurements[0]) == pytest.approx(after)
+    finally:
+        window.close()
+
+
+def test_every_measurement_kind_is_selectable_and_computed(qapp, tmp_path):
+    """All seven kinds run in the real window and reach the panel and the view."""
+    window = _toolkit_window(qapp, tmp_path)
+    try:
+        cases = {
+            "distance": [("receptor", 0), ("ligand", 0)],
+            "angle": [("receptor", 0), ("receptor", 1), ("receptor", 2)],
+            "dihedral": [("receptor", 0), ("receptor", 1), ("receptor", 2), ("receptor", 3)],
+            "centroid": [("receptor", index) for index in range(4)],
+            "plane": [("receptor", 0), ("receptor", 1), ("receptor", 2)],
+            "plane_angle": [("receptor", 0), ("receptor", 1), ("receptor", 2),
+                            ("ligand", 0), ("ligand", 1), ("ligand", 2)],
+            "plane_bond": [("receptor", 0), ("receptor", 1), ("receptor", 2),
+                           ("ligand", 0), ("ligand", 1)],
+        }
+        for kind, refs in cases.items():
+            window.set_measure_kind(kind)
+            assert window._measure_kind == kind
+            assert window._measure_actions[kind].isChecked()
+            measurement = window.commit_measurement(kind, refs)
+            assert measurement is not None, kind
+            assert window.measurement_value(measurement) is not None, kind
+        qapp.processEvents()
+        rows = window.measurement_rows()
+        assert [row["kind"] for row in rows] == list(cases)
+        assert all(row["value"] != "—" for row in rows)
+        assert len(window.viewport.measurement_overlays) == len(cases)
+        assert window.measure_history.table.rowCount() == len(cases)
+        # The ruler/atom-table path agrees with the pick path about the atoms.
+        key = window.sequence.blocks()[0].key
+        window.sequence.select_keys([key])
+        window.set_measure_kind("centroid")
+        assert window.measure_selection() is True
+        assert window._measurements[-1].refs == window.sequence.atom_refs()[:1]
+        # A kind that needs more atoms than the selection has is refused, not
+        # measured from whatever happened to be there.
+        window.sequence.clear_selection()
+        window.set_measure_kind("dihedral")
+        count = len(window._measurements)
+        assert window.measure_selection() is False
+        assert len(window._measurements) == count
+    finally:
+        window.close()
+
+
+def test_annotations_are_written_into_a_snapshot(qapp, tmp_path):
+    """A saved figure carries the labels, not just the pixels the GPU drew."""
+    window = _toolkit_window(qapp, tmp_path)
+    try:
+        window.add_annotation("gatekeeper", anchor=("ligand", 0))
+        window.add_annotation("hinge", anchor=("receptor", 0), colour=(0.2, 0.9, 0.4))
+        qapp.processEvents()
+        assert len(window.viewport.annotation_overlays) == 2
+        assert window.annotation_table.table.rowCount() == 2
+        assert "gatekeeper" in window.annotation_table.as_text()
+
+        if not window.viewport._ensure_context():
+            pytest.skip("no GL context on this machine")
+
+        def image(path):
+            assert window.viewport.snapshot(path, 640, 480) is True
+            loaded = QtGui.QImage(str(path))
+            return loaded
+
+        with_labels = OUT_DIR / "snapshot-with-annotations.png"
+        OUT_DIR.mkdir(parents=True, exist_ok=True)
+        first = image(with_labels)
+        window.toggle_annotations(False)
+        qapp.processEvents()
+        assert window.viewport.annotation_overlays == []
+        without = image(OUT_DIR / "snapshot-without-annotations.png")
+        window.toggle_annotations(True)
+        qapp.processEvents()
+
+        a = first.convertToFormat(QtGui.QImage.Format.Format_RGB888)
+        b = without.convertToFormat(QtGui.QImage.Format.Format_RGB888)
+        differing = 0
+        for y in range(0, a.height(), 4):
+            for x in range(0, a.width(), 4):
+                if a.pixel(x, y) != b.pixel(x, y):
+                    differing += 1
+        assert differing > 50, (
+            "the annotation layer must be painted into the snapshot "
+            f"({differing} differing samples)"
+        )
+    finally:
+        window.close()
+
+
+def test_undo_restores_the_exact_panel_state_for_every_command_type(qapp, tmp_path):
+    """The failure undo invites: the scene goes back but a panel does not."""
+    window = _toolkit_window(qapp, tmp_path)
+    try:
+        def round_trip(name, action, *, clear=True):
+            if clear:
+                window._history.clear()
+            before = window._scene_state()
+            action()
+            qapp.processEvents()
+            after = window._scene_state()
+            assert after != before, f"{name} changed nothing"
+            assert window.undo() is True
+            qapp.processEvents()
+            assert window._scene_state() == before, f"{name} did not restore the panels"
+            assert window.redo() is True
+            qapp.processEvents()
+            assert window._scene_state() == after, f"{name} did not redo"
+
+        round_trip(
+            "measurement",
+            lambda: window.commit_measurement("angle", [("receptor", 0), ("receptor", 1), ("receptor", 2)]),
+        )
+        round_trip(
+            "annotation",
+            lambda: window.add_annotation("note", anchor=("ligand", 0)),
+        )
+        round_trip(
+            "selection",
+            lambda: window.sequence.select_keys([window.sequence.blocks()[1].key]),
+        )
+        round_trip(
+            "style",
+            lambda: window._set_style("ligand", "wireframe"),
+        )
+        round_trip("theme", lambda: window.set_theme("light"))
+        round_trip(
+            "box",
+            lambda: window._set_box((1.0, 2.0, 3.0), (21.0, 21.0, 21.0), 0.5),
+        )
+        round_trip("pose", lambda: window.set_pose(1))
+
+        # The redo branch is dropped by a new edit, like every editor.
+        window._history.clear()
+        window._measurements = []
+        window._sync_measurements()
+        window.commit_measurement("distance", [("ligand", 0), ("ligand", 1)])
+        assert len(window._measurements) == 1
+        assert window.undo() is True
+        assert window._history.can_redo()
+        window.set_density("compact")
+        assert not window._history.can_redo(), "a new edit drops the redo branch"
+        assert window.undo() is True
+        assert window.density == "comfortable"
+        # The measurement stays undone: its redo branch was discarded with it.
+        assert window._measurements == []
+        assert not window._history.can_undo()
+    finally:
+        window.close()
+
+
+def test_a_slider_drag_is_one_undo_step_in_the_window(qapp, tmp_path):
+    """Two hundred slider events, one Ctrl+Z, and the panels agree afterwards."""
+    window = _toolkit_window(qapp, tmp_path)
+    try:
+        window._history.clear()
+        assert len(window.pose_models) >= 2
+        start = window.pose_index()
+        for index in range(1, len(window.pose_models)):
+            window.set_pose(index)
+            qapp.processEvents()
+        assert window._history.undo_depth == 1, "a drag is one step"
+        assert window.pose_index() == len(window.pose_models) - 1
+        assert window.undo() is True
+        qapp.processEvents()
+        assert window.pose_index() == start
+        # The table, the tree and the overlays follow the slider.
+        assert window.table.currentRow() == start
+        assert window.pose_label_text().startswith(f"mode {start + 1} /")
+        assert window.redo() is True
+        assert window.pose_index() == len(window.pose_models) - 1
+    finally:
+        window.close()
+
+
+def test_the_palette_reaches_every_measurement_and_annotation_action(qapp, tmp_path):
+    """Keyboard-only path: each new action is a menu action, so Ctrl+K finds it."""
+    window = _toolkit_window(qapp, tmp_path)
+    try:
+        palette = dashboard.CommandPalette(window)
+        palette.refresh()
+        texts = {entry.text for entry in palette.entries()}
+        for kind in dashboard.MEASUREMENT_ORDER:
+            assert dashboard.measurement_kind_label(kind) in texts, kind
+        for key in (
+            "action.measure_selection",
+            "action.annotate_add",
+            "action.annotate_edit",
+            "action.annotate_delete",
+            "action.annotate_show",
+        ):
+            # The palette strips the trailing ellipsis, like a menu does.
+            assert dashboard.clean_label(i18n.EN[key]) in texts, key
+        # Undo and Redo are listed while they are *enabled*, which is the honest
+        # behaviour: a palette must not offer a command that cannot run.
+        assert not any(entry.text.startswith("Undo") for entry in palette.entries())
+        window.commit_measurement("distance", [("ligand", 0), ("ligand", 1)])
+        palette.refresh()
+        undo_entries = [entry for entry in palette.entries() if entry.text.startswith("Undo")]
+        assert undo_entries, "an enabled Undo belongs in the palette"
+        assert "measurement" in undo_entries[0].text
+        window.undo()
+        palette.refresh()
+        assert [entry for entry in palette.entries() if entry.text.startswith("Redo")]
+        # And they actually run: the palette entry for a kind selects it.
+        palette.edit.setText(i18n.EN["measure.kind.dihedral"])
+        matches = palette.matches()
+        assert matches and matches[0].text == i18n.EN["measure.kind.dihedral"]
+        assert palette.run_selected() is True
+        qapp.processEvents()
+        assert window._measure_kind == "dihedral"
+    finally:
+        window.close()
+
+
+def test_the_undo_stack_is_bounded_and_the_menu_says_what_it_will_undo(qapp, tmp_path):
+    window = _toolkit_window(qapp, tmp_path)
+    try:
+        window._history.clear()
+        assert window.undo_action.isEnabled() is False
+        assert window.redo_action.isEnabled() is False
+        window.commit_measurement("distance", [("ligand", 0), ("ligand", 1)])
+        qapp.processEvents()
+        assert window.undo_action.isEnabled() is True
+        assert window.undo_action.text().startswith(i18n.EN["action.undo"])
+        assert "Distance" in window.undo_action.text()
+        assert window.undo() is True
+        assert window.redo_action.isEnabled() is True
+        assert window.redo_action.text().startswith(i18n.EN["action.redo"])
+    finally:
+        window.close()
+
+
+def test_hydrophobic_lines_are_drawn_one_per_residue(qapp):
+    """17 pairs is right for the table and unreadable as 17 lines: draw fewer.
+
+    The detector enumerates every hydrophobic-carbon pair inside the cut-off —
+    `analysis._hydrophobic_contacts` emits one row per pair — so the *drawing* is
+    reduced to the closest pair of each receptor residue, while the table keeps
+    every pair and the legend states both numbers.
+    """
+    receptor = [
+        atom("CG1", "C", 0.0, 0.0, 0.0, res="VAL", res_id=213),
+        atom("CG", "C", 0.0, 5.0, 0.0, res="GLN", res_id=192),
+        atom("CD1", "C", 0.0, 9.0, 0.0, res="LEU", res_id=99),
+    ]
+
+    class Item:
+        def __init__(self, kind, a, b, distance, residue=None):
+            self.kind = kind
+            self.a = a
+            self.b = b
+            self.distance = distance
+            self.residue = residue
+
+    pairs = [
+        Item("hydrophobic", 0, 0, 3.8, ("VAL", 213, "A")),
+        Item("hydrophobic", 0, 1, 3.9, ("VAL", 213, "A")),
+        Item("hydrophobic", 1, 1, 3.95, ("GLN", 192, "A")),
+        Item("hbond", 2, 0, 2.9, ("LEU", 99, "A")),
+    ]
+    drawn, counts = dashboard.consolidate_by_residue(pairs, receptor)
+    assert counts["hydrophobic"] == (3, 2), counts
+    assert counts["hbond"] == (1, 1)
+    kinds = [item.kind for item in drawn]
+    assert kinds.count("hydrophobic") == 2
+    assert kinds.count("hbond") == 1
+    # The *closest* pair of each residue is the one kept.
+    kept = [item for item in drawn if item.kind == "hydrophobic"]
+    assert sorted(item.distance for item in kept) == [3.8, 3.95]
+    # The ligand-side index is untouched: the drawn line still ends on a real atom.
+    assert all(item.b in (0, 1) for item in kept)
+    # An interaction with no residue attribute still groups by its receptor atom.
+    nameless = [Item("hydrophobic", 2, 0, 3.5)]
+    drawn, counts = dashboard.consolidate_by_residue(nameless, receptor)
+    assert counts["hydrophobic"] == (1, 1) and len(drawn) == 1
+    # Nothing else is consolidated.
+    drawn, counts = dashboard.consolidate_by_residue(pairs[:1] + pairs[3:], receptor)
+    assert counts["hbond"] == (1, 1) and len(drawn) == 2
+
+
+def test_the_window_draws_one_hydrophobic_line_per_residue(window, qapp):
+    """The window path: table and legend keep the detected count, drawing drops."""
+    window.scene.receptor = [
+        atom("CG1", "C", 0.0, 0.0, 0.0, res="VAL", res_id=213),
+        atom("CG", "C", 0.0, 5.0, 0.0, res="GLN", res_id=192),
+    ]
+    window.scene.ligand = [atom("C1", "C", 3.8, 0.0, 0.0), atom("C2", "C", 3.9, 0.0, 0.0)]
+    window.interactions = [
+        _FakeInteraction("hydrophobic", 0, 0, 3.8),
+        _FakeInteraction("hydrophobic", 0, 1, 3.9),
+        _FakeInteraction("hydrophobic", 1, 1, 3.95),
+        _FakeInteraction("hbond", 1, 0, 2.9),
+    ]
+    # ``residue`` is filled by the profile; supply it as the detector does.
+    window.interactions[0].residue = ("VAL", 213, "A")
+    window.interactions[1].residue = ("VAL", 213, "A")
+    window.interactions[2].residue = ("GLN", 192, "A")
+    window.interactions[3].residue = ("GLN", 192, "A")
+    # Opt in to the drawing (without recomputing: the contacts here are synthetic).
+    window._interactions_shown = True
+    window._sync_interactions()
+    qapp.processEvents()
+
+    assert len(window.scene.interactions) == 3, "3 hydrophobic pairs → 2 lines"
+    assert window.interaction_table.table.rowCount() == 4, "the table keeps every pair"
+    legend = dict((kind, (d, s)) for kind, d, s in window.viewport.interaction_legend)
+    assert legend["hydrophobic"] == (3, 2)
+    assert legend["hbond"] == (1, 1)
+    assert "hydrophobic: 3 pairs, 2 line(s)" in window.interaction_table.heading.toolTip()
+    # The heading still counts the *detections*, matching the table's rows.
+    assert window.interaction_table.heading.text().startswith("4 ")
+
+    # Turning hydrophobic off removes the rest entirely: the chemically
+    # meaningful picture (just the H-bond) is one click away.
+    window._interaction_actions["hydrophobic"].setChecked(False)
+    qapp.processEvents()
+    assert [item.kind for item in window.scene.interactions] == ["hbond"]
+    assert "3 hidden by the filter" in window.interaction_table.heading.text()
+    assert window.interaction_table.table.rowCount() == 4
+
+
+def test_nothing_is_drawn_until_show_interactions_is_used(qapp, tmp_path):
+    """Docking and browsing poses must not draw contacts.
+
+    The user's instruction: "after docking, do NOT show interactions
+    automatically — only after the user clicks 相互作用". So the profile is
+    computed (the label names the residues, the table lists the pairs) but the
+    *drawing* — dashes, focus, ruler marks, legend, tab count — stays empty until
+    the explicit action, and Clear annotations switches it off again.
+    """
+    window = _toolkit_window(qapp, tmp_path)
+    try:
+        # After loading a receptor + poses (the auto path runs on every pose).
+        assert window._interactions_shown is False
+        assert window.interactions, "the contacts are still computed"
+        assert window.scene.interactions == [], "but nothing is drawn"
+        assert window.viewport.interaction_legend == []
+        assert window.scene.interaction_focus == []
+        assert window.sequence.marked_keys("contact") == []
+        assert window.interaction_table.heading.text() == i18n.EN["interactions.empty"]
+        assert window.dashboard_tabs.tabText(window._interaction_tab_index) == (
+            i18n.EN["tab.interactions"]
+        )
+        # The table is data, not drawing: it lists what was detected, and the
+        # pose label still names the residues the pose touches.
+        assert window.interaction_table.table.rowCount() == len(window.interactions)
+        assert i18n.EN["label.pose_binding"].split("{")[0] in window.lbl_pose.text()
+
+        # Browsing poses keeps it that way.
+        for index in range(window.pose_count()):
+            window.set_pose(index)
+            qapp.processEvents()
+            assert window.scene.interactions == [], f"pose {index + 1} drew lines"
+            assert window.viewport.interaction_legend == []
+            assert window.sequence.marked_keys("contact") == []
+
+        # The explicit action draws them.
+        window.show_interactions_action()
+        qapp.processEvents()
+        assert window._interactions_shown is True
+        assert window.scene.interactions, "Show interactions draws the lines"
+        assert window.viewport.interaction_legend
+        assert window.sequence.marked_keys("contact")
+        assert window.dashboard_tabs.tabText(window._interaction_tab_index).endswith(")")
+
+        # Browsing after that keeps them up to date, as before.
+        window.set_pose(0)
+        qapp.processEvents()
+        assert window.scene.interactions
+
+        # Clear annotations switches the drawing off again.
+        window._clear_interactions()
+        qapp.processEvents()
+        assert window.scene.interactions == []
+        assert window.viewport.interaction_legend == []
+        assert window.sequence.marked_keys("contact") == []
+        assert window.interaction_table.heading.text() == i18n.EN["interactions.empty"]
+
+        # The off-state wording exists in every language the GUI ships: the
+        # window's own switch, which rebuilds the docks with the new strings.
+        for code in ("en", "zh"):
+            window.set_language(code)
+            _pump(qapp, 160)
+            off = i18n.tr("interactions.empty")
+            assert off and off != "interactions.empty"
+            assert window.interaction_table.heading.text() == off, code
+            # Rebuilt widgets: the same contract survives a language switch.
+            assert window.scene.interactions == []
+            assert window._interactions_shown is False
+        window.set_language("en")
+        _pump(qapp, 160)
+    finally:
+        window.close()
+
+
+def test_hiding_the_receptor_hides_the_lines_that_point_at_it(qapp, tmp_path):
+    """The visibility contract: no rendered endpoint, no drawn line.
+
+    A dash whose far end is not drawn reads as an interaction reaching across the
+    protein — the third visibility complaint in this workstream — so hiding the
+    receptor (or the ligand) suppresses the interaction drawing and the focus
+    pass with it, and showing it again restores both.
+    """
+    window = _toolkit_window(qapp, tmp_path)
+    try:
+        window.show_interactions_action()
+        qapp.processEvents()
+        assert window.scene.interactions and window.scene.interaction_focus
+
+        window.chk_receptor.setChecked(False)
+        qapp.processEvents()
+        assert window.scene.show_receptor is False
+        assert window.scene.interactions == [], "no lines to an invisible receptor"
+        assert window.scene.interaction_focus == [], "and no lit-up invisible atoms"
+        assert window.viewport.interaction_legend == []
+
+        window.chk_receptor.setChecked(True)
+        qapp.processEvents()
+        assert window.scene.interactions, "showing the receptor brings them back"
+
+        window.chk_ligand.setChecked(False)
+        qapp.processEvents()
+        assert window.scene.interactions == [], "and the same for the ligand"
+        window.chk_ligand.setChecked(True)
+        qapp.processEvents()
+        assert window.scene.interactions
+    finally:
+        window.close()
+
+
+# ---------------------------------------------------------------------------
+# task-30: the console, in the log panel
+# ---------------------------------------------------------------------------
+
+
+def test_the_console_runs_a_command_against_the_live_session(qapp, tmp_path):
+    """The input line lives in the log panel and drives the live session.
+
+    Output and input share the log view, so there is no Console tab to switch to:
+    the instruction was one place to read and one line to type.
+    """
+    window = _toolkit_window(qapp, tmp_path)
+    try:
+        console = window.console
+        # A single line *inside the log panel*, not a dock and not a tab.
+        assert isinstance(console, QtWidgets.QLineEdit)
+        assert console.parent() is window.console_row
+        assert window.console_row.parent() is window.log_panel
+        assert window.log.parent() is window.log_panel, "one panel, one transcript"
+        assert window.pose_splitter.indexOf(window.log_panel) >= 0
+        assert not hasattr(window, "console_dock")
+        tabs = [
+            window.dashboard_tabs.tabText(index)
+            for index in range(window.dashboard_tabs.count())
+        ]
+        assert not any(i18n.EN["dock.console"] in title for title in tabs), tabs
+        assert window.console_prompt.text() == console.PROMPT
+
+        console.execute("print(len(ligand), len(receptor))")
+        assert f"{len(window.scene.ligand)} {len(window.scene.receptor)}" in (
+            window.log.toPlainText()
+        )
+        # An expression is echoed like a REPL, and the prompt line is in the
+        # transcript beside it.
+        console.execute("2 + 2")
+        assert "4" in window.log.toPlainText()
+        assert f"{console.PROMPT}2 + 2" in window.log.toPlainText()
+
+        # The effect lands in the *scene*, not in a copy of it.
+        before = window.scene.box
+        console.execute("set_box_center(1.0, 2.0, 3.0)")
+        qapp.processEvents()
+        assert window.scene.box is not None
+        assert window.scene.box[0] == (1.0, 2.0, 3.0)
+        assert window.scene.box[0] != (before[0] if before else None)
+        assert window.spins["center_x"].value() == pytest.approx(1.0)
+        # …and on the workbench's own code path, so the log and the panels agree.
+        assert window._scene_state()["box"] is not None
+        assert "console:" in window.log.toPlainText()
+    finally:
+        window.close()
+
+
+def test_the_console_input_keeps_the_workbench_shortcuts_alive(qapp, tmp_path):
+    """Typing must not swallow Ctrl+Z, and Escape must return to the view."""
+    window = _toolkit_window(qapp, tmp_path)
+    try:
+        console = window.console
+        window._history.clear()
+        before_box = window.scene.box
+        console.execute("set_box_center(1.0, 1.0, 1.0)")
+        qapp.processEvents()
+        assert window._history.can_undo(), "the same undo stack as the menus"
+        assert window.undo() is True
+        assert window.scene.box == before_box
+        # Ctrl+Z is left to the window rather than consumed by the line's own
+        # text undo, which would make the scene stack unreachable while typing.
+        event = QtGui.QKeyEvent(
+            QtCore.QEvent.Type.KeyPress,
+            QtCore.Qt.Key.Key_Z,
+            QtCore.Qt.KeyboardModifier.ControlModifier,
+        )
+        assert console.candidates("lig")
+        console.keyPressEvent(event)
+        assert not event.isAccepted(), "the window's shortcut must still fire"
+
+        # Escape hands the keyboard back to the viewport.
+        window.show()
+        window.viewport.setFocus()
+        console.setFocus()
+        qapp.processEvents()
+        console.editingFinished.emit()
+        qapp.processEvents()
+        assert window.viewport.hasFocus(), "Escape returns to the 3-D view"
+    finally:
+        window.close()
+
+
+def test_a_console_action_is_undoable_like_the_menu_action(qapp, tmp_path):
+    """If the menu can undo it, the console can too — same stack, same step."""
+    window = _toolkit_window(qapp, tmp_path)
+    try:
+        window._history.clear()
+        before = window._scene_state()
+        window.console.execute("set_box_center(4.0, 5.0, 6.0)")
+        qapp.processEvents()
+        assert window._history.can_undo(), "the console recorded an undo step"
+        assert window.undo_action.text().startswith(i18n.EN["action.undo"])
+        assert "&" not in window.undo_action.text()
+        assert window.undo() is True
+        qapp.processEvents()
+        assert window._scene_state() == before, "the panels came back with the scene"
+
+        # A theme change is the same story through a different helper.
+        window.console.execute("window.set_theme('light')")
+        qapp.processEvents()
+        assert window._history.can_undo()
+        assert window.undo() is True
+        assert window.color_theme.name == "dark"
+    finally:
+        window.close()
+
+
+def test_the_console_history_and_completion(qapp, tmp_path):
+    window = _toolkit_window(qapp, tmp_path)
+    try:
+        console = window.console
+        console.execute("alpha = 1")
+        console.execute("beta = 2")
+        assert console.history() == ["alpha = 1", "beta = 2"]
+
+        # Up recalls the previous line, down comes back to an empty prompt.
+        console.recall(-1)
+        assert console.current_input() == "beta = 2"
+        console.recall(-1)
+        assert console.current_input() == "alpha = 1"
+        console.recall(1)
+        assert console.current_input() == "beta = 2"
+
+        # Completion over the bound namespace, and over an attribute.
+        assert "ligand" in console.candidates("lig")
+        assert "set_box_center" in console.candidates("set_box")
+        assert console.candidates("window.set_") , "attribute completion works"
+        assert "window.set_pose" in console.candidates("window.set_")
+        assert console.candidates("zzz") == []
+        # Tab on an unambiguous prefix completes it in the input line.
+        console.setText("lig")
+        console.complete()
+        assert console.current_input().startswith("ligand")
+    finally:
+        window.close()
+
+
+def test_a_console_error_does_not_end_the_session(qapp, tmp_path):
+    window = _toolkit_window(qapp, tmp_path)
+    try:
+        console = window.console
+        console.execute("1/0")
+        assert i18n.EN["console.error"].split("{")[0].strip()[:5] in window.log.toPlainText()
+        assert "ZeroDivisionError" in window.log.toPlainText()
+        # The console still works, and the session is untouched.
+        console.execute("print('alive')")
+        assert "alive" in window.log.toPlainText()
+        assert window.pose_count() > 0
+        # A syntax error is reported the same way.
+        console.execute("def (")
+        assert "SyntaxError" in window.log.toPlainText()
+        # SystemExit must not close the workbench.
+        console.execute("raise SystemExit(3)")
+        assert window.isVisible() or window.pose_count() > 0
+    finally:
+        window.close()
+
+
+def test_a_console_block_spans_several_lines(qapp, tmp_path):
+    window = _toolkit_window(qapp, tmp_path)
+    try:
+        console = window.console
+        # A trailing colon continues the block, and the prompt says so.
+        console.setText("total = 0")
+        console.submit()
+        console.setText("for index in range(3):")
+        assert console.submit() == "for index in range(3):"
+        assert console.prompt() == console.CONTINUED
+        assert window.console_prompt.text() == console.CONTINUED
+        console.setText("    total += index")
+        console.submit()
+        console.execute("print(total)")
+        assert "3" in window.log.toPlainText(), window.log.toPlainText()[-120:]
+        # The transcript shows the whole block, prompt and continuation alike.
+        assert "...     total += index" in window.log.toPlainText()
+    finally:
+        window.close()
+
+
+def test_the_console_and_the_measurement_toolkit_share_the_session(qapp, tmp_path):
+    """The console reaches the newer tools too, on the same code paths."""
+    window = _toolkit_window(qapp, tmp_path)
+    try:
+        window._history.clear()
+        window.console.execute("measure('distance', ('ligand', 0), ('ligand', 1))")
+        qapp.processEvents()
+        assert len(window._measurements) == 1
+        assert window.measure_history.table.rowCount() == 1
+        assert window.viewport.measurement_overlays
+        assert window._history.can_undo()
+        window.console.execute("annotate('from the console')")
+        qapp.processEvents()
+        assert [note.text for note in window._annotations] == ["from the console"]
+        assert window.annotation_table.table.rowCount() == 1
+        key = window.sequence.blocks()[0].key
+        window.console.execute(f"select('{key[0]}', {key[1]}, '{key[2]}')")
+        qapp.processEvents()
+        assert window.sequence.selected_keys() == [key]
+    finally:
+        window.close()
 
 
 def test_layout_presets_rearrange_the_docks(window, qapp):
@@ -1322,24 +2572,56 @@ def test_ctrl_clicking_two_rows_fills_the_comparison_panel(window, qapp):
 
 
 def test_the_measurement_history_follows_the_measure_tool(window, qapp):
+    """Two picks commit a distance; the panel, the scene and the clipboard agree."""
     window.load_receptor(RECEPTOR_PDBQT)
     window.load_ligand(LIGAND_PDBQT)
+    window.set_measure_kind("distance")
+    assert len(window.pending_picks()) == 0
+    # The viewport emits the whole pick list each time; the newest pick is used.
+    window._on_atoms_picked([("receptor", 0)])
+    qapp.processEvents()
+    assert len(window.pending_picks()) == 1
+    assert len(window._measurements) == 0, "half a distance is not a measurement"
     window._on_atoms_picked([("receptor", 0), ("ligand", 0)])
     qapp.processEvents()
     assert len(window._measurements) == 1
+    assert window.pending_picks() == []
     assert window.measure_history.table.rowCount() == 1
-    assert "1 distances" in window.measure_history.summary.text()
+    assert window.measure_history.summary.text().startswith("1 ")
+    assert window.measure_history.table.item(0, 0).text() == "Distance"
+    assert "Å" in window.measure_history.table.item(0, 2).text()
+    assert len(window.scene.measurements) == 1, "the renderer draws the distance"
+    assert window.viewport.measurement_overlays, "and the overlay layer labels it"
 
+    # The two exports: the panel's own text is the contract, and the clipboard is
+    # waited for (it is process-global and asynchronous on Windows, so a single
+    # immediate read is a one-in-N failure that tests nothing about the feature).
+    expected_text = window.measure_history.as_text()
     window._copy_measurements()
-    text = QtWidgets.QApplication.clipboard().text()
+    text = _clipboard_text(qapp, expected_text)
+    assert text == expected_text
     assert "LIG1:C1" in text and "Å" in text
     assert "copied 1 measurements" in window.log.toPlainText()
+
+    expected_csv = window.measure_history.as_csv()
+    window._copy_measurements_csv()
+    csv = _clipboard_text(qapp, expected_csv)
+    assert csv == expected_csv
+    assert csv.splitlines()[0] == "kind,atoms,value,unit,label"
+    assert "distance" in csv
 
     window._clear_measurements()
     qapp.processEvents()
     assert window.measure_history.table.rowCount() == 0
     assert window.scene.measurements == []
+    assert window.viewport.measurement_overlays == []
     assert "measurements cleared" in window.log.toPlainText()
+    # Clearing is undoable, like every other measurement edit.
+    assert window._history.can_undo()
+    window.undo()
+    qapp.processEvents()
+    assert len(window._measurements) == 1
+    assert window.measure_history.table.rowCount() == 1
 
 
 def test_the_atom_readout_lands_in_the_status_bar(window, qapp):
@@ -1359,8 +2641,17 @@ def test_the_view_can_be_copied_to_the_clipboard(window, qapp):
     qapp.processEvents()
     window.load_receptor(RECEPTOR_PDBQT)
     qapp.processEvents()
+    clipboard = QtWidgets.QApplication.clipboard()
     window._copy_view()
-    pixmap = QtWidgets.QApplication.clipboard().pixmap()
+    # Same asynchrony as the text copies: give the platform clipboard a moment
+    # rather than reading once and hoping.
+    pixmap = clipboard.pixmap()
+    deadline = QtCore.QElapsedTimer()
+    deadline.start()
+    while pixmap.isNull() and deadline.elapsed() < 2000:
+        qapp.processEvents()
+        QtCore.QThread.msleep(10)
+        pixmap = clipboard.pixmap()
     assert not pixmap.isNull()
     assert pixmap.width() > 0
     assert "clipboard" in window.log.toPlainText()

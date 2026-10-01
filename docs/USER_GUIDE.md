@@ -579,9 +579,11 @@ Everything in it is optional — the CLI and the Python API never import it.
 | double click | centre the camera on that residue |
 | pose slider / table row | show that mode |
 | **ctrl** + click a second table row | compare the two poses (see 5.5) |
-| `Ctrl+K` | command palette |
+| `Ctrl+K` | command palette — every menu action, including every measurement and annotation |
+| `Ctrl+Z` / `Ctrl+Shift+Z` | undo / redo a scene edit (see 5.6) |
 | `Ctrl+Shift+C` | copy the 3-D view to the clipboard |
 | `Ctrl+Shift+R` | restore the saved session |
+| `F5` / `F6` / `F7` | start / pause-resume / abort the docking run |
 | `Home` | reset the view |
 
 The search box is edited from the **Grid** tab (centre, size, spacing) and the
@@ -721,17 +723,115 @@ ignored.
 
 #### Measurements, the atom read-out and screenshots
 
-* The **measure tool** (View ▸ Measure) turns two atom clicks into a distance,
-  and the **Measurements** tab of the run monitor lists them with their atoms
-  as a table you can copy or clear. They are also drawn in the 3-D view and
-  listed in the workspace tree.
+* The **measure tool** (`View ▸ Measure distance`) turns two atom clicks into a
+  distance, and the **Measurements** tab of the run monitor lists every
+  measurement with its atoms and its value — see 5.6 for the five other
+  quantities the same tool answers.
 * **View ▸ Inspect atom** toggles the hover read-out: point at any atom and a
   small card names its residue, atom, element, AD4 type, charge and position,
   and the status bar repeats it. It is on by default and costs nothing when the
   cursor is still.
-* `View ▸ Copy view` (`Ctrl+Shift+C`) puts the current 3-D image — including its
-  legend — on the clipboard, ready to paste into a slide. `File ▸ Export ▸
-  Screenshot…` still writes a high-resolution PNG to disk.
+* `View ▸ Copy view` (`Ctrl+Shift+C`) puts the current 3-D image — including the
+  measurement and annotation layers and the legend — on the clipboard, ready to
+  paste into a slide. `File ▸ Export ▸ Screenshot…` writes the same picture as a
+  high-resolution PNG, so a saved figure carries the labels and the arcs that
+  were on screen.
+
+### 5.6 Measuring, annotating, and undo
+
+#### What you can measure
+
+`View ▸ Measure` chooses what the next clicks will answer. The status bar counts
+the picks as you go (`Angle: pick 2 / 3 atoms`), and the measurement is recorded
+as soon as it has enough atoms.
+
+| quantity | atoms | answers |
+|---|---|---|
+| **Distance** | 2 | how far apart two atoms are (Å) |
+| **Angle** | 3 | the angle *at the second atom you click* (degrees, 0–180) |
+| **Dihedral** | 4 | the torsion about the middle bond (degrees, −180…180, IUPAC sign) |
+| **Centroid** | any | the centre of the picked atoms, as x y z (Å) |
+| **Plane** | 3+ | the best-fit plane through the atoms, reported as its unit normal |
+| **Plane ↔ plane** | 6 | the acute angle between two planes (first three atoms, then three more) |
+| **Plane ↔ bond** | 5 | the angle between a plane (first three atoms) and a bond (last two) |
+
+Two entry paths, one answer: click the atoms in the 3-D view with the measure
+tool, **or** select residues/atoms on the sequence ruler or in the Selection
+table and use `View ▸ Measure ▸ Measure selection`. Both produce the same
+`(receptor|ligand, atom index)` references, so the two can never disagree about
+which atom was meant.
+
+Every measurement gets an entry in the **Measurements** tab (type, atoms, value
+with its unit) and a labelled overlay in the 3-D view. `Copy list` puts the table
+on the clipboard as text and `CSV…` as a comma-separated body with the header
+`kind,atoms,value,unit,label`, ready for a spreadsheet.
+
+#### How the overlays are drawn
+
+The measurement layer is painted by the workbench itself, *above* everything the
+renderer draws (including the legible interaction dashes), so it is theme-aware
+and it appears in screenshots:
+
+* **distance** — a line between the two atoms;
+* **angle / dihedral** — the joining lines plus a short **arc at the vertex**
+  (both central atoms for a dihedral), so the measured angle is visible rather
+  than implied;
+* **plane / plane ↔ plane / plane ↔ bond** — a **translucent quadrilateral** with
+  a dashed border for each plane, drawn as a generous indication of the plane
+  rather than a claim about its extent;
+* **centroid** — a marker at the centre, with the coordinates in its label;
+* every value sits in a small **label chip** with a dark halo under the stroke,
+  so an arc or a plane stays readable on the light background as well as the
+  dark one — the halo is what stops an overlay being mistaken for one more
+  anonymous line.
+
+The atoms a measurement names are also marked on the sequence ruler, and the
+measurement survives orbiting the camera and switching pose: the value is
+recomputed from the coordinates of the atoms it references, never cached, so a
+number can never belong to the previous pose.
+
+#### Annotations
+
+`View ▸ Annotate` pins a text label to the scene:
+
+* **Add label…** anchors it to the current selection — one atom, or the centroid
+  of a residue, or the measurement you just made — and asks for the text and a
+  colour in one dialog. **Edit label…** and **Delete label** work on the row
+  selected in the **Annotate** tab.
+* **Show labels** hides them all without deleting them, so a figure can be
+  exported clean and the notes kept.
+* Labels carry a colour, a leader line to their anchor, and the same dark halo as
+  the measurements; they are painted into `File ▸ Export ▸ Screenshot…` and into
+  the 3-D clipboard copy, and they are handed to the PyMOL/ChimeraX export path as
+  `pseudoatom`/`label` (or `name`/`label` in ChimeraX) commands, so a written
+  session carries the notes with it.
+
+#### Undo and redo
+
+`Ctrl+Z` undoes the last scene edit and `Ctrl+Shift+Z` redoes it; the `View` menu
+names what each step will do (`Undo add Angle measurement`). Covered edits:
+
+* adding, removing and clearing measurements;
+* adding, editing and deleting annotations;
+* the ruler/atom selection;
+* protein and ligand style changes;
+* theme and density changes;
+* search-box edits (including “there was no box”);
+* the displayed pose.
+
+A **slider drag is one step**, not two hundred: consecutive pose changes within a
+short window coalesce, and undoing goes back to where the drag started while
+redoing lands on its final state. A new edit clears the redo branch, as in every
+editor. Undo restores the *panels* as well as the scene — the table, the tree,
+the overlays and the labels are all derived from the restored state, which is the
+failure this kind of feature invites and which the test-suite checks explicitly
+by comparing the whole panel state before an edit with the state after undoing
+it.
+
+Everything on this page is a menu action, so `Ctrl+K` reaches all of it: type
+`dih` to measure a dihedral, `lab` to add a label, `undo` to step back — the
+palette is generated from the menu bar, so it can never drift from what the
+menus offer.
 
 ---
 

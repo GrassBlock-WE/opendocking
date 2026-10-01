@@ -4120,6 +4120,29 @@ def add_ensemble_parser(sub) -> None:
 
     add_pockets_subparser(ensub)
 
+    # Same for `generate`: it belongs to this group and needs none of the
+    # receptor-set flags, but it is the answer to "I only have one structure".
+    from .generate import add_generate_subparser
+
+    add_generate_subparser(ensub)
+
+    # ... and `modes`, which supplies the motion side-chain sampling provably
+    # cannot: the backbone.
+    from .modes import add_modes_subparser
+
+    add_modes_subparser(ensub)
+
+    # ... and `waters`, which is about what every other path throws away.
+    from .waters import add_waters_subparser
+
+    add_waters_subparser(ensub)
+
+    # ... and `coupling`, the question the mode set *can* answer even though it
+    # cannot predict a conformational change.
+    from .coupling import add_coupling_subparser
+
+    add_coupling_subparser(ensub)
+
 
 
 

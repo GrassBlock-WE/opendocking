@@ -25,6 +25,7 @@ Design notes that are not obvious from the outside:
 
 from __future__ import annotations
 
+import functools
 import json
 import math
 import os
@@ -174,6 +175,26 @@ def _bond_pairs(bonds: Sequence) -> List[Tuple[int, int]]:
     return out
 
 
+def _history_silent(function):
+    """Run a method with undo recording switched off.
+
+    Loading structures, opening a project and restoring a session all *set* the
+    scene: none of them is a user edit, and none of them belongs on the undo
+    stack (Ctrl+Z after opening a file must undo the last edit, not the file).
+    """
+
+    @functools.wraps(function)
+    def wrapper(self, *args, **kwargs):
+        previous = getattr(self, "_suppress_history", False)
+        self._suppress_history = True
+        try:
+            return function(self, *args, **kwargs)
+        finally:
+            self._suppress_history = previous
+
+    return wrapper
+
+
 def _scrollable_panel(widget, minimum: Tuple[int, int] = (150, 110)):
     """Put ``widget`` in a scroll area so it compresses instead of blocking.
 
@@ -281,6 +302,17 @@ class ViewportWidget(QtWidgets.QWidget):
         self.hover_visible = True
         self._hover = None
         self._hover_at = 0.0
+        #: The measurement and annotation layers, drawn with QPainter over the
+        #: rendered image — so they are theme-aware, they can carry text, and
+        #: they land in a snapshot as well as on screen. Each entry is a plain
+        #: dict built by the window: {"kind", "points", "split", "text", ...}.
+        self.measurement_overlays: List[dict] = []
+        self.annotation_overlays: List[dict] = []
+        #: ``(kind, detected, drawn)`` for the interaction legend.
+        self.interaction_legend: List[tuple] = []
+        #: Set while a high-resolution snapshot is being painted, so the hover
+        #: card (a cursor affordance, not part of the figure) stays out of it.
+        self._snapshotting = False
         self.setMinimumSize(420, 320)
         self.setFocusPolicy(QtCore.Qt.FocusPolicy.StrongFocus)
         self.setMouseTracking(True)
@@ -296,11 +328,281 @@ class ViewportWidget(QtWidgets.QWidget):
         # to follow the theme as well: light-grey legend text is invisible on a
         # light viewport.
         self._light_canvas = sum(self.canvas) > 380
+        # The element palette is tuned for a dark canvas; on the light one the
+        # renderer lifts those colours towards white, so a mid-grey carbon reads
+        # as a stick instead of as a dark stroke. The upload is forced, or the
+        # change would only appear after the next style switch.
+        self.scene.light_background = self._light_canvas
+        if self.renderer is not None:
+            self.renderer.dirty_receptor = True
+            self.renderer.dirty_ligand = True
         self.update()
 
     def hover_readout(self) -> Optional[Tuple[str, int]]:
         """The atom currently under the cursor, or ``None``."""
         return self._hover
+
+    # -- measurement and annotation layers ---------------------------------
+
+    #: World position -> widget coordinates, or ``None`` behind the camera.
+    def project_point(self, point, width: Optional[int] = None, height: Optional[int] = None):
+        """Project a world point to widget pixels using this widget's camera."""
+        import numpy as np
+
+        width = self.width() if width is None else width
+        height = self.height() if height is None else height
+        if width <= 0 or height <= 0:
+            return None
+        clip = (
+            np.asarray(self.camera.projection(width, height), dtype=float)
+            @ np.asarray(self.camera.view(), dtype=float)
+            @ np.asarray([float(point[0]), float(point[1]), float(point[2]), 1.0])
+        )
+        if clip[3] <= 1e-6:
+            return None  # behind the eye: never draw a mirrored overlay
+        ndc = clip[:3] / clip[3]
+        return QtCore.QPointF(
+            (ndc[0] + 1.0) * 0.5 * width,
+            (1.0 - ndc[1]) * 0.5 * height,
+        )
+
+    def set_measurement_overlays(self, overlays: Sequence[dict]) -> None:
+        self.measurement_overlays = [dict(item) for item in overlays]
+        self.update()
+
+    def set_annotation_overlays(self, overlays: Sequence[dict]) -> None:
+        self.annotation_overlays = [dict(item) for item in overlays]
+        self.update()
+
+    def set_interaction_legend(self, entries: Sequence) -> None:
+        """``(kind, detected, drawn)`` per interaction kind, for the HUD legend.
+
+        The legend counts what was *detected* (so it matches the Interactions
+        table) and appends the number of lines actually drawn when the two differ
+        — the honest way to show "17 contacts, 3 lines" after the drawing is
+        reduced to one line per residue.
+        """
+        self.interaction_legend = [tuple(entry) for entry in entries]
+        self.update()
+
+    def _overlay_stroke(self, painter: QtGui.QPainter, colour, *, width=2.0, dash=False):
+        """A bright stroke over a dark halo, so it reads on either theme.
+
+        The halo is what keeps an amber arc legible on a light viewport *and*
+        keeps it from being confused with the interaction dashes it crosses.
+        """
+        pen = QtGui.QPen(QtGui.QColor(12, 14, 20, 190), width + 2.0)
+        pen.setCapStyle(QtCore.Qt.PenCapStyle.RoundCap)
+        if dash:
+            pen.setStyle(QtCore.Qt.PenStyle.DashLine)
+        painter.setPen(pen)
+        return QtGui.QPen(
+            QtGui.QColor(
+                int(float(colour[0]) * 255),
+                int(float(colour[1]) * 255),
+                int(float(colour[2]) * 255),
+            ),
+            width,
+        )
+
+    def _paint_measurement_overlay(self, painter: QtGui.QPainter) -> None:
+        """The measurement layer: lines, arcs, planes, normals and labels."""
+        if not self.measurement_overlays:
+            return
+        painter.save()
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+        painter.setFont(QtGui.QFont("Segoe UI", 8))
+        self._placed_labels = []
+        for overlay in self.measurement_overlays:
+            points = [
+                projected
+                for projected in (
+                    self.project_point(point) for point in overlay.get("points", [])
+                )
+                if projected is not None
+            ]
+            if len(points) < 2:
+                continue
+            colour = overlay.get("colour", (1.0, 0.84, 0.28))
+            kind = str(overlay.get("kind", "distance"))
+
+            # 1. the lines that join the picked atoms
+            stroke = self._overlay_stroke(painter, colour, width=2.0)
+            painter.setPen(QtGui.QPen(QtGui.QColor(12, 14, 20, 190), 4.0))
+            for first, second in zip(points, points[1:]):
+                painter.drawLine(first, second)
+            painter.setPen(stroke)
+            for first, second in zip(points, points[1:]):
+                painter.drawLine(first, second)
+
+            # 2. the geometry that makes the number readable
+            if kind == "angle" and len(points) >= 3:
+                self._draw_arc(painter, points[1], points[0], points[2], colour)
+            elif kind == "dihedral" and len(points) >= 4:
+                self._draw_arc(painter, points[1], points[0], points[2], colour)
+                self._draw_arc(painter, points[2], points[1], points[3], colour)
+            elif kind == "plane" and len(points) >= 3:
+                self._draw_plane(painter, overlay, points, colour)
+            elif kind in ("plane_angle", "plane_bond") and len(points) >= 5:
+                self._draw_plane(painter, overlay, points, colour)
+
+            # 3. the endpoints, then the value
+            painter.setBrush(QtGui.QColor(12, 14, 20, 200))
+            painter.setPen(stroke)
+            for point in points:
+                painter.drawEllipse(point, 3.4, 3.4)
+            self._draw_label(painter, points[len(points) // 2], str(overlay.get("text", "")), colour)
+        painter.restore()
+
+    def _draw_arc(self, painter, vertex, first, second, colour) -> None:
+        """The arc of an angle: a short radius bow at the vertex."""
+        import math as _math
+
+        start = _math.degrees(
+            _math.atan2(-(first.y() - vertex.y()), first.x() - vertex.x())
+        )
+        end = _math.degrees(
+            _math.atan2(-(second.y() - vertex.y()), second.x() - vertex.x())
+        )
+        span = (end - start) % 360.0
+        if span > 180.0:
+            span -= 360.0
+        radius = 26.0
+        rect = QtCore.QRectF(
+            vertex.x() - radius, vertex.y() - radius, radius * 2, radius * 2
+        )
+        painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+        painter.setPen(QtGui.QPen(QtGui.QColor(12, 14, 20, 190), 4.0))
+        painter.drawArc(rect, int(start * 16), int(span * 16))
+        painter.setPen(self._overlay_stroke(painter, colour, width=2.0))
+        painter.drawArc(rect, int(start * 16), int(span * 16))
+
+    def _draw_plane(self, painter, overlay, points, colour) -> None:
+        """A translucent quadrilateral plus its normal, for a plane fit."""
+        plane_points = points
+        split = overlay.get("split")
+        if split:
+            plane_points = points[: int(split)]
+        if len(plane_points) < 3:
+            return
+        # The quad is spanned by the two widest directions of the point cloud,
+        # projected to the screen: it is a *drawing* of the plane, not a claim
+        # about its extent, so it is deliberately generous and translucent.
+        middle = QtCore.QPointF(
+            sum(point.x() for point in plane_points) / len(plane_points),
+            sum(point.y() for point in plane_points) / len(plane_points),
+        )
+        span = max(
+            28.0,
+            max(abs(point.x() - middle.x()) for point in plane_points) * 1.8,
+            max(abs(point.y() - middle.y()) for point in plane_points) * 1.8,
+        )
+        quad = [
+            QtCore.QPointF(middle.x() - span, middle.y() - span * 0.5),
+            QtCore.QPointF(middle.x() + span, middle.y() - span * 0.5),
+            QtCore.QPointF(middle.x() + span, middle.y() + span * 0.5),
+            QtCore.QPointF(middle.x() - span, middle.y() + span * 0.5),
+        ]
+        fill = QtGui.QColor(
+            int(float(colour[0]) * 255),
+            int(float(colour[1]) * 255),
+            int(float(colour[2]) * 255),
+            46,
+        )
+        painter.setBrush(fill)
+        painter.setPen(self._overlay_stroke(painter, colour, width=1.4, dash=True))
+        painter.drawPolygon(quad)
+        painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+
+    def _draw_label(self, painter, anchor: QtCore.QPointF, text: str, colour) -> None:
+        """A value chip next to its geometry, legible on either theme.
+
+        Chips are stacked: measurements are often taken on the same handful of
+        atoms, and two labels drawn at the same midpoint would hide each other's
+        number — less readable than no overlay at all.
+        """
+        if not text:
+            return
+        metrics = painter.fontMetrics()
+        width = metrics.horizontalAdvance(text) + 12
+        height = metrics.height() + 4
+        x = max(4.0, min(anchor.x() + 10, self.width() - width - 4.0))
+        y = max(4.0, min(anchor.y() - height - 6, self.height() - height - 4.0))
+        placed = getattr(self, "_placed_labels", None)
+        if placed is None:
+            placed = self._placed_labels = []
+        for _attempt in range(10):
+            candidate = QtCore.QRectF(x, y, width, height)
+            if not any(candidate.intersects(other) for other in placed):
+                break
+            y += height + 2
+            if y > self.height() - height - 4.0:
+                y = max(4.0, anchor.y() + 10)
+        rect = QtCore.QRectF(x, y, width, height)
+        placed.append(rect)
+        background = QtGui.QColor(252, 253, 255, 225) if self._light_canvas else QtGui.QColor(12, 16, 22, 210)
+        painter.setPen(QtGui.QPen(QtGui.QColor(90, 110, 130, 200), 1))
+        painter.setBrush(background)
+        painter.drawRoundedRect(rect, 4.0, 4.0)
+        ink = QtGui.QColor(20, 28, 38) if self._light_canvas else QtGui.QColor(
+            int(float(colour[0]) * 255),
+            int(float(colour[1]) * 255),
+            int(float(colour[2]) * 255),
+        )
+        painter.setPen(ink)
+        painter.drawText(rect, int(QtCore.Qt.AlignmentFlag.AlignCenter), text)
+
+    def _paint_annotation_overlay(self, painter: QtGui.QPainter) -> None:
+        """The annotation layer: a leader line and a coloured label chip."""
+        if not self.annotation_overlays:
+            return
+        painter.save()
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+        painter.setFont(QtGui.QFont("Segoe UI", 8))
+        # One stacking pool for both layers: a label and an annotation chip must
+        # not be drawn on top of each other either.
+        self._placed_labels = list(getattr(self, "_placed_labels", []))
+        for overlay in self.annotation_overlays:
+            anchor = self.project_point(overlay.get("point", (0.0, 0.0, 0.0)))
+            if anchor is None:
+                continue
+            colour = overlay.get("colour", (1.0, 0.85, 0.35))
+            text = str(overlay.get("text", ""))
+            metrics = painter.fontMetrics()
+            width = metrics.horizontalAdvance(text) + 14
+            height = metrics.height() + 6
+            x = max(4.0, min(anchor.x() + 22.0, self.width() - width - 4.0))
+            y = max(4.0, min(anchor.y() - height - 16.0, self.height() - height - 4.0))
+            rect = QtCore.QRectF(x, y, width, height)
+
+            painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+            painter.setPen(self._overlay_stroke(painter, colour, width=1.4))
+            painter.drawLine(QtCore.QPointF(anchor.x() + 3, anchor.y() - 3), QtCore.QPointF(x, y + height))
+
+            background = QtGui.QColor(252, 253, 255, 232) if self._light_canvas else QtGui.QColor(12, 16, 22, 215)
+            painter.setBrush(background)
+            painter.setPen(
+                QtGui.QPen(
+                    QtGui.QColor(
+                        int(float(colour[0]) * 255),
+                        int(float(colour[1]) * 255),
+                        int(float(colour[2]) * 255),
+                    ),
+                    1.4,
+                )
+            )
+            painter.drawRoundedRect(rect, 5.0, 5.0)
+            painter.setPen(
+                QtGui.QColor(20, 28, 38)
+                if self._light_canvas
+                else QtGui.QColor(
+                    int(float(colour[0]) * 255),
+                    int(float(colour[1]) * 255),
+                    int(float(colour[2]) * 255),
+                )
+            )
+            painter.drawText(rect, int(QtCore.Qt.AlignmentFlag.AlignCenter), text)
+        painter.restore()
 
 
     # -- context and framebuffer -------------------------------------------
@@ -429,29 +731,52 @@ class ViewportWidget(QtWidgets.QWidget):
     def _paint_overlay(self, painter: QtGui.QPainter) -> None:
         """A small HUD: the interaction legend, the surface colour bar, the tool."""
         interactions = self.scene.interactions or []
-        if interactions:
-            kinds: List[str] = []
-            for item in interactions:
-                kind = getattr(item, "kind", "")
-                if kind and kind not in kinds:
-                    kinds.append(kind)
+        legend = self.interaction_legend or [
+            (
+                kind,
+                sum(1 for item in interactions if getattr(item, "kind", "") == kind),
+                sum(1 for item in interactions if getattr(item, "kind", "") == kind),
+            )
+            for kind in dict.fromkeys(
+                getattr(item, "kind", "") for item in interactions
+            )
+        ]
+        if legend:
             painter.setFont(QtGui.QFont("Segoe UI", 8))
             y = 14
-            for kind in kinds:
+            for kind, detected, drawn in legend:
                 r, g, b, _ = INTERACTION_COLORS.get(kind, (0.8, 0.8, 0.8, 1.0))
                 painter.setBrush(QtGui.QColor(int(r * 255), int(g * 255), int(b * 255)))
                 painter.setPen(QtCore.Qt.PenStyle.NoPen)
                 painter.drawEllipse(10, y - 6, 8, 8)
                 painter.setPen(self._hud_ink())
-                count = sum(1 for i in interactions if getattr(i, "kind", "") == kind)
-                painter.drawText(24, y + 2, f"{_interaction_label(kind)} ({count})")
+                # The count is what was *detected* (it matches the table); when the
+                # drawing is reduced, the number of lines is shown beside it.
+                text = (
+                    f"{_interaction_label(kind)} ({detected})"
+                    if detected == drawn
+                    else f"{_interaction_label(kind)} ({detected} → {drawn} lines)"
+                )
+                painter.drawText(24, y + 2, text)
                 y += 16
+            # What a dash *is*: the legend names each kind, and this line says
+            # what the dashes join, so a line is never an anonymous stroke.
+            painter.setPen(self._hud_ink().darker(115))
+            painter.drawText(24, y + 2, tr("interaction.legend_convention"))
+            y += 16
 
         # The surface colour bar and the scale bar are part of the picture, not
         # decoration: without the first a colour map cannot be read, and without
         # the second no distance in the image can be believed.
         self._paint_legend(painter, self.width(), self.height())
         self._paint_scale_bar(painter, self.width(), self.height())
+
+        # The measurement and annotation layers sit above everything the renderer
+        # draws, including the interaction dashes: that ordering, plus the dark
+        # halo every stroke carries, is what keeps an arc or a plane readable
+        # instead of becoming one more anonymous line.
+        self._paint_measurement_overlay(painter)
+        self._paint_annotation_overlay(painter)
 
         if self.mode != self.MODE_ORBIT:
             painter.setPen(self._hud_hint())
@@ -489,12 +814,16 @@ class ViewportWidget(QtWidgets.QWidget):
         bar_width = self.LEGEND_BAR_WIDTH
         bar_height = min(self.LEGEND_BAR_HEIGHT, max(60, height // 4))
         left = 16.0
-        top = height - 22.0 - bar_height
-        title = self._legend_title()
+        # A charge caveat needs its own line under the title: an ESP map that may
+        # be wrong-signed must not look like an answer.
+        caveat = bool(getattr(self.scene.surface, "charge_warning", None))
         painter.save()
         try:
             painter.setFont(QtGui.QFont("Segoe UI", 8))
             metrics = painter.fontMetrics()
+            extra = (metrics.height() + 2) if caveat else 0
+            top = height - 22.0 - bar_height - extra
+            title = self._legend_title()
             title_width = min(
                 max(80.0, float(metrics.horizontalAdvance(title)) + 4.0), width - 24.0
             )
@@ -541,6 +870,19 @@ class ViewportWidget(QtWidgets.QWidget):
                 int(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter),
                 title,
             )
+            if caveat:
+                painter.setPen(self._hud_hint())
+                painter.drawText(
+                    QtCore.QRectF(
+                        left - 2.0,
+                        top - 4.0,
+                        panel.width(),
+                        metrics.height() + 2,
+                    ),
+                    int(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter),
+                    tr("legend.charge_warning"),
+                )
+                painter.setPen(self._hud_ink())
             for fraction, _colour, label in stops:
                 y = top + (1.0 - float(fraction)) * bar_height
                 painter.drawLine(
@@ -639,7 +981,7 @@ class ViewportWidget(QtWidgets.QWidget):
         card is read-only and carries the fields the Selection dock would show.
         """
         hit = self._hover
-        if not hit or self.mode != self.MODE_ORBIT:
+        if not hit or self.mode != self.MODE_ORBIT or self._snapshotting:
             return
         kind, index = hit
         atoms = self.scene.ligand if kind == "ligand" else self.scene.receptor
@@ -1030,7 +1372,19 @@ class ViewportWidget(QtWidgets.QWidget):
         ).copy()
         if annotate:
             painter = QtGui.QPainter(image)
+            self._snapshotting = True
             try:
+                # The measurement and annotation layers are in *widget*
+                # coordinates, so they are drawn under a scale that maps those
+                # onto the figure: a saved picture carries the same arcs, planes
+                # and labels the screen shows.
+                sx = image.width() / max(1, self.width())
+                sy = image.height() / max(1, self.height())
+                painter.save()
+                painter.scale(sx, sy)
+                self._paint_measurement_overlay(painter)
+                self._paint_annotation_overlay(painter)
+                painter.restore()
                 # A 2400 px figure needs a bigger font than the 600 px widget.
                 scale = max(1.0, image.height() / 800.0)
                 painter.scale(scale, scale)
@@ -1039,6 +1393,7 @@ class ViewportWidget(QtWidgets.QWidget):
                     painter, int(image.width() / scale), int(image.height() / scale)
                 )
             finally:
+                self._snapshotting = False
                 painter.end()
         return bool(image.save(str(path)))
 
@@ -1304,6 +1659,12 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         #: site highlighted — but it starts off, and Clear annotations (or a new
         #: project) switches it off.
         self._focus_requested = False
+        #: Whether the interaction *drawing* is on. Off by default: docking and
+        #: pose browsing report contacts (the pose label names the residues, the
+        #: table lists the pairs) but draw nothing until Analysis ▸ Show
+        #: interactions — a dash is what people read as "these two things
+        #: interact", so it is opt-in and Clear annotations switches it off.
+        self._interactions_shown = False
         self.receptor_mol = None
         self.ligand_mol = None
         self.inventory = None
@@ -1311,7 +1672,16 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         self._worker: Optional[QtCore.QThread] = None
         self._background: Optional[QtCore.QThread] = None
         self._pending: Dict[str, object] = {}
-        self._measurements: List[dict] = []
+        self._measurements: List[dashboard.Measurement] = []
+        #: Text labels pinned to the scene (View ▸ Annotate).
+        self._annotations: List[dashboard.Annotation] = []
+        self._annotation_visible = True
+        #: What the next pick will measure, and the picks collected so far.
+        self._measure_kind = "distance"
+        self._pick_refs: List[Tuple[str, int]] = []
+        #: The undo stack, and a guard so a rebuild or a load never records a step.
+        self._history = dashboard.CommandStack()
+        self._suppress_history = False
         self._locked_bonds: List[tuple] = []
         #: Interaction distance cut-offs (View ▸ Interaction distances…). They
         #: live on the window, not in a widget, so re-annotating and a language
@@ -1374,17 +1744,22 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         )
         self._autosave_timer: Optional[QtCore.QTimer] = None
         self._autosave_pending = False
+        #: Which interaction kinds are *drawn* (View ▸ Interaction lines).
+        #: ``None`` means "all of them", which is what a fresh window wants.
+        self._interaction_filter: Optional[set] = None
 
         self._build_viewport()
         self._build_inspector()
         self._build_workspace()
         self._build_bottom()
         self._build_dashboard()
+        self._build_console()
         self._build_comparison()
         self._build_selection_panel()
         self._build_menus()
         self._build_statusbar()
         self._apply_style()
+        self._apply_dock_proportions()
         self._install_autosave()
         self.setAcceptDrops(True)
 
@@ -1417,6 +1792,7 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         self._build_workspace()
         self._build_bottom()
         self._build_dashboard()
+        self._build_console()
         self._build_comparison()
         self._build_selection_panel()
         self._build_menus()
@@ -1437,7 +1813,7 @@ class DockingWorkbench(QtWidgets.QMainWindow):
             "spacing": float(self.spacing.value()),
             "box_visible": self.chk_box.isChecked(),
             "focus_requested": self._focus_requested,
-            "pose_index": self.pose_slider.value() if self.pose_models else None,
+            "pose_index": self.pose_index() if self.pose_models else None,
             "pose_row": self.table.currentRow(),
             "flex": [
                 self.flex_list.item(i).text() for i in range(self.flex_list.count())
@@ -1473,6 +1849,11 @@ class DockingWorkbench(QtWidgets.QMainWindow):
             "theme": self.color_theme.name,
             "density": self.density,
             "preset": self._preset,
+            "interaction_filter": (
+                None
+                if self._interaction_filter is None
+                else sorted(self._interaction_filter)
+            ),
             "surface": {
                 "settings": self.surface_settings,
                 "alpha": float(self._surface_alpha),
@@ -1483,7 +1864,10 @@ class DockingWorkbench(QtWidgets.QMainWindow):
                 "legend": bool(self.scene.surface_legend),
             },
             "history": self.run_history.to_list(),
-            "measurements": [dict(item) for item in self._measurements],
+            "measurements": [item.to_dict() for item in self._measurements],
+            "annotations": [item.to_dict() for item in self._annotations],
+            "annotation_visible": bool(self._annotation_visible),
+            "measure_kind": str(self._measure_kind),
             "comparison_rows": tuple(self._comparison_rows),
             "comparison": self._comparison is not None,
             "engine": {
@@ -1559,6 +1943,7 @@ class DockingWorkbench(QtWidgets.QMainWindow):
             _release_viewport(viewport)
             self.viewport = None
 
+    @_history_silent
     def _restore_ui_state(self, state: dict) -> None:
         """Put the captured session back into the freshly built widgets."""
         self._charge_model = state["charge_model"]
@@ -1640,7 +2025,7 @@ class DockingWorkbench(QtWidgets.QMainWindow):
             self.lbl_maps.setText(tr("label.no_grid"))
 
         if state["pose_index"] is not None and self.pose_models:
-            self.pose_slider.setValue(state["pose_index"])
+            self.set_pose(state["pose_index"], record=False)
             if state["pose_row"] >= 0:
                 self.table.selectRow(state["pose_row"])
 
@@ -1692,6 +2077,11 @@ class DockingWorkbench(QtWidgets.QMainWindow):
             dock = getattr(self, name, None)
             if dock is not None:
                 dock.setVisible(visible)
+        # The docks were rebuilt around the same content, so the opening
+        # proportions have to be re-applied with them — on the next event-loop
+        # turn, because a hint during the rebuild is ignored.
+        self._apply_dock_proportions()
+        self._schedule_dock_proportions()
         self.inspector.setCurrentIndex(state["tab"])
 
         # The instrument panels: their data survives the rebuild, the widgets
@@ -1700,8 +2090,19 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         if self.run_dashboard is not None:
             self.run_dashboard.history = self.run_history
             self.run_dashboard.reset(clear_history=False)
-        self._measurements = [dict(item) for item in state.get("measurements", [])]
+        self._measurements = [
+            dashboard.Measurement.from_dict(item)
+            for item in state.get("measurements", [])
+        ]
+        self._annotations = [
+            dashboard.Annotation.from_dict(item)
+            for item in state.get("annotations", [])
+        ]
+        self._annotation_visible = bool(state.get("annotation_visible", True))
+        self._measure_kind = str(state.get("measure_kind", self._measure_kind))
+        self._sync_measure_actions()
         self._sync_measurements()
+        self._sync_annotations()
         self._comparison_rows = tuple(state.get("comparison_rows", (0, 1)))
         self._comparison = None
         if state.get("comparison") and len(self.pose_models) >= 2:
@@ -1709,11 +2110,302 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         elif self.comparison is not None:
             self.comparison.clear()
 
+        # View ▸ Interaction lines survives the rebuild with everything else: the
+        # menu actions are new widgets, so they are re-ticked from the saved set
+        # and the drawn lines are recomputed from it.
+        saved_filter = state.get("interaction_filter")
+        self._interaction_filter = (
+            None if saved_filter is None else {str(kind) for kind in saved_filter}
+        )
+        for kind, action in getattr(self, "_interaction_actions", {}).items():
+            action.blockSignals(True)
+            action.setChecked(
+                self._interaction_filter is None or kind in self._interaction_filter
+            )
+            action.blockSignals(False)
+        self._sync_interactions()
+
         self.log.setPlainText(state["log"])
         self.lbl_status.setText(state["status"])
         self._log(
             tr("log.language", language=i18n.language_name(i18n.current_language()))
         )
+
+    # -- dock proportions ---------------------------------------------------
+
+    #: Opening width of the left (workspace) dock, in pixels. Fixed and narrow:
+    #: the tree elides its labels, so the project tree needs very little.
+    DOCK_WIDTH_LEFT = 180
+    #: The right dock area (inspector, plus the selection and pose-comparison
+    #: panels that share it) opens at this fraction of the window width, clamped
+    #: to the bounds below. Proportional rather than fixed because a fixed 560 px
+    #: right dock is 43.8% of a 1280 px window — wider than the viewport, which is
+    #: the complaint this answers.
+    DOCK_RIGHT_FRACTION = 0.35
+    DOCK_WIDTH_RIGHT_MIN = 320
+    DOCK_WIDTH_RIGHT_MAX = 560
+
+    def _dock_widths(self) -> Tuple[int, int]:
+        """``(left, right)`` opening widths for the current window width."""
+        right = int(round(max(1, self.width()) * self.DOCK_RIGHT_FRACTION))
+        return (
+            self.DOCK_WIDTH_LEFT,
+            max(self.DOCK_WIDTH_RIGHT_MIN, min(self.DOCK_WIDTH_RIGHT_MAX, right)),
+        )
+
+    def _apply_dock_proportions(self) -> None:
+        """Open narrow left, wide right, and leave everything else to the centre.
+
+        These are *hints* (`resizeDocks`), not floors: either divider can still be
+        dragged, and a window resize gives every extra pixel to the central
+        viewport — measured, a 1600 → 1800 px resize moved the centre by +200 px
+        and the two side docks by 0.
+        """
+        if getattr(self, "workspace_dock", None) is None:
+            return
+        left, right = self._dock_widths()
+        docks = [self.workspace_dock]
+        sizes = [left]
+        if getattr(self, "inspector_dock", None) is not None:
+            docks.append(self.inspector_dock)
+            sizes.append(right)
+        self.resizeDocks(docks, sizes, QtCore.Qt.Orientation.Horizontal)
+
+    def _schedule_dock_proportions(self) -> None:
+        """Re-apply the opening proportions once the layout has settled.
+
+        ``resizeDocks`` is *silently ignored* while the window is being rebuilt:
+        the language switch tears the docks and the central widget down first, so
+        a hint applied during the rebuild does nothing and Qt distributes the
+        width itself — measured, that put 584 px on each side dock out of a
+        1600 px window and squeezed the viewport to its 420 px minimum. Deferring
+        the hint by one event-loop turn makes it land on a live layout.
+        """
+        QtCore.QTimer.singleShot(0, self._apply_dock_proportions)
+
+    # -- the console --------------------------------------------------------
+
+    def _build_console(self) -> None:
+        """The console input line, at the bottom of the log panel.
+
+        Output and input live in the same place: the transcript is the log view
+        the workbench already writes to, and this adds one line under it. There is
+        no separate Console tab — reading and typing must not need a tab switch.
+        """
+        console_input = dashboard.ConsoleInput(
+            self._console_execute, self.console_namespace
+        )
+        console_input.setObjectName("consoleInput")
+        console_input.setToolTip(tr("console.banner"))
+        console_input.completionHint.connect(self.log.appendPlainText)
+        console_input.editingFinished.connect(self._focus_viewport)
+        self.console = console_input
+        prompt = QtWidgets.QLabel(console_input.PROMPT)
+        prompt.setObjectName("consolePrompt")
+        prompt.setMinimumWidth(
+            prompt.fontMetrics().horizontalAdvance(console_input.PROMPT) + 4
+        )
+        self.console_prompt = prompt
+        console_input.textChanged.connect(
+            lambda _text: self.console_prompt.setText(console_input.prompt())
+        )
+
+        self.console_row = QtWidgets.QWidget()
+        row = QtWidgets.QHBoxLayout(self.console_row)
+        row.setContentsMargins(4, 2, 4, 2)
+        row.setSpacing(4)
+        row.addWidget(prompt)
+        row.addWidget(console_input, 1)
+
+        # The log panel becomes "the log, plus the line you type into": the
+        # splitter keeps one widget per side, so the container replaces the bare
+        # log in it (and the log keeps its identity for everything that reads it).
+        self.log_panel = QtWidgets.QWidget()
+        self.log_panel.setObjectName("logPanel")
+        index = self.pose_splitter.indexOf(self.log)
+        if index >= 0:
+            self.pose_splitter.replaceWidget(index, self.log_panel)
+        panel = QtWidgets.QVBoxLayout(self.log_panel)
+        panel.setContentsMargins(0, 0, 0, 0)
+        panel.setSpacing(0)
+        panel.addWidget(self.log, 1)
+        panel.addWidget(self.console_row)
+
+    def _clear_console(self) -> None:
+        """Clear the transcript — the log view *is* the console's output."""
+        self.log.clear()
+        self.console.clear()
+        self._log(tr("action.console_clear"))
+
+    def _focus_viewport(self) -> None:
+        """Give the keyboard back to the 3-D view (Escape in the console)."""
+        view = getattr(self, "viewport", None)
+        if view is not None:
+            view.setFocus()
+
+    def console_namespace(self) -> dict:
+        """The names a console command can use.
+
+        The live objects come first (so ``scene.`` and ``window.`` are the session
+        you are looking at, not a copy), then the helpers that mirror the CLI —
+        named so that someone who knows the command line can guess them.
+        """
+        namespace = {
+            "window": self,
+            "scene": self.scene,
+            "viewport": self.viewport,
+            "receptor": self.scene.receptor,
+            "ligand": self.scene.ligand,
+            "poses": self.pose_models,
+            "box": self.scene.box,
+            "interactions": self.interactions,
+            "measurements": self._measurements,
+            "annotations": self._annotations,
+            # Convenience functions, named after their CLI counterparts.
+            "dock": self.console_dock_run,
+            "set_box_center": self.console_set_box_center,
+            "set_box_size": self.console_set_box_size,
+            "set_pose": self.set_pose,
+            "measure": self.console_measure,
+            "annotate": self.add_annotation,
+            "frame_binding_site": lambda: self.viewport.frame_binding_site(clip=False),
+            "frame_all": self.viewport.frame_all,
+            "save_project": self.console_save_project,
+            "load_receptor": self.load_receptor,
+            "load_ligand": self.load_ligand,
+            "load_poses": self.load_poses,
+            "export_pymol": self.console_export_pymol,
+            "select": self.console_select,
+            "undo": self.undo,
+            "redo": self.redo,
+            "log": self._log,
+        }
+        namespace["help"] = self.console_help
+        return namespace
+
+    def console_help(self) -> str:
+        """The bound names and helpers, as ``help()`` prints them."""
+        names = sorted(self.console_namespace())
+        return (
+            tr("console.help_title")
+            + "\n  "
+            + "\n  ".join(names)
+            + "\n"
+            + tr("console.no_sandbox")
+        )
+
+    def _console_execute(self, source: str):
+        """Run one console block: output and errors go into the transcript.
+
+        The transcript *is* the log view, so the prompt line is echoed there and
+        the captured stdout/stderr is appended to it — one place to read, one line
+        to type. Everything it touches is the window's own API, so the log, the
+        undo stack and the panels stay in sync, and an exception is reported
+        instead of ending the session.
+        """
+        import contextlib
+        import io
+        import traceback
+
+        namespace = getattr(self, "_console_globals", None)
+        if namespace is None:
+            namespace = self._console_globals = {"__name__": "__odock_console__"}
+        namespace.update(self.console_namespace())
+        out, err = io.StringIO(), io.StringIO()
+        first = source.strip().splitlines()[0] if source.strip() else ""
+        if first:
+            self.log.appendPlainText(f"{dashboard.ConsoleInput.PROMPT}{first}")
+        error = ""
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                exec(compile(source, "<odock-console>", "single"), namespace)
+        except SystemExit:
+            error = tr("console.error", message="SystemExit ignored")
+        except Exception as exc:
+            error = tr("console.error", message=f"{type(exc).__name__}: {exc}")
+            if os.environ.get("ODOCK_CONSOLE_TRACEBACK"):
+                error += "\n" + traceback.format_exc()
+        captured = (out.getvalue() + err.getvalue()).rstrip("\n")
+        if captured:
+            self.log.appendPlainText(captured)
+        if error:
+            self.log.appendPlainText(error.rstrip("\n"))
+        if first:
+            self._log(tr("log.console", line=first))
+        return captured, error
+
+    # -- the convenience functions the console exposes ----------------------
+
+    def console_dock_run(self, **kwargs) -> str:
+        """``dock(exhaustiveness=8)``: start the run the Docking menu starts."""
+        if kwargs.get("pose") is not None:
+            self.set_pose(int(kwargs["pose"]), record=False)
+        for widget, key in (
+            (self.exhaustiveness, "exhaustiveness"),
+            (self.poses, "poses"),
+            (self.seed, "seed"),
+        ):
+            if kwargs.get(key) is not None:
+                widget.setValue(int(kwargs[key]))
+        if kwargs.get("scoring"):
+            self.engine.setCurrentText(str(kwargs["scoring"]))
+        self._run_docking()
+        return "docking started"
+
+    def console_set_box_center(self, x, y, z) -> str:
+        """``set_box_center(1, 2, 3)``: move the search box, undoably."""
+        box = self._current_box()
+        size = box.size if box is not None else (20.0, 20.0, 20.0)
+        spacing = box.spacing if box is not None else float(self.spacing.value())
+        self._set_box((float(x), float(y), float(z)), size, spacing)
+        return f"box centre {float(x)}, {float(y)}, {float(z)}"
+
+    def console_set_box_size(self, x, y, z) -> str:
+        """``set_box_size(20, 20, 20)``: resize the search box, undoably."""
+        box = self._current_box()
+        centre = box.center if box is not None else (0.0, 0.0, 0.0)
+        spacing = box.spacing if box is not None else float(self.spacing.value())
+        self._set_box(centre, (float(x), float(y), float(z)), spacing)
+        return f"box size {float(x)}, {float(y)}, {float(z)}"
+
+    def console_measure(self, kind: str = "distance", *refs):
+        """``measure("angle", ("receptor", 0), ...)``: the same undoable measurement."""
+        measurement = self.commit_measurement(str(kind), list(refs))
+        if measurement is None:
+            return "—"
+        return dashboard.format_measurement(
+            kind, self.measurement_value(measurement)
+        )
+
+    def console_select(self, chain, res_id, res_name) -> str:
+        """``select("A", 195, "SER")``: select a residue on the ruler."""
+        self.sequence.select_keys([(str(chain), int(res_id), str(res_name))])
+        return f"selected {res_name}{res_id}"
+
+    def console_save_project(self, path) -> str:
+        """``save_project("x.json")``: the same file the File menu writes."""
+        from pathlib import Path as _Path
+
+        target = _Path(str(path))
+        target.write_text(
+            json.dumps(self._project_payload(), indent=2) + "\n", encoding="utf-8"
+        )
+        self._log(tr("log.saved_project", name=target.name))
+        return f"saved {target}"
+
+    def console_export_pymol(self, path) -> str:
+        """``export_pymol("session.pml")``: the interop writer, when installed."""
+        interop = _try_import("interop")
+        if interop is None or not hasattr(interop, "pymol_script"):
+            return "the interop module (PyMOL/ChimeraX export) is not available"
+        script = interop.pymol_script(
+            self.scene.receptor, self.scene.ligand, **self.export_viewer_state()
+        )
+        from pathlib import Path as _Path
+
+        target = _Path(str(path))
+        target.write_text(script, encoding="utf-8")
+        return f"wrote {target}"
 
     # -- the instrument panels ----------------------------------------------
 
@@ -1738,6 +2430,14 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         self.measure_history = dashboard.MeasurementHistory()
         self.measure_history.clearRequested.connect(self._clear_measurements)
         self.measure_history.copyRequested.connect(self._copy_measurements)
+        # The interaction lines the 3-D view is drawing, one row per line, so the
+        # dashes stop being anonymous.
+        self.interaction_table = dashboard.InteractionTable()
+        self.interaction_table.copyRequested.connect(self._copy_interactions)
+        # The labels pinned to the scene, so "what did I write on this pose?" has
+        # an answer in the panel and not only in the view.
+        self.annotation_table = dashboard.AnnotationTable()
+        self.annotation_table.copyRequested.connect(self._copy_annotations)
         # Scroll areas, so the two panels compress (and scroll) rather than
         # dictating how narrow the window may become — they sit beside the pose
         # table, and their minimums would otherwise add up with its.
@@ -1746,6 +2446,15 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         )
         self.dashboard_tabs.addTab(
             _scrollable_panel(self.measure_history), tr("tab.measure")
+        )
+        # The tab page is the *scroll area* around the panel, so its index is
+        # remembered here: `indexOf(self.interaction_table)` would be -1 and the
+        # tab title would never pick up the line count.
+        self._interaction_tab_index = self.dashboard_tabs.addTab(
+            _scrollable_panel(self.interaction_table), tr("tab.interactions")
+        )
+        self._annotation_tab_index = self.dashboard_tabs.addTab(
+            _scrollable_panel(self.annotation_table), tr("menu.annotate")
         )
         self.dashboard_tabs.setCurrentIndex(0)
         dock.setWidget(self.dashboard_tabs)
@@ -1860,10 +2569,16 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         )
         self.tree = QtWidgets.QTreeWidget()
         self.tree.setHeaderLabels([tr("tree.project"), tr("tree.atoms")])
-        self.tree.setColumnWidth(0, 220)
+        # The tree is the left dock's content, so *it* decides how narrow that dock
+        # can be. Fixed narrow columns plus elision mean a long project label
+        # shortens instead of pushing the viewport aside; the full text is still on
+        # the item (and in the row's tooltip).
+        self.tree.setColumnWidth(0, 150)
+        self.tree.setColumnWidth(1, 70)
+        self.tree.setTextElideMode(QtCore.Qt.TextElideMode.ElideRight)
         self.tree.itemClicked.connect(self._on_tree_clicked)
         dock.setWidget(self.tree)
-        dock.setMinimumWidth(200)
+        dock.setMinimumWidth(self.DOCK_WIDTH_LEFT)
         self.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, dock)
         self.workspace_dock = dock
         self._rebuild_tree()
@@ -2167,25 +2882,28 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         self.table.setMinimumHeight(90)
         poses_layout.addWidget(self.table, 1)
 
+        # The pose read-out and the player. The slider that used to sit here is
+        # gone: it cost a whole row of dock height, and the pose *table* above is
+        # the way to change poses (with the arrow keys and Play). The summary now
+        # spans the row instead of competing with a slider for its width, which is
+        # what the wrap was already written for.
         row = QtWidgets.QHBoxLayout()
-        row.addWidget(QtWidgets.QLabel(tr("label.pose")))
-        self.pose_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
-        self.pose_slider.setMinimumWidth(60)  # keep the dock narrow-able
-        self.pose_slider.setRange(0, 0)
-        self.pose_slider.valueChanged.connect(self._on_pose_changed)
-        row.addWidget(self.pose_slider, 1)
         self.lbl_pose = QtWidgets.QLabel(tr("label.no_poses"))
         # A plain, unwrapped QLabel reports its *whole* text as its minimum width,
         # so "mode 1 / 6 · affinity · rmsd · binding: <residues>" (1188 px on the
         # reference machine) silently became the minimum width of the entire
-        # window. Wrapping it inside a cap bounds that, keeps the text complete
-        # for callers that read it back, and the tooltip repeats it in one line.
+        # window. Wrapping it bounds that, keeps the text complete for callers that
+        # read it back, and the tooltip repeats it in one line.
         self.lbl_pose.setWordWrap(True)
-        self.lbl_pose.setMaximumWidth(self.POSE_LABEL_WIDTH)
+        self.lbl_pose.setMinimumWidth(0)
+        self.lbl_pose.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Preferred,
+        )
         self.lbl_pose.setTextInteractionFlags(
             QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
         )
-        row.addWidget(self.lbl_pose)
+        row.addWidget(self.lbl_pose, 1)
         self.btn_play = QtWidgets.QPushButton(tr("btn.play"))
         self.btn_play.setCheckable(True)
         self.btn_play.toggled.connect(self._toggle_playback)
@@ -2280,6 +2998,58 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         bar.addPermanentWidget(self.lbl_energy)
 
     # -- menus --------------------------------------------------------------
+
+    def _build_measure_menu(self, view: QtWidgets.QMenu) -> None:
+        """View ▸ Measure: what the next atom picks will answer.
+
+        Radio entries, so the choice is visible, and every one of them is a menu
+        action — which is why the command palette can reach all of them for free
+        and every measurement is available without the mouse.
+        """
+        menu = view.addMenu(tr("menu.measure"))
+        group = QtGui.QActionGroup(menu)
+        group.setExclusive(True)
+        self._measure_actions: Dict[str, QtGui.QAction] = {}
+        for kind in dashboard.MEASUREMENT_ORDER:
+            label = dashboard.measurement_kind_label(kind)
+            count = dashboard.measurement_expected_atoms(kind)
+            action = QtGui.QAction(label, menu)
+            action.setCheckable(True)
+            action.setChecked(kind == self._measure_kind)
+            action.setActionGroup(group)
+            action.setStatusTip(tr("status.measure_pick", kind=label, have=0, need=count))
+            action.triggered.connect(
+                lambda _=False, value=kind: self.set_measure_kind(value)
+            )
+            menu.addAction(action)
+            self._measure_actions[kind] = action
+        menu.addSeparator()
+        self._act(
+            menu, tr("action.measure_selection"), self.measure_selection
+        )
+
+    def _build_annotate_menu(self, view: QtWidgets.QMenu) -> None:
+        """View ▸ Annotate: text labels pinned to the scene.
+
+        The colour is chosen in the label dialog, so there is no separate
+        colour action and no hidden state: one dialog edits text *and* colour.
+        """
+        menu = view.addMenu(tr("menu.annotate"))
+        self._act(menu, tr("action.annotate_add"), self._add_annotation_action)
+        self._act(menu, tr("action.annotate_edit"), self._edit_annotation_action)
+        self._act(menu, tr("action.annotate_delete"), self._delete_annotation_action)
+        menu.addSeparator()
+        self.annotate_action = self._act(
+            menu,
+            tr("action.annotate_show"),
+            self.toggle_annotations,
+            checkable=True,
+        )
+        # Setting the initial tick must not fire the slot: the menus are built
+        # before the status bar, and the slot logs.
+        self.annotate_action.blockSignals(True)
+        self.annotate_action.setChecked(self._annotation_visible)
+        self.annotate_action.blockSignals(False)
 
     def _act(self, menu, text, slot, *, shortcut=None, tip=None, checkable=False):
         # Parented to the menu, so tearing the menu down on a language switch
@@ -2467,6 +3237,7 @@ class DockingWorkbench(QtWidgets.QMainWindow):
             tr("action.interaction_distances"),
             self._choose_interaction_distances,
         )
+        self._build_interaction_lines_menu(view)
         view.addSeparator()
         self.axes_action = self._act(
             view, tr("action.axes"), self._toggle_axes, checkable=True
@@ -2476,7 +3247,16 @@ class DockingWorkbench(QtWidgets.QMainWindow):
             view, tr("action.ssao"), self._toggle_ssao, checkable=True
         )
         self.ssao_action.setChecked(self.scene.ssao)
-        self._act(view, tr("action.measure"), lambda: self._set_tool("measure"))
+        self._act(view, tr("action.measure"), self._start_measure_distance)
+        self._build_measure_menu(view)
+        self._build_annotate_menu(view)
+        self.undo_action = self._act(
+            view, tr("action.undo"), self.undo, shortcut="Ctrl+Z"
+        )
+        self.redo_action = self._act(
+            view, tr("action.redo"), self.redo, shortcut="Ctrl+Shift+Z"
+        )
+        self._sync_history_actions()
         self._act(view, tr("action.clear_measurements"), self._clear_measurements)
         self.ghost_action = self._act(
             view, tr("action.show_reference"), self._toggle_ghost, checkable=True
@@ -2493,6 +3273,8 @@ class DockingWorkbench(QtWidgets.QMainWindow):
             self.selection_dock,
         ):
             panels.addAction(dock.toggleViewAction())
+        panels.addSeparator()
+        self._act(panels, tr("action.console_clear"), self._clear_console)
         self.stack_action = self._act(
             view, tr("action.stack_pose_dock"), self._set_pose_split, checkable=True
         )
@@ -2545,6 +3327,33 @@ class DockingWorkbench(QtWidgets.QMainWindow):
             )
             language.addAction(action)
 
+    def _build_interaction_lines_menu(self, view: QtWidgets.QMenu) -> None:
+        """View ▸ Interaction lines: which contact lines are drawn.
+
+        A docked pose can carry a lot of near-parallel hydrophobic dashes, and a
+        wall of them hides the two or three contacts the user actually cares
+        about. Each kind gets a tick, the choice is remembered by the session and
+        across a language switch, and the Interactions panel always states how
+        many lines the filter is holding back.
+        """
+        menu = view.addMenu(tr("menu.interaction_lines"))
+        self._interaction_actions: Dict[str, QtGui.QAction] = {}
+        for kind in INTERACTION_COLORS:
+            action = QtGui.QAction(_interaction_label(kind), menu)
+            action.setCheckable(True)
+            action.setChecked(True)
+            action.setStatusTip(tr(f"interaction.{kind}"))
+            action.toggled.connect(self._apply_interaction_filter)
+            menu.addAction(action)
+            self._interaction_actions[kind] = action
+        menu.addSeparator()
+        self._act(menu, tr("action.interaction_all"), self._show_all_interactions)
+
+    def _show_all_interactions(self, _checked: bool = False) -> None:
+        for action in getattr(self, "_interaction_actions", {}).values():
+            action.setChecked(True)
+        self._apply_interaction_filter()
+
     def _build_appearance_menu(self, view: QtWidgets.QMenu) -> None:
         """View ▸ Theme / Density / Layout: the appearance and arrangement."""
         theme_menu = view.addMenu(tr("menu.theme"))
@@ -2595,12 +3404,19 @@ class DockingWorkbench(QtWidgets.QMainWindow):
 
     # -- appearance ---------------------------------------------------------
 
-    def set_theme(self, name: str) -> None:
+    def set_theme(self, name: str, *, record: bool = True) -> None:
         """Switch between the dark and the light theme."""
         theme = dashboard.theme_named(name)
+        before = self.color_theme.name
         self.color_theme = theme
         self._apply_style()
         self._sync_appearance_actions()
+        if record and before != theme.name:
+            self._record(
+                tr("menu.theme"),
+                {"theme": before},
+                {"theme": theme.name},
+            )
         self._log(
             tr(
                 "log.theme",
@@ -2609,11 +3425,18 @@ class DockingWorkbench(QtWidgets.QMainWindow):
             )
         )
 
-    def set_density(self, name: str) -> None:
+    def set_density(self, name: str, *, record: bool = True) -> None:
         """Comfortable or compact: padding, tab sizes and font size."""
+        before = self.density
         self.density = name if name in dashboard.DENSITIES else "comfortable"
         self._apply_style()
         self._sync_appearance_actions()
+        if record and before != self.density:
+            self._record(
+                tr("menu.density"),
+                {"density": before},
+                {"density": self.density},
+            )
         self._log(
             tr(
                 "log.theme",
@@ -2653,6 +3476,10 @@ class DockingWorkbench(QtWidgets.QMainWindow):
             self.dashboard_dock.raise_()
         if name == "compare" and self.comparison_dock is not None:
             self.comparison_dock.raise_()
+        # Hiding or showing a dock makes Qt re-lay the whole dock area out from
+        # its size hints, which collapses the wide right dock (measured: 560 →
+        # 320 px). The proportions are re-stated, on the next turn.
+        self._schedule_dock_proportions()
         self._sync_appearance_actions()
         self._log(tr("log.preset", name=tr(f"action.layout_{self._preset}")))
         self._session_changed()
@@ -2688,9 +3515,10 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         # menu action restore after a restart, without a save call at each site.
         self._session_changed()
 
-    #: How much room the pose read-out may claim in the pose row. Wide enough for
-    #: "mode 1 / 6  affinity -6.210 kcal/mol  rmsd l.b:", which is the part a user
-    #: reads while browsing; the binding residues stay in the tooltip.
+    #: Kept for callers that still ask for it: the read-out used to be capped at
+    #: this width while a pose slider shared its row. The slider is gone, so the
+    #: label now expands to the whole row and this is only a *documented*
+    #: comfortable reading width, not a limit the widget applies.
     POSE_LABEL_WIDTH = 420
 
     def _set_pose_label(self, text: str) -> None:
@@ -2713,6 +3541,7 @@ class DockingWorkbench(QtWidgets.QMainWindow):
 
     # -- project ------------------------------------------------------------
 
+    @_history_silent
     def _new_project(self) -> None:
         self.scene.receptor = []
         self.scene.ligand = []
@@ -2736,7 +3565,6 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         self._measurements = []
         self._locked_bonds = []
         self.table.setRowCount(0)
-        self.pose_slider.setRange(0, 0)
         self.poses_text = None
         self._maps_computed = False
         self._filter_verdict = None
@@ -2774,20 +3602,18 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         if self.comparison is not None:
             self.comparison.clear()
         self._measurements = []
+        self._annotations = []
+        self._pick_refs = []
+        self._history.clear()
         self._sync_measurements()
+        self._sync_annotations()
+        self._sync_history_actions()
         self._log(tr("log.new_project"))
 
-    def _save_project(self) -> None:
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self,
-            tr("dialog.save_project"),
-            "odock-project.json",
-            tr("filter.project"),
-        )
-        if not path:
-            return
+    def _project_payload(self) -> dict:
+        """The project file's contents — one writer, two callers (menu, console)."""
         box = self._current_box()
-        payload = {
+        return {
             "version": 1,
             "language": i18n.current_language(),
             "receptor": self._pending.get("receptor"),
@@ -2814,9 +3640,22 @@ class DockingWorkbench(QtWidgets.QMainWindow):
             ],
             "locked_bonds": [list(b) for b in self._locked_bonds],
         }
-        Path(path).write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+    def _save_project(self) -> None:
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            tr("dialog.save_project"),
+            "odock-project.json",
+            tr("filter.project"),
+        )
+        if not path:
+            return
+        Path(path).write_text(
+            json.dumps(self._project_payload(), indent=2) + "\n", encoding="utf-8"
+        )
         self._log(tr("log.saved_project", name=Path(path).name))
 
+    @_history_silent
     def _open_project(self) -> None:
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
             self, tr("dialog.open_project"), "", tr("filter.project")
@@ -2910,6 +3749,7 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         except (OSError, ValueError):
             return None
 
+    @_history_silent
     def load_receptor(self, path, interactive: bool = False) -> bool:
         try:
             text, label = self._read_pdbqt(path)
@@ -2951,6 +3791,7 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         self._fit_sequence_area()
         return True
 
+    @_history_silent
     def load_ligand(self, path, interactive: bool = False) -> bool:
         try:
             text, label = self._read_pdbqt(path)
@@ -2972,9 +3813,11 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         self._log(tr("log.ligand", n=len(self.scene.ligand), name=label))
         self.lbl_filters.setText(tr("label.filters_none"))
         self._detect_bonds(quiet=True)
-        # The imported ligand is the pose on screen until a pose file arrives,
-        # so the ruler marks the residues it touches right away.
-        self._mark_pose_contacts()
+        # The imported ligand is the pose on screen until a pose file arrives, so
+        # the ruler marks the residues it touches — but only while the interaction
+        # drawing is on: loading a structure must not draw contacts by itself.
+        if self._interactions_shown:
+            self._mark_pose_contacts()
         self.viewport.refresh()
         if self.scene.receptor:
             # Together with the receptor that surrounds it. A 15 Å close-up of the
@@ -2992,6 +3835,7 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         self._fit_sequence_area()
         return True
 
+    @_history_silent
     def load_poses(self, path, interactive: bool = False) -> bool:
         try:
             text, label = self._read_pdbqt(path)
@@ -3005,8 +3849,6 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         first_poses = not self.pose_models
         self.pose_models = models
         self._populate_table()
-        self.pose_slider.setRange(0, max(0, len(models) - 1))
-        self.pose_slider.setValue(0)
         self._apply_pose(0)
         if first_poses:
             # Frame the pocket once, when the poses arrive. A pose *change* must
@@ -3133,24 +3975,48 @@ class DockingWorkbench(QtWidgets.QMainWindow):
                 # that clicking a pose keeps working in every language.
                 entry.setData(0, QtCore.Qt.ItemDataRole.UserRole, index)
         if self.interactions:
-            QtWidgets.QTreeWidgetItem(
+            node = QtWidgets.QTreeWidgetItem(
                 self.tree, [tr("tree.interactions"), str(len(self.interactions))]
             )
+            # Clicking it turns the drawing on (it is the entry point the user
+            # reached for), so the node carries its own marker.
+            node.setData(
+                0, QtCore.Qt.ItemDataRole.UserRole + 1, "interactions"
+            )
+            if not self._interactions_shown:
+                node.setToolTip(0, tr("interactions.empty"))
         if self._measurements:
             QtWidgets.QTreeWidgetItem(
                 self.tree, [tr("tree.measurements"), str(len(self._measurements))]
             )
 
     def _on_tree_clicked(self, item, column) -> None:
+        """Pose rows switch the pose; the interactions row is a shortcut.
+
+        The 相互作用 node in the left sidebar is the entry point the user
+        actually clicked, so it does the same thing as Analysis ▸ Show
+        interactions: it computes the contacts of the displayed pose *and* draws
+        them. Nothing is drawn before one of those two is used.
+        """
         index = item.data(0, QtCore.Qt.ItemDataRole.UserRole) if item else None
         if isinstance(index, int):
-            self.pose_slider.setValue(index)
+            self.set_pose(index)
+            return
+        if item is not None and item.data(0, QtCore.Qt.ItemDataRole.UserRole + 1) == "interactions":
+            self._annotate_interactions()
+            self.dashboard_tabs.setCurrentIndex(
+                getattr(self, "_interaction_tab_index", 0)
+            )
+
+    def show_interactions_action(self) -> None:
+        """The same entry point the menu item and the tree node both call."""
+        self._annotate_interactions()
 
     # -- poses --------------------------------------------------------------
 
     def _populate_table(self) -> None:
         self.table.setRowCount(len(self.pose_models))
-        current = self.pose_slider.value() if self.pose_slider.maximum() > 0 else 0
+        current = self.pose_index()
         for row, model in enumerate(self.pose_models):
             affinity = model.affinity
             residues = self._interaction_residues_text() if row == current else ""
@@ -3213,16 +4079,23 @@ class DockingWorkbench(QtWidgets.QMainWindow):
     def _annotate_pose_contacts(self) -> None:
         """The contacts of the displayed pose, with ``interaction_thresholds``.
 
-        This is the automatic half of "compute the possible interactions between
-        receptor and ligand": choosing a pose immediately annotates its
-        H-bonds, salt bridges, π–π and cation–π contacts, hydrophobic contacts
-        and clashes, adds the contacting residues to the pose label, and fills
-        the results table row.
+        The profile is always computed — the pose label names the residues it
+        touches and the Interactions table lists the pairs, and that is
+        *information* — but nothing is **drawn** until the user asks for it:
+        no dashes, no interaction focus and no contact marks on the ruler. The
+        drawing is what people read as "these two things are interacting", so it
+        is opt-in (Analysis ▸ Show interactions, or the 相互作用 tree item), and
+        :meth:`_clear_interactions` turns it off again.
         """
         analysis = _try_import("analysis")
         # The contact marks are computed here, from the coordinates alone, so
-        # they work on an installation without the analysis extra.
-        self._mark_pose_contacts()
+        # a missing analysis extra never breaks a pose load.
+        if self._interactions_shown:
+            self._mark_pose_contacts()
+        else:
+            ruler = getattr(self, "sequence", None)
+            if ruler is not None:
+                ruler.clear_contact_marks()
         if analysis is None or not self.scene.receptor or not self.scene.ligand:
             return
         try:
@@ -3237,12 +4110,12 @@ class DockingWorkbench(QtWidgets.QMainWindow):
             self._report_error(str(exc), False)
             return
         self.interactions = found
-        self.scene.interactions = list(found)
+        self._sync_interactions()
         # Pose browsing re-derives the focus from *this* pose's contacts whenever
-        # the user has asked for the emphasis, so the indices are never stale, and
-        # applies none otherwise. The camera and the clip are never touched here,
-        # so two poses stay comparable.
-        if self._focus_requested:
+        # drawing is on and the user asked for the emphasis, so the indices are
+        # never stale, and applies none otherwise. The camera and the clip are
+        # never touched here, so two poses stay comparable.
+        if self._interactions_shown and self._focus_requested:
             self.scene.interaction_focus = list(found)
             self.viewport.refresh(upload_receptor=True)
         else:
@@ -3374,18 +4247,51 @@ class DockingWorkbench(QtWidgets.QMainWindow):
                 ),
             )
         )
-        # Re-annotate with the new numbers so the view matches the dialog.
+        # Re-annotate with the new numbers so the view matches the dialog — but
+        # never switch the drawing back on behind the user's back: with poses the
+        # recompute respects the current state, and without poses there is nothing
+        # to redraw unless it was already on.
         if self.pose_models:
             self._annotate_pose_contacts()
-        else:
+        elif self._interactions_shown:
             self._annotate_interactions(quiet=True)
 
-    def _on_pose_changed(self, value: int) -> None:
-        self._apply_pose(value)
-        if self.table.currentRow() != value:
+    def pose_count(self) -> int:
+        """How many poses are loaded."""
+        return len(self.pose_models)
+
+    def pose_index(self) -> int:
+        """The pose on screen (0 when there is none)."""
+        return int(self._pose_index) if self.pose_models else 0
+
+    def set_pose(self, index: int, *, record: bool = True) -> None:
+        """Show pose ``index`` — the single funnel the slider used to be.
+
+        The pose *table* is now the only widget that changes this, so one method
+        serves the table selection, the arrow keys, the playback timer, the
+        console and an undo step. ``record`` keeps the coalescing key, which is
+        what makes a fast sequence of changes one Ctrl+Z rather than two hundred.
+        """
+        if not self.pose_models:
+            return
+        index = max(0, min(int(index), len(self.pose_models) - 1))
+        previous = self.pose_index()
+        self._apply_pose(index)
+        if record and previous != index:
+            self._record(
+                tr("label.pose"),
+                {"pose": previous},
+                {"pose": index},
+                merge_key="pose",
+            )
+        if self.table.currentRow() != index:
             self.table.blockSignals(True)
-            self.table.selectRow(value)
+            self.table.selectRow(index)
             self.table.blockSignals(False)
+
+    def _on_pose_changed(self, value: int) -> None:
+        """The old slider signal, kept for callers that still emit it."""
+        self.set_pose(value)
 
     def _on_table_selection(self) -> None:
         rows = sorted({index.row() for index in self.table.selectedIndexes()})
@@ -3400,7 +4306,7 @@ class DockingWorkbench(QtWidgets.QMainWindow):
                 if self.comparison_dock is not None:
                     self.comparison_dock.raise_()
             return
-        self.pose_slider.setValue(min(rows))
+        self.set_pose(min(rows))
 
     def _toggle_playback(self, checked: bool = True) -> None:
         if not self.pose_models:
@@ -3445,6 +4351,8 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         )
 
     def _set_box(self, center, size, spacing: float = 0.375) -> None:
+        previous = self.scene.box
+        previous_spacing = float(self.spacing.value())
         self.scene.box = (
             tuple(float(v) for v in center),
             tuple(float(v) for v in size),
@@ -3472,6 +4380,28 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         self._refresh_box_label()
         self.viewport.refresh()
         self._rebuild_tree()
+        # A box is a scene edit like any other, so it is undoable — including
+        # going back to "there was no box".
+        if not self._suppress_history and previous != self.scene.box:
+            self._record(
+                tr("menu.grid"),
+                {
+                    "box": None
+                    if previous is None
+                    else {
+                        "center": list(previous[0]),
+                        "size": list(previous[1]),
+                        "spacing": previous_spacing,
+                    }
+                },
+                {
+                    "box": {
+                        "center": list(self.scene.box[0]),
+                        "size": list(self.scene.box[1]),
+                        "spacing": float(self.spacing.value()),
+                    }
+                },
+            )
 
     def _refresh_box_label(self) -> None:
         if self.scene.box is None:
@@ -4075,6 +5005,14 @@ class DockingWorkbench(QtWidgets.QMainWindow):
     # -- analysis -----------------------------------------------------------
 
     def _annotate_interactions(self, quiet: bool = False) -> None:
+        """Analysis ▸ Show interactions: compute *and draw* the contacts.
+
+        This is the explicit switch. Nothing is drawn before it is pressed —
+        docking and pose browsing only *report* contacts — and
+        :meth:`_clear_interactions` turns the drawing off again.
+        """
+        self._interactions_shown = True
+        self._mark_pose_contacts()
         analysis = _try_import("analysis")
         if analysis is None:
             if not quiet:
@@ -4092,6 +5030,7 @@ class DockingWorkbench(QtWidgets.QMainWindow):
             self._report_error(str(exc), True)
             return
         self.scene.interactions = self.interactions
+        self._sync_interactions()
         # Hand the same contacts to the renderer's focus mode, so the interacting
         # residues and the ligand atoms are emphasised straight after docking. The
         # request is sticky (see :meth:`_annotate_pose_contacts`); Clear
@@ -4114,6 +5053,13 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         self._rebuild_tree()
 
     def _clear_interactions(self) -> None:
+        """Analysis ▸ Clear annotations: stop drawing contacts, keep the data.
+
+        "Off" is a *drawing* state: the contacts are still computable and still
+        listed, but no dashes, no focus and no ruler marks are drawn, so hiding
+        the annotations cannot leave lines whose endpoints are invisible.
+        """
+        self._interactions_shown = False
         self.interactions = []
         self.scene.interactions = []
         # Clearing the annotations clears the emphasis with them, and forgets the
@@ -4123,9 +5069,132 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         if getattr(self, "sequence", None) is not None:
             self.sequence.clear_contact_marks()
         self.viewport.refresh(upload_receptor=True)
+        self._sync_interactions()
         self._populate_table()
         self._rebuild_tree()
         self._log(tr("log.annotations_cleared"))
+
+    # -- interaction lines --------------------------------------------------
+
+    def _apply_interaction_filter(self, *_args) -> None:
+        """Draw only the kinds the View ▸ Interaction lines menu keeps ticked.
+
+        The detections themselves are never recomputed or thrown away: the
+        filter decides what is *drawn*, and the Interactions panel always reports
+        how many lines are hidden, so a filtered view cannot read as "no contacts".
+        """
+        allowed = {
+            kind
+            for kind, action in getattr(self, "_interaction_actions", {}).items()
+            if action.isChecked()
+        }
+        self._interaction_filter = allowed
+        self._sync_interactions()
+        if self.interactions:
+            self._log(
+                tr(
+                    "log.interaction_filter",
+                    shown=len(self.scene.interactions),
+                    total=len(self.interactions),
+                )
+            )
+
+    def _sync_interactions(self) -> None:
+        """Re-draw and re-list whatever the visibility switches allow.
+
+        Three reductions happen here, and all three are stated rather than hidden:
+
+        * **nothing is drawn unless the user asked** (Analysis ▸ Show
+          interactions, or the 相互作用 tree item): docking and pose browsing
+          compute the contacts for the label and the table but draw no dashes, no
+          focus and no ruler marks;
+        * the kind filter (View ▸ Interaction lines) removes kinds;
+        * hydrophobic contacts are drawn **one line per receptor residue**. The
+          detector enumerates every hydrophobic-carbon pair inside 4.0 Å, which is
+          the right answer for the table but reads as a lattice on screen; the
+          table keeps every pair and the HUD legend shows ``detected → drawn``.
+
+        Hiding the receptor also suppresses the lines: a dash whose far endpoint
+        is not rendered reads as an interaction reaching across the protein, which
+        is exactly the complaint this contract exists to prevent.
+        """
+        shown = bool(getattr(self, "_interactions_shown", False))
+        receptor_visible = bool(getattr(self.scene, "show_receptor", True))
+        ligand_visible = bool(getattr(self.scene, "show_ligand", True))
+        draw = shown and receptor_visible and ligand_visible
+        allowed = getattr(self, "_interaction_filter", None)
+        if allowed is None:
+            visible = list(self.interactions)
+        else:
+            visible = [item for item in self.interactions if str(item.kind) in allowed]
+        if not draw:
+            visible = []
+        drawn, _counts = dashboard.consolidate_by_residue(visible, self.scene.receptor)
+        legend = []
+        if draw:
+            for kind in sorted({str(item.kind) for item in self.interactions}):
+                detected = sum(1 for item in self.interactions if str(item.kind) == kind)
+                shown_lines = len([item for item in drawn if str(item.kind) == kind])
+                legend.append((kind, detected, shown_lines))
+        self.scene.interactions = drawn
+        if not draw:
+            # The focus pass draws atoms independently of the base receptor pass,
+            # so leaving it on after "hide receptor" would light up residues that
+            # are no longer there.
+            self.scene.interaction_focus = []
+        if getattr(self, "viewport", None) is not None:
+            self.viewport.set_interaction_legend(legend)
+        panel = getattr(self, "interaction_table", None)
+        if panel is not None:
+            note = "; ".join(
+                f"{dashboard.interaction_label(kind)}: {detected} pairs, {shown_lines} line(s)"
+                for kind, detected, shown_lines in legend
+                if detected != shown_lines
+            )
+            panel.set_interactions(
+                self.interactions,
+                self.scene.receptor,
+                self.scene.ligand,
+                # "hidden" means excluded by the *kind filter* only: the
+                # one-line-per-residue reduction is not a hidden contact, it is a
+                # different way of drawing the same contact, and the heading
+                # should not claim otherwise (the note spells it out).
+                hidden=len(self.interactions) - len(visible),
+                note=note,
+                shown=shown,
+            )
+        self._refresh_interaction_tab()
+        if getattr(self, "viewport", None) is not None:
+            self.viewport.refresh()
+
+    def _refresh_interaction_tab(self) -> None:
+        """The tab carries the *detected* count, and none while drawing is off.
+
+        Detected, not drawn: the number has to agree with the table's rows (the
+        table is the record), while the HUD legend is the one that reports what is
+        actually on screen. With the drawing off there is no count at all, so the
+        tab cannot claim lines that are not there.
+        """
+        tabs = getattr(self, "dashboard_tabs", None)
+        index = getattr(self, "_interaction_tab_index", -1)
+        if tabs is None or index < 0:
+            return
+        count = (
+            len(self.interactions) if getattr(self, "_interactions_shown", False) else 0
+        )
+        tabs.setTabText(
+            index,
+            tr("tab.interactions") if not count else f"{tr('tab.interactions')} ({count})",
+        )
+
+    def _copy_interactions(self) -> None:
+        """Put the list of drawn lines on the clipboard as text."""
+        panel = getattr(self, "interaction_table", None)
+        if panel is None or not panel.rows():
+            self._log(tr("interactions.empty"))
+            return
+        dashboard.copy_text_to_clipboard(panel.as_text())
+        self._log(tr("log.interactions_copied", n=len(panel.rows())))
 
     def _cluster_poses(self) -> None:
         analysis = _try_import("analysis")
@@ -4166,47 +5235,723 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         dialogs.ClusterDialog(clusters, float(cutoff), self).exec()
         self._log(tr("log.clusters", n=len(clusters), cutoff=float(cutoff)))
 
-    def _clear_measurements(self) -> None:
-        self._measurements = []
-        self.scene.measurements = []
-        self._sync_measurements()
+    # -- measurements -------------------------------------------------------
+
+    #: Colour of a measurement overlay, and of the translucent plane fill.
+    MEASURE_COLOUR = (1.0, 0.84, 0.28)
+    PLANE_COLOUR = (0.72, 0.60, 1.0)
+    #: Default colour of a new annotation label.
+    ANNOTATION_COLOUR = (1.0, 0.85, 0.35)
+
+    def measurement_points(self, measurement) -> List[Tuple[float, float, float]]:
+        """The coordinates a measurement's references point at, in order."""
+        pool = {"receptor": self.scene.receptor, "ligand": self.scene.ligand}
+        points: List[Tuple[float, float, float]] = []
+        for group, index in measurement.refs:
+            atoms = pool.get(str(group)) or []
+            try:
+                atom = atoms[int(index)]
+            except (IndexError, TypeError, ValueError):
+                continue
+            points.append((float(atom.x), float(atom.y), float(atom.z)))
+        return points
+
+    def measurement_value(self, measurement):
+        """The current value of ``measurement`` (recomputed, never cached)."""
+        return measurement.value(self.measurement_points(measurement))
+
+    def measurement_atom_labels(self, measurement) -> List[str]:
+        pool = {"receptor": self.scene.receptor, "ligand": self.scene.ligand}
+        labels = []
+        for group, index in measurement.refs:
+            atoms = pool.get(str(group)) or []
+            try:
+                atom = atoms[int(index)]
+            except (IndexError, TypeError, ValueError):
+                labels.append("—")
+                continue
+            labels.append(f"{atom.res_name}{atom.res_id}:{atom.name}")
+        return labels
+
+    def measurement_rows(self) -> List[dict]:
+        """The table rows: one per measurement, with its value and unit."""
+        rows = []
+        for measurement in self._measurements:
+            value = self.measurement_value(measurement)
+            rows.append(
+                {
+                    "kind": measurement.kind,
+                    "atoms": self.measurement_atom_labels(measurement),
+                    "value": dashboard.format_measurement(measurement.kind, value),
+                    "unit": measurement.unit,
+                    "label": measurement.label,
+                }
+            )
+        return rows
+
+    def _measurement_prompt(self) -> str:
+        """What the status bar says while a measurement is being picked."""
+        needed = dashboard.measurement_expected_atoms(self._measure_kind)
+        return tr(
+            "status.measure_pick",
+            kind=dashboard.measurement_kind_label(self._measure_kind),
+            have=len(self._pick_refs),
+            need=needed,
+        )
+
+    def set_measure_kind(self, kind: str) -> None:
+        """Choose what the next picks will measure (View ▸ Measure)."""
+        if kind not in dashboard.MEASUREMENT_KINDS:
+            return
+        self._measure_kind = kind
+        self._pick_refs = []
+        self._sync_measure_actions()
+        if self.viewport.mode != ViewportWidget.MODE_MEASURE:
+            self.viewport.set_mode(ViewportWidget.MODE_MEASURE)
+        self.lbl_status.setText(self._measurement_prompt())
+        self._log(
+            tr("log.measure_kind", kind=dashboard.measurement_kind_label(kind))
+        )
+
+    def set_measure_kind_checked(self, *_args) -> None:
+        """Menu slot for the radio entries (``triggered`` passes a bool)."""
+        for kind, action in getattr(self, "_measure_actions", {}).items():
+            if action.isChecked():
+                self.set_measure_kind(kind)
+                return
+
+    def _sync_measure_actions(self) -> None:
+        for kind, action in getattr(self, "_measure_actions", {}).items():
+            if action.isChecked() != (kind == self._measure_kind):
+                action.blockSignals(True)
+                action.setChecked(kind == self._measure_kind)
+                action.blockSignals(False)
+
+    def add_measurement_pick(self, ref) -> None:
+        """One atom picked in the 3-D view (or from the selection table)."""
+        ref = (str(ref[0]), int(ref[1]))
+        pool = {"receptor": self.scene.receptor, "ligand": self.scene.ligand}
+        atoms = pool.get(ref[0]) or []
+        if not (0 <= ref[1] < len(atoms)):
+            return
+        self._pick_refs.append(ref)
+        needed = dashboard.measurement_expected_atoms(self._measure_kind)
+        if len(self._pick_refs) >= needed:
+            self.commit_measurement(self._measure_kind, list(self._pick_refs))
+            self._pick_refs = []
+            self.lbl_status.setText(self._measurement_prompt())
+        else:
+            self.lbl_status.setText(self._measurement_prompt())
         self.viewport.refresh()
-        self._rebuild_tree()
+
+    def pending_picks(self) -> List[Tuple[str, int]]:
+        """The atoms picked so far for a measurement that is not complete yet."""
+        return list(self._pick_refs)
+
+    def cancel_picks(self) -> None:
+        self._pick_refs = []
+        self.viewport.refresh()
+
+    def measure_selection(self) -> bool:
+        """Measure the current ruler/atom-table selection with the active kind.
+
+        The other entry path: the same references the 3-D picker produces, so the
+        two cannot disagree about which atoms were meant.
+        """
+        refs = list(self.sequence.atom_refs())
+        if not refs:
+            self._log(tr("log.no_selection"))
+            return False
+        needed = dashboard.measurement_expected_atoms(self._measure_kind)
+        if len(refs) < needed:
+            self._log(
+                tr(
+                    "log.measure_needs",
+                    kind=dashboard.measurement_kind_label(self._measure_kind),
+                    need=needed,
+                    have=len(refs),
+                )
+            )
+            return False
+        self.commit_measurement(self._measure_kind, refs[:needed])
+        return True
+
+    def commit_measurement(self, kind: str, refs) -> Optional[dashboard.Measurement]:
+        """Add a measurement and record it as one undoable step."""
+        measurement = dashboard.Measurement(kind=kind, refs=list(refs))
+        if not measurement.is_complete():
+            return None
+        points = self.measurement_points(measurement)
+        value = measurement.value(points)
+        if value is None:
+            self._report_error(tr("log.measure_degenerate"), True)
+            return None
+        before = [item.to_dict() for item in self._measurements]
+        after = before + [measurement.to_dict()]
+        self._record(
+            tr("undo.add_measurement", kind=dashboard.measurement_kind_label(kind)),
+            {"measurements": before},
+            {"measurements": after},
+        )
+        self._log(
+            tr(
+                "log.measurement",
+                kind=dashboard.measurement_kind_label(kind),
+                atoms=" - ".join(self.measurement_atom_labels(measurement)),
+                value=dashboard.format_measurement(kind, value),
+            )
+        )
+        return measurement
+
+    def remove_measurement(self, index: int) -> bool:
+        """Delete one measurement, undoably."""
+        if not (0 <= index < len(self._measurements)):
+            return False
+        before = [item.to_dict() for item in self._measurements]
+        after = [item for position, item in enumerate(before) if position != index]
+        self._record(
+            tr("undo.remove_measurement"),
+            {"measurements": before},
+            {"measurements": after},
+        )
+        return True
+
+    def _clear_measurements(self) -> None:
+        if self._measurements:
+            before = [item.to_dict() for item in self._measurements]
+            self._record(
+                tr("undo.clear_measurements"),
+                {"measurements": before},
+                {"measurements": []},
+            )
+        else:
+            self._sync_measurements()
         self._log(tr("log.measure_cleared"))
 
     def _on_atoms_picked(self, selection) -> None:
-        if len(selection) < 2:
+        """A pick in the 3-D view feeds the active measurement."""
+        if not selection:
             return
-        (kind_a, index_a), (kind_b, index_b) = selection[-2], selection[-1]
-        pool = {"receptor": self.scene.receptor, "ligand": self.scene.ligand}
-        try:
-            first = pool[kind_a][index_a]
-            second = pool[kind_b][index_b]
-        except (KeyError, IndexError):
-            return
-        distance = math.dist((first.x, first.y, first.z), (second.x, second.y, second.z))
-        self._measurements.append(
-            {
-                "kind": "distance",
-                "a": f"{first.res_name}{first.res_id}:{first.name}",
-                "b": f"{second.res_name}{second.res_id}:{second.name}",
-                "value": distance,
-            }
-        )
-        self.scene.measurements = list(self.scene.measurements) + [
-            ((first.x, first.y, first.z), (second.x, second.y, second.z), (1.0, 0.85, 0.3, 1.0))
-        ]
-        self._log(
-            tr(
-                "log.distance",
-                a=f"{first.res_name}{first.res_id}:{first.name}",
-                b=f"{second.res_name}{second.res_id}:{second.name}",
-                value=distance,
+        self.add_measurement_pick(selection[-1])
+
+    def _sync_measurements(self) -> None:
+        """Push the measurements into the scene, the panel and the tree."""
+        history = getattr(self, "measure_history", None)
+        if history is not None:
+            history.set_measurements(self.measurement_rows())
+        # The renderer's own measurement pass draws the distance lines; the
+        # richer overlays (arcs, planes, normals, labels) are painted by
+        # `ViewportWidget._paint_measurement_overlay`, which also puts them into
+        # a snapshot.
+        self.scene.measurements = [
+            (
+                tuple(points[0]),
+                tuple(points[1]),
+                tuple(self.MEASURE_COLOUR) + (1.0,),
             )
-        )
-        self.viewport.refresh()
+            for measurement in self._measurements
+            if measurement.kind == "distance" and measurement.visible
+            for points in [self.measurement_points(measurement)]
+            if len(points) >= 2
+        ]
+        if getattr(self, "viewport", None) is not None:
+            self.viewport.set_measurement_overlays(self._measure_overlays())
+            self.viewport.refresh()
         self._rebuild_tree()
-        self._sync_measurements()
+        self._session_changed()
+
+    def _measure_overlays(self) -> List[dict]:
+        """Everything the viewport needs to draw the measurement layer."""
+        overlays = []
+        for index, measurement in enumerate(self._measurements):
+            if not measurement.visible:
+                continue
+            points = self.measurement_points(measurement)
+            if len(points) < dashboard.measurement_expected_atoms(measurement.kind):
+                continue
+            overlays.append(
+                {
+                    "index": index,
+                    "kind": measurement.kind,
+                    "points": points,
+                    "split": measurement.split,
+                    "text": f"{dashboard.measurement_kind_label(measurement.kind)} "
+                    f"{dashboard.format_measurement(measurement.kind, measurement.value(points))}",
+                    "colour": tuple(measurement.colour or self.MEASURE_COLOUR),
+                }
+            )
+        return overlays
+
+    def _annotation_anchor_point(self, note) -> Optional[Tuple[float, float, float]]:
+        """Where an annotation is pinned, as world coordinates.
+
+        Three spellings of one idea: an atom reference is that atom, a residue is
+        the centroid of its atoms, and a measurement is the midpoint of the atoms
+        it asked about — the same points the overlays draw, so a label can never
+        float away from the thing it names.
+        """
+        anchor = tuple(note.anchor or ())
+        if not anchor:
+            return None
+        pool = {"receptor": self.scene.receptor, "ligand": self.scene.ligand}
+        if anchor[0] in ("receptor", "ligand") and len(anchor) >= 2:
+            atoms = pool.get(anchor[0]) or []
+            try:
+                atom = atoms[int(anchor[1])]
+            except (IndexError, TypeError, ValueError):
+                return None
+            return (float(atom.x), float(atom.y), float(atom.z))
+        if anchor[0] == "residue" and len(anchor) >= 4:
+            _kind, chain, res_id, res_name = anchor[:4]
+            points = [
+                (float(atom.x), float(atom.y), float(atom.z))
+                for atom in list(self.scene.receptor) + list(self.scene.ligand)
+                if str(atom.chain) == str(chain)
+                and int(atom.res_id) == int(res_id)
+                and str(atom.res_name) == str(res_name)
+            ]
+            return dashboard.centroid(points)
+        if anchor[0] == "measurement" and len(anchor) >= 2:
+            try:
+                measurement = self._measurements[int(anchor[1])]
+            except (IndexError, TypeError, ValueError):
+                return None
+            points = self.measurement_points(measurement)
+            return None if not points else points[len(points) // 2]
+        return None
+
+    def _annotation_overlays(self) -> List[dict]:
+        """Anchor points and text for the annotation layer."""
+        overlays = []
+        for index, note in enumerate(self._annotations):
+            if not note.visible or not self._annotation_visible:
+                continue
+            point = self._annotation_anchor_point(note)
+            if point is None:
+                continue
+            overlays.append(
+                {
+                    "index": index,
+                    "point": point,
+                    "text": note.text,
+                    "colour": tuple(note.colour),
+                }
+            )
+        return overlays
+    def _copy_measurements(self) -> None:
+        if not self._measurements:
+            self._log(tr("measure.empty"))
+            return
+        dashboard.copy_text_to_clipboard(self.measure_history.as_text())
+        self._log(tr("log.measure_copied", n=len(self._measurements)))
+
+    def _copy_measurements_csv(self) -> None:
+        if not self._measurements:
+            self._log(tr("measure.empty"))
+            return
+        dashboard.copy_text_to_clipboard(self.measure_history.as_csv())
+        self._log(tr("log.measure_csv", n=len(self._measurements)))
+
+    # -- annotations --------------------------------------------------------
+
+    def add_annotation(
+        self, text: str, anchor=None, colour=None
+    ) -> Optional[dashboard.Annotation]:
+        """Pin a text label to an atom, a residue or a measurement."""
+        anchor = tuple(anchor) if anchor else self.annotation_anchor()
+        if not anchor:
+            self._log(tr("log.annotation_no_anchor"))
+            return None
+        note = dashboard.Annotation(
+            text=str(text).strip() or tr("annotation.default"),
+            anchor=anchor,
+            colour=tuple(colour or self.ANNOTATION_COLOUR),
+        )
+        before = [item.to_dict() for item in self._annotations]
+        self._record(
+            tr("undo.add_annotation"),
+            {"annotations": before},
+            {"annotations": before + [note.to_dict()]},
+        )
+        self._log(tr("log.annotation_added", text=note.text))
+        return note
+
+    def annotation_anchor(self):
+        """The anchor a new label gets: the selection, else the displayed pose."""
+        refs = list(self.sequence.atom_refs())
+        if len(refs) == 1:
+            return refs[0]
+        if refs:
+            keys = self.sequence.selected_keys()
+            if keys:
+                chain, res_id, res_name = keys[0]
+                return ("residue", str(chain), int(res_id), str(res_name))
+        if self._measurements:
+            return ("measurement", len(self._measurements) - 1)
+        atoms = self.scene.ligand or self.scene.receptor
+        if atoms:
+            group = "ligand" if self.scene.ligand else "receptor"
+            return (group, 0)
+        return None
+
+    def edit_annotation(self, index: int, *, text=None, colour=None) -> bool:
+        """Change a label's text or colour — one undo step."""
+        if not (0 <= index < len(self._annotations)):
+            return False
+        before = [item.to_dict() for item in self._annotations]
+        updated = dashboard.Annotation.from_dict(before[index])
+        if text is not None:
+            updated.text = str(text)
+        if colour is not None:
+            updated.colour = tuple(colour)
+        after = list(before)
+        after[index] = updated.to_dict()
+        self._record(
+            tr("undo.edit_annotation"),
+            {"annotations": before},
+            {"annotations": after},
+        )
+        return True
+
+    def remove_annotation(self, index: int) -> bool:
+        if not (0 <= index < len(self._annotations)):
+            return False
+        before = [item.to_dict() for item in self._annotations]
+        after = [item for position, item in enumerate(before) if position != index]
+        self._record(
+            tr("undo.remove_annotation"),
+            {"annotations": before},
+            {"annotations": after},
+        )
+        return True
+
+    def toggle_annotations(self, checked: bool) -> None:
+        """View ▸ Annotate ▸ Show labels: hide them all without deleting them."""
+        self._annotation_visible = bool(checked)
+        self._sync_annotations()
+        self._log(
+            tr("log.annotations_shown")
+            if self._annotation_visible
+            else tr("log.annotations_hidden")
+        )
+
+    def _open_annotation_dialog(self, index: Optional[int] = None) -> None:
+        """Add or edit a label through the dialog (text + colour)."""
+        existing = None
+        if index is not None and 0 <= index < len(self._annotations):
+            existing = self._annotations[index]
+        anchor_text = ""
+        anchor = tuple(existing.anchor) if existing else tuple(self.annotation_anchor() or ())
+        if anchor:
+            anchor_text = self._annotation_anchor_text(anchor)
+        dialog = dialogs.AnnotationDialog(
+            existing.text if existing else "",
+            tuple(existing.colour) if existing else self.ANNOTATION_COLOUR,
+            anchor_text,
+            self,
+        )
+        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return
+        text, colour = dialog.values()
+        if existing is None:
+            self.add_annotation(text, colour=colour)
+        else:
+            self.edit_annotation(index, text=text, colour=colour)
+
+    def _annotation_anchor_text(self, anchor) -> str:
+        """A human description of what a label is pinned to."""
+        if anchor and anchor[0] in ("receptor", "ligand") and len(anchor) >= 2:
+            labels = self.measurement_atom_labels(
+                dashboard.Measurement("distance", refs=[(anchor[0], anchor[1])])
+            )
+            return labels[0] if labels else "—"
+        if anchor and anchor[0] == "residue" and len(anchor) >= 4:
+            return f"{anchor[3]}{anchor[2]}"
+        if anchor and anchor[0] == "measurement" and len(anchor) >= 2:
+            return tr("annotation.on_measurement", index=int(anchor[1]) + 1)
+        return "—"
+
+    def export_viewer_state(self) -> dict:
+        """Annotations and measurements for the interop export.
+
+        Exactly the shape ``interop.SceneState`` takes: plain dicts, colours as
+        ``(r, g, b)`` in 0–1, and the value the panel is showing, so the number in
+        the exported file is the number on screen.
+        """
+        annotations = []
+        for note in self._annotations:
+            anchor = tuple(note.anchor or ())
+            if anchor and anchor[0] == "residue" and len(anchor) >= 4:
+                anchor_payload = {"residue": (anchor[1], anchor[2], anchor[3])}
+            elif anchor and anchor[0] == "measurement" and len(anchor) >= 2:
+                anchor_payload = {"measurement": int(anchor[1])}
+            elif anchor:
+                anchor_payload = (str(anchor[0]), int(anchor[1])) if len(anchor) >= 2 else None
+            else:
+                anchor_payload = None
+            annotations.append(
+                {
+                    "text": note.text,
+                    "anchor": anchor_payload,
+                    "color": tuple(float(value) for value in note.colour),
+                    "visible": bool(note.visible),
+                }
+            )
+        measurements = []
+        for measurement in self._measurements:
+            value = self.measurement_value(measurement)
+            if value is None:
+                continue
+            measurements.append(
+                {
+                    "kind": measurement.kind,
+                    "refs": [(str(group), int(index)) for group, index in measurement.refs],
+                    "split": measurement.split,
+                    "value": value if isinstance(value, (int, float)) else None,
+                    "unit": measurement.unit,
+                }
+            )
+        return {"annotations": annotations, "viewer_measurements": measurements}
+
+    def _add_annotation_action(self) -> None:
+        self._open_annotation_dialog(None)
+
+    def _edit_annotation_action(self) -> None:
+        index = self._annotation_index_from_selection()
+        if index is None:
+            self._log(tr("log.annotation_none"))
+            return
+        self._open_annotation_dialog(index)
+
+    def _delete_annotation_action(self) -> None:
+        index = self._annotation_index_from_selection()
+        if index is None:
+            self._log(tr("log.annotation_none"))
+            return
+        self.remove_annotation(index)
+
+    def _annotation_index_from_selection(self) -> Optional[int]:
+        """The label the annotation table has selected, if any."""
+        table = getattr(self, "annotation_table", None)
+        if table is None:
+            return None
+        rows = sorted({index.row() for index in table.selectedIndexes()})
+        if rows and 0 <= rows[0] < len(self._annotations):
+            return rows[0]
+        return len(self._annotations) - 1 if self._annotations else None
+
+    def _copy_annotations(self) -> None:
+        if not self._annotations:
+            self._log(tr("annotation.empty"))
+            return
+        table = getattr(self, "annotation_table", None)
+        text = table.as_text() if table is not None else ""
+        dashboard.copy_text_to_clipboard(text)
+        self._log(tr("log.annotations_copied", n=len(self._annotations)))
+
+    def _annotation_rows(self) -> List[dict]:
+        rows = []
+        for note in self._annotations:
+            anchor = tuple(note.anchor or ())
+            if anchor and anchor[0] in ("receptor", "ligand") and len(anchor) >= 2:
+                labels = self.measurement_atom_labels(
+                    dashboard.Measurement("distance", refs=[(anchor[0], anchor[1])])
+                )
+                where = labels[0] if labels else "—"
+            elif anchor and anchor[0] == "residue" and len(anchor) >= 4:
+                where = f"{anchor[3]}{anchor[2]}"
+            elif anchor and anchor[0] == "measurement" and len(anchor) >= 2:
+                where = tr("annotation.on_measurement", index=int(anchor[1]) + 1)
+            else:
+                where = "—"
+            rows.append(
+                {
+                    "text": note.text,
+                    "anchor": where,
+                    "colour": note.colour,
+                    "visible": note.visible,
+                }
+            )
+        return rows
+
+    def _sync_annotations(self) -> None:
+        table = getattr(self, "annotation_table", None)
+        if table is not None:
+            table.set_annotations(self._annotation_rows())
+        if getattr(self, "viewport", None) is not None:
+            self.viewport.set_annotation_overlays(self._annotation_overlays())
+            self.viewport.refresh()
+        self._session_changed()
+
+    def _record(
+        self,
+        name: str,
+        before: dict,
+        after: dict,
+        *,
+        merge_key: Optional[str] = None,
+    ) -> Optional[dashboard.Command]:
+        """Apply ``after`` and remember how to get back to ``before``.
+
+        The unit of undo is a *named field snapshot*: a measurement list, an
+        annotation list, a pose index, a box, a style. One restore function
+        applies any of them, so every command type goes through the same code
+        path — which is what keeps the scene and the panels from drifting apart
+        after an undo.
+        """
+        if self._suppress_history:
+            self._apply_scene_fields(after)
+            return None
+        command = dashboard.Command(
+            name=name,
+            undo=lambda: self._apply_scene_fields(before),
+            redo=lambda: self._apply_scene_fields(after),
+            merge_key=merge_key,
+        )
+        self._history.push(command)
+        self._sync_history_actions()
+        return command
+
+    def _apply_scene_fields(self, fields: dict) -> None:
+        """Put a field snapshot back into the scene and every panel."""
+        self._suppress_history = True
+        try:
+            if "measurements" in fields:
+                self._measurements = [
+                    dashboard.Measurement.from_dict(item) for item in fields["measurements"]
+                ]
+                self._sync_measurements()
+            if "annotations" in fields:
+                self._annotations = [
+                    dashboard.Annotation.from_dict(item) for item in fields["annotations"]
+                ]
+                self._sync_annotations()
+            if "pose" in fields and self.pose_models:
+                # No recording: this *is* the restore path of an undo step.
+                self.set_pose(int(fields["pose"]), record=False)
+            if "selection" in fields:
+                self.sequence.select_keys([tuple(key) for key in fields["selection"]])
+            if "style_receptor" in fields:
+                self._set_style("receptor", str(fields["style_receptor"]))
+            if "style_ligand" in fields:
+                self._set_style("ligand", str(fields["style_ligand"]))
+            if "theme" in fields:
+                self.set_theme(str(fields["theme"]), record=False)
+            if "density" in fields:
+                self.set_density(str(fields["density"]), record=False)
+            if "box" in fields:
+                box = fields["box"]
+                if box is None:
+                    self.scene.box = None
+                    self._refresh_box_label()
+                    self.viewport.refresh()
+                else:
+                    self._set_box(box["center"], box["size"], float(box.get("spacing", 0.375)))
+            if "interaction_filter" in fields:
+                saved = fields["interaction_filter"]
+                self._interaction_filter = (
+                    None if saved is None else {str(kind) for kind in saved}
+                )
+                for kind, action in getattr(self, "_interaction_actions", {}).items():
+                    action.blockSignals(True)
+                    action.setChecked(
+                        self._interaction_filter is None
+                        or kind in self._interaction_filter
+                    )
+                    action.blockSignals(False)
+                self._sync_interactions()
+        finally:
+            self._suppress_history = False
+        self._sync_history_actions()
+
+    def undo(self) -> bool:
+        """Ctrl+Z: step back one scene edit."""
+        command = self._history.undo()
+        if command is None:
+            self._log(tr("log.nothing_to_undo"))
+            return False
+        self._log(tr("log.undone", name=command.name))
+        self._sync_history_actions()
+        return True
+
+    def redo(self) -> bool:
+        """Ctrl+Shift+Z: step forward again."""
+        command = self._history.redo()
+        if command is None:
+            self._log(tr("log.nothing_to_redo"))
+            return False
+        self._log(tr("log.redone", name=command.name))
+        self._sync_history_actions()
+        return True
+
+    def _sync_history_actions(self) -> None:
+        """Name the next undo/redo step, so Ctrl+Z is never a blind step.
+
+        The names are menu labels, and a menu label carries an accelerator ``&``;
+        the mnemonic belongs to the menu, not to a sentence, so it is stripped
+        here ("Undo Grid", not "Undo &Grid").
+        """
+        undo_action = getattr(self, "undo_action", None)
+        redo_action = getattr(self, "redo_action", None)
+        if undo_action is not None:
+            undo_action.setEnabled(self._history.can_undo())
+            name = self._history.undo_name().replace("&", "")
+            undo_action.setText(
+                tr("action.undo_name", name=name) if name else tr("action.undo")
+            )
+        if redo_action is not None:
+            redo_action.setEnabled(self._history.can_redo())
+            name = self._history.redo_name().replace("&", "")
+            redo_action.setText(
+                tr("action.redo_name", name=name) if name else tr("action.redo")
+            )
+
+    def _scene_state(self) -> dict:
+        """Everything the panels show, as one comparable snapshot.
+
+        The undo tests compare this before an action and after undoing it: if any
+        row, label, overlay or read-out differs, the undo desynchronised the
+        scene from the interface, which is the failure this feature invites.
+        """
+        return {
+            "pose": self.pose_index() if self.pose_models else -1,
+            "selection": [list(key) for key in self.sequence.selected_keys()],
+            "style_receptor": self.scene.style_protein,
+            "style_ligand": self.scene.style_ligand,
+            "theme": self.color_theme.name,
+            "density": self.density,
+            "box": (
+                None
+                if self.scene.box is None
+                else [
+                    list(self.scene.box[0]),
+                    list(self.scene.box[1]),
+                    float(self.spacing.value()),
+                ]
+            ),
+            "measurements": [item.to_dict() for item in self._measurements],
+            "annotations": [item.to_dict() for item in self._annotations],
+            "measure_table": (
+                self.measure_history.as_text() if self.measure_history is not None else ""
+            ),
+            "tree": [
+                (
+                    self.tree.topLevelItem(row).text(0),
+                    self.tree.topLevelItem(row).text(1),
+                )
+                for row in range(self.tree.topLevelItemCount())
+            ],
+            "measure_overlays": [item["text"] for item in self._measure_overlays()],
+            "annotation_overlays": [
+                item["text"] for item in self._annotation_overlays()
+            ],
+            "interaction_filter": (
+                None
+                if self._interaction_filter is None
+                else sorted(self._interaction_filter)
+            ),
+            "pose_label": self.pose_label_text(),
+        }
 
     def _set_tool(self, mode: str) -> None:
         target = (
@@ -4220,6 +5965,10 @@ class DockingWorkbench(QtWidgets.QMainWindow):
             if target == ViewportWidget.MODE_BOND
             else tr("log.tool_orbit")
         )
+
+    def _start_measure_distance(self, _checked: bool = False) -> None:
+        """View ▸ Measure distance: the short way into the measure tool."""
+        self.set_measure_kind("distance")
 
     def _build_style_menu(self, parent, title, styles, which):
         """A radio-style style submenu; returns ``{style: action}``.
@@ -4281,12 +6030,25 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         self._log(tr("log.bond_check", summary=summary))
 
     def _set_style(self, which: str, value: str) -> None:
+        before = (
+            self.scene.style_protein if which == "receptor" else self.scene.style_ligand
+        )
         if which == "receptor":
             self.scene.style_protein = value
             self.viewport.refresh(upload_receptor=True)
         else:
             self.scene.style_ligand = value
             self.viewport.refresh()
+        after = (
+            self.scene.style_protein if which == "receptor" else self.scene.style_ligand
+        )
+        if before != after:
+            field = "style_receptor" if which == "receptor" else "style_ligand"
+            self._record(
+                tr(f"menu.{'protein' if which == 'receptor' else 'ligand'}_style"),
+                {field: before},
+                {field: after},
+            )
         current = (
             self.scene.style_protein if which == "receptor" else self.scene.style_ligand
         )
@@ -4306,11 +6068,22 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         self.viewport.refresh()
 
     def _toggle_receptor(self, checked: bool) -> None:
+        """Show or hide the receptor — and with it, anything that points at it.
+
+        The visibility contract, stated once and applied here: a drawn line or an
+        emphasised atom whose other end is no longer rendered reads as an
+        interaction reaching across the protein, so hiding the receptor hides the
+        interaction drawing (and the focus pass) with it. Turning the receptor
+        back on restores both if Show interactions is still active.
+        """
         self.scene.show_receptor = bool(checked)
+        self._sync_interactions()
         self.viewport.refresh(upload_receptor=True)
 
     def _toggle_ligand(self, checked: bool) -> None:
+        """The same contract the other way round: no ligand, no lines to it."""
         self.scene.show_ligand = bool(checked)
+        self._sync_interactions()
         self.viewport.refresh()
 
     # -- the molecular surface ----------------------------------------------
@@ -4378,6 +6151,17 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         )
         self._act(menu, tr("action.surface_range"), self._choose_surface_range)
         self._act(menu, tr("action.surface_opacity"), self._choose_surface_opacity)
+        dielectric = menu.addMenu(tr("menu.surface_dielectric"))
+        self._surface_dielectric_actions = self._radio_group(
+            dielectric,
+            (
+                ("distance", tr("action.surface_dielectric_distance")),
+                ("uniform", tr("action.surface_dielectric_uniform")),
+            ),
+            self.surface_settings.dielectric,
+            self._set_surface_dielectric,
+        )
+        self._act(menu, tr("action.surface_esp_breakdown"), self._potential_breakdown)
         menu.addSeparator()
         self.pocket_action = self._act(
             menu, tr("action.surface_pocket"), self._toggle_pocket_lining, checkable=True
@@ -4482,7 +6266,48 @@ class DockingWorkbench(QtWidgets.QMainWindow):
             highlighted_residues=highlighted,
             max_points=base.max_points,
             directions=base.directions,
+            charge_caveat=self._surface_charge_caveat(),
         )
+
+    def _surface_charge_caveat(self):
+        """What the charge column behind an ESP map cannot say.
+
+        An electrostatic surface is only as good as the charges under it, and
+        the two ways that column lies are both detectable: it may not carry a
+        group's **formal charge** (a formally cationic amidine whose nitrogens
+        come out negative, because Gasteiger spreads the +1 over the ion), or it
+        may not **conserve** charge at all. The chemistry detector is
+        ``odock.protonation`` — imported, not re-implemented — and the ligand's
+        coordinates are handed over in the order the *molecule* expects, which is
+        the order the API checks and raises on.
+        """
+        from . import surface as surface_module
+
+        if self.surface_settings.property != "electrostatic":
+            return None
+        try:
+            ligand_mol = self.ligand_mol
+        except Exception:  # pragma: no cover - defensive
+            ligand_mol = None
+        coordinates = None
+        if ligand_mol is not None and getattr(ligand_mol, "GetNumConformers", None):
+            try:
+                if ligand_mol.GetNumConformers():
+                    coordinates = ligand_mol.GetConformer().GetPositions()
+            except Exception:  # pragma: no cover - defensive
+                coordinates = None
+        atoms = list(self.scene.ligand) or list(self.scene.receptor)
+        if not atoms:
+            return None
+        try:
+            return surface_module.charge_caveat(
+                atoms,
+                mol=ligand_mol,
+                receptor_atoms=self.scene.receptor,
+                ligand_coords=coordinates,
+            )
+        except Exception as exc:  # pragma: no cover - reported, not raised
+            return f"the charge column could not be checked ({exc})"
 
     def _rebuild_surface(self) -> None:
         """Build the surface off the main thread and put it on screen.
@@ -4530,6 +6355,11 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         if not isinstance(stats, dict) or not stats.get("triangles"):
             self._log(tr("log.surface_empty"))
             return
+        warning = stats.get("charge_warning")
+        if warning:
+            # A wrong-signed potential map looks exactly like a right one, so
+            # the caveat is said out loud rather than left in the surface.
+            self._log(tr("log.surface_charge_warning", detail=warning))
         self._log(
             tr(
                 "log.surface_built",
@@ -4735,6 +6565,138 @@ class DockingWorkbench(QtWidgets.QMainWindow):
             action.setChecked(value == self.surface_settings.mode)
         for value, action in getattr(self, "_surface_property_actions", {}).items():
             action.setChecked(value == self.surface_settings.property)
+        for value, action in getattr(self, "_surface_dielectric_actions", {}).items():
+            action.setChecked(value == self.surface_settings.dielectric)
+
+    def _set_surface_dielectric(self, name: str) -> None:
+        """Constant or distance-dependent dielectric for the potential.
+
+        Both are documented models of the *same* Coulomb sum: ``ε = 4r`` is the
+        AutoDock 4 convention the scoring kernel uses (a screened, local
+        picture), ``ε = 4`` is the unscreened one. Switching rebuilds the
+        surface, because the potential is sampled onto it.
+        """
+        self.surface_settings.dielectric = "distance" if name == "distance" else "uniform"
+        self._log(
+            tr(
+                "log.surface_dielectric",
+                model=tr(f"action.surface_dielectric_{self.surface_settings.dielectric}"),
+            )
+        )
+        if self.scene.receptor and self.surface_settings.property == "electrostatic":
+            self._rebuild_surface()
+
+    def _potential_breakdown(self) -> None:
+        """Which residues make this surface electropositive or negative.
+
+        The colour map says *that* a pocket is negative; this says *why*, by
+        summing each residue's own contribution to the Coulomb potential at the
+        site. It is the same model the surface is painted with — the dialog
+        repeats the charge-column diagnostic so an unconserving charge set
+        cannot be mistaken for the real electrostatics.
+        """
+        from . import surface as surface_module
+
+        surface = self.scene.surface
+        receptor = list(self.scene.receptor)
+        if surface is None or not receptor:
+            self._report_error(tr("log.surface_failed"), True)
+            return
+        focus = self._surface_centre()
+        dielectric = self.surface_settings.dielectric
+
+        def work():
+            # The painted property is irrelevant here: the question is what the
+            # charges do to this surface, whether or not it is coloured by them.
+            return surface_module.electrostatic_decomposition(
+                self._sample_surface_points(surface),
+                receptor,
+                group="residue",
+                dielectric=dielectric,
+                focus=focus,
+                top=20,
+            )
+
+        def done(report) -> None:
+            self._show_potential_report(report)
+
+        self._run_background(work, done, label=tr("action.surface_esp_breakdown"))
+
+    @staticmethod
+    def _sample_surface_points(surface, count: int = 2000):
+        """A deterministic subsample of the surface vertices, for a breakdown.
+
+        The decomposed potential does not have to be the *painted* property: a
+        user may be looking at a hydrophobicity map and still want to know who
+        makes the site negative. Sampling the vertices keeps the two independent.
+        """
+        vertices = getattr(surface, "vertices", None)
+        if vertices is None or len(vertices) == 0:
+            return []
+        stride = max(1, int(len(vertices) // max(1, count)))
+        return [tuple(float(v) for v in row) for row in vertices[::stride]]
+
+    def _show_potential_report(self, report) -> None:
+        groups = report.get("groups") or []
+        lines = [tr("esp.header"), ""]
+        lines.append(
+            tr(
+                "esp.model",
+                dielectric=tr(
+                    f"action.surface_dielectric_{report.get('dielectric', 'distance')}"
+                ),
+                epsilon=f"{float(report.get('epsilon', 4.0)):g}",
+            )
+        )
+        lines.append(
+            tr(
+                "esp.charges",
+                nonzero=int(report.get("charges", 0)),
+                atoms=int(report.get("atoms", 0)),
+                total=f"{float(report.get('total_charge', 0.0)):+.1f}",
+            )
+        )
+        lines.append(
+            tr(
+                "esp.points",
+                points=int(report.get("points", 0)),
+                available=int(report.get("points_available", 0)),
+            )
+        )
+        focus_total = report.get("focus_total")
+        if focus_total is not None:
+            lines.append(tr("esp.focus_total", value=f"{float(focus_total):+.2f}"))
+            lines.append(
+                tr(
+                    "esp.focus_at",
+                    x=f"{report['focus'][0]:.1f}",
+                    y=f"{report['focus'][1]:.1f}",
+                    z=f"{report['focus'][2]:.1f}",
+                )
+            )
+        lines.append("")
+        lines.append(tr("esp.table"))
+        for group in groups:
+            share = (
+                100.0 * group.at_focus / float(focus_total)
+                if focus_total not in (None, 0.0) and group.at_focus is not None
+                else 0.0
+            )
+            lines.append(
+                f"{group.label:<14} {group.atoms:>3}  {group.charge:>+6.2f}  "
+                f"{(group.at_focus or 0.0):>+9.2f}  {share:>+7.1f}%  "
+                f"{group.mean:>+8.2f}"
+            )
+        self._show_report(tr("dialog.esp_breakdown"), "\n".join(lines))
+        if groups:
+            self._log(
+                tr(
+                    "log.esp_breakdown",
+                    residues=len(groups),
+                    top=groups[0].label,
+                    value=f"{(groups[0].at_focus or 0.0):+.2f}",
+                )
+            )
 
     def _surface_statistics(self) -> None:
         surface = self.scene.surface
@@ -4756,6 +6718,20 @@ class DockingWorkbench(QtWidgets.QMainWindow):
                 seconds=f"{float(stats.get('seconds', 0.0)):.2f}",
             )
         )
+        # Closure and volume: a closed mesh has an inside, and "how big is this
+        # pocket?" is a question a docking tool should be able to answer.
+        volume = stats.get("volume")
+        if volume is None:
+            self._log(tr("log.surface_open"))
+        else:
+            self._log(
+                tr(
+                    "log.surface_volume",
+                    volume=f"{float(volume):.0f}",
+                    cap=int(stats.get("cap_triangles", 0) or 0),
+                    cap_area=f"{float(stats.get('cap_area', 0.0)):.0f}",
+                )
+            )
 
     # -- SASA, burial and the interop exports --------------------------------
 
@@ -5466,6 +7442,16 @@ class DockingWorkbench(QtWidgets.QMainWindow):
     def _on_sequence_selection(self, keys) -> None:
         """The ruler selection becomes the 3-D selection and the atom list."""
         keys = list(keys or ())
+        before = [list(item) for item in getattr(self, "_selection_keys", [])]
+        after = [list(item) for item in keys]
+        self._selection_keys = [tuple(item) for item in keys]
+        if before != after:
+            self._record(
+                tr("dock.selection"),
+                {"selection": before},
+                {"selection": after},
+                merge_key="selection",
+            )
         refs = self.sequence.atom_refs(keys)
         self.scene.selection = refs
         self._populate_selection_table(refs)
@@ -5756,21 +7742,6 @@ class DockingWorkbench(QtWidgets.QMainWindow):
             }
         )
 
-    # -- measurements -------------------------------------------------------
-
-    def _sync_measurements(self) -> None:
-        history = getattr(self, "measure_history", None)
-        if history is not None:
-            history.set_measurements(self._measurements)
-
-    def _copy_measurements(self) -> None:
-        if not self._measurements:
-            self._log(tr("measure.empty"))
-            return
-        history = self.measure_history
-        dashboard.copy_text_to_clipboard(history.as_text())
-        self._log(tr("log.measure_copied", n=len(self._measurements)))
-
     # -- recent files -------------------------------------------------------
 
     def _note_recent(self, path) -> None:
@@ -5952,9 +7923,12 @@ class DockingWorkbench(QtWidgets.QMainWindow):
                 "threads": self.threads.value(),
             },
             "selection": [list(item) for item in self.sequence.selected_keys()],
-            "pose_index": self.pose_slider.value() if self.pose_models else 0,
+            "pose_index": self.pose_index() if self.pose_models else 0,
             "history": self.run_history.to_list(),
-            "measurements": [dict(item) for item in self._measurements],
+            "measurements": [item.to_dict() for item in self._measurements],
+            "annotations": [item.to_dict() for item in self._annotations],
+            "annotation_visible": bool(self._annotation_visible),
+            "measure_kind": str(self._measure_kind),
             "docks": docks,
             "splitters": {
                 "central": list(self.central_splitter.sizes()),
@@ -5985,6 +7959,7 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         self._autosave_pending = False
         return bool(self.session.save(self._session_payload()))
 
+    @_history_silent
     def restore_session(self, payload: Optional[dict] = None) -> bool:
         """Put a saved session back, without touching anything it did not save.
 
@@ -6051,8 +8026,21 @@ class DockingWorkbench(QtWidgets.QMainWindow):
                 self.run_dashboard.reset(clear_history=False)
         measurements = data.get("measurements") or []
         if measurements:
-            self._measurements = [dict(item) for item in measurements]
+            self._measurements = [
+                dashboard.Measurement.from_dict(item) for item in measurements
+            ]
             self._sync_measurements()
+        annotations = data.get("annotations") or []
+        if annotations:
+            self._annotations = [
+                dashboard.Annotation.from_dict(item) for item in annotations
+            ]
+        if data.get("annotation_visible") is not None:
+            self._annotation_visible = bool(data["annotation_visible"])
+        if data.get("measure_kind") in dashboard.MEASUREMENT_KINDS:
+            self._measure_kind = str(data["measure_kind"])
+            self._sync_measure_actions()
+        self._sync_annotations()
         docks = data.get("docks") or {}
         for name, visible in docks.items():
             dock = getattr(self, name, None)
@@ -6108,6 +8096,13 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         if strip is not None:
             strip.adjustSize()
             strip.move(12, max(12, self.viewport.height() - strip.height() - 12))
+        # A resize re-states the proportions (they are a fraction of the window),
+        # so the central viewport keeps the lion's share at every window size and
+        # takes everything the resize adds. A divider the user dragged by hand
+        # therefore lasts until the next resize — the proportions are the app's
+        # policy, the drag is a temporary look.
+        if getattr(self, "workspace_dock", None) is not None:
+            self._apply_dock_proportions()
 
     def closeEvent(self, event) -> None:  # noqa: N802
         # The session is written once, here, so the dock layout and the pose the
@@ -6180,6 +8175,13 @@ def launch_gui(
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv[:1])
     store = dashboard.SessionStore.default()
     payload = store.load()
+    # English is the startup default, whatever the operating system's locale says:
+    # a Chinese label is fewer characters but every one of them is full-width, so
+    # the layout that fits is the English one (see the table in docs/USER_GUIDE.md).
+    # The switch and its persistence are untouched — a session or project that
+    # recorded 中文 reopens in 中文, because those set the language explicitly.
+    if not (payload or {}).get("language"):
+        i18n.set_language("en")
     window = DockingWorkbench(
         receptor=receptor, ligand=ligand, poses=poses, session=store
     )

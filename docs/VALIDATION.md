@@ -368,14 +368,16 @@ Known limitations, stated so that they cannot be mistaken for oversights:
 10. **No AutoDockTools (ADT / MGLTools) code was read, borrowed or copied.**
     Everything PDBQT-related is written from the format specification plus RDKit.
 11. **Ligand-based methods are not validated against activity data.** The
-    cheminformatics layer ([`CHEMINFORMATICS.md`](CHEMINFORMATICS.md)) and the
-    pharmacophore layer ([`PHARMACOPHORE.md`](PHARMACOPHORE.md)) are validated
-    against hand-computed arithmetic and the bundled library, not against an
-    assay: a Tanimoto similarity, a Murcko scaffold, a matched-pair delta and a
-    pharmacophore fit are all *structural* statements. The one labelled set this
-    repository contains is six actives in seventeen molecules, which cannot
-    establish enrichment, and both the API and the documents say so where the
-    numbers are quoted.
+    cheminformatics layer ([`CHEMINFORMATICS.md`](CHEMINFORMATICS.md)), the
+    pharmacophore layer ([`PHARMACOPHORE.md`](PHARMACOPHORE.md)), the ligand-based
+    benchmark ([`LBVS.md`](LBVS.md)) and the hit-triage layer
+    ([`TRIAGE.md`](TRIAGE.md)) are validated against hand-computed arithmetic and
+    the bundled library, not against an assay: a Tanimoto similarity, a Murcko
+    scaffold, a matched-pair delta, a pharmacophore fit and a structural alert are
+    all *structural* statements. The one labelled set this repository contains is
+    six actives in seventeen molecules, which cannot establish enrichment, and the
+    alert catalogues flag a third of the bundled pool — both the APIs and the
+    documents say so where the numbers are quoted.
 
 ---
 

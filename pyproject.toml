@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "opendocking"
-version = "0.2.1"
+version = "0.2.2"
 description = "odock — a modern, open-source molecular docking toolchain (Rust core + Python workbench)"
 readme = "README.md"
 # PEP 639: an SPDX expression plus the files that carry the licence text.  The

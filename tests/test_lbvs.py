@@ -129,6 +129,239 @@ def test_bootstrap_ci_of_a_metric_with_no_positives_is_empty():
 
 
 # ---------------------------------------------------------------------------
+# Power: the paired test, the minimum detectable difference, stratification
+# ---------------------------------------------------------------------------
+
+
+def test_minimum_detectable_difference_is_two_point_eight_standard_errors():
+    """The constant is derived, not asserted: 1.96 + 0.84 = 2.80 at 80 % power."""
+    assert lbvs.MDD_Z == pytest.approx(2.80, abs=0.01)
+    assert lbvs.minimum_detectable_difference(0.0) == 0.0
+    assert lbvs.minimum_detectable_difference(0.05) == pytest.approx(0.14, abs=0.005)
+    # A 99 % level is stricter than 95 %, and 95 % power stricter than 80 %.
+    assert lbvs.minimum_detectable_difference(0.05, level=0.99) > (
+        lbvs.minimum_detectable_difference(0.05, level=0.95)
+    )
+    assert lbvs.minimum_detectable_difference(0.05, power=0.95) > (
+        lbvs.minimum_detectable_difference(0.05, power=0.80)
+    )
+    assert math.isnan(lbvs.minimum_detectable_difference(float("nan")))
+
+
+def test_the_paired_difference_cancels_the_noise_the_intervals_share():
+    """Two rankings of the same molecules: the paired test is the sharper one.
+
+    Both rankings are noisy (five actives and twenty-five decoys drawn from
+    overlapping distributions), so each AUC has a real interval.  The *paired*
+    standard error must be smaller than the unpaired one — ``sqrt(se_a² + se_b²)`` —
+    because the shared molecule-to-molecule noise cancels in the difference, and
+    that is the entire reason the comparison is paired.
+    """
+    rng = random.Random(11)
+    labels = [True] * 5 + [False] * 25
+    a = [rng.gauss(1.0 if flag else 0.0, 1.0) for flag in labels]
+    b = [rng.gauss(1.0 if flag else 0.0, 1.0) for flag in labels]
+    a_auc = lbvs.auc(a, labels)
+    b_auc = lbvs.auc(b, labels)
+    paired = lbvs.paired_difference(a, b, labels, samples=2000, seed=7)
+    assert paired["difference"] == pytest.approx(a_auc - b_auc, abs=1e-9)
+    low, high = paired["ci"]
+    assert low <= paired["difference"] <= high
+    se_a = lbvs.bootstrap_ci(a, labels, lbvs.auc, samples=400, seed=7)
+    se_b = lbvs.bootstrap_ci(b, labels, lbvs.auc, samples=400, seed=7)
+    unpaired_width = math.hypot(se_a[1] - se_a[0], se_b[1] - se_b[0])
+    assert (high - low) < unpaired_width, (
+        "the paired interval must be tighter than two independent ones"
+    )
+    assert paired["se"] > 0.0
+    assert paired["mdd"] == pytest.approx(2.80 * paired["se"], rel=0.01)
+    # Comparing a ranking with itself is not just unresolvable, it is exactly zero.
+    same = lbvs.paired_difference(a, a, labels, samples=100)
+    assert same["difference"] == 0.0
+    assert same["ci"] == (0.0, 0.0) and same["resolvable"] is False
+    assert same["n_actives"] == 5 and same["n_decoys"] == 25
+
+
+def test_a_large_paired_difference_is_resolvable_and_a_small_one_is_not():
+    """The test has to be able to say *yes* as well as *no*."""
+    labels = [True] * 6 + [False] * 24
+    perfect = [100.0 - index for index in range(30)]
+    reversed_ = [index for index in range(30)]
+    big = lbvs.paired_difference(perfect, reversed_, labels, samples=1000, seed=3)
+    assert big["resolvable"] is True and big["ci"][0] > 0.0
+    assert big["difference"] == pytest.approx(1.0, abs=1e-9)
+    # Moving one decoy above one active is a real but tiny change: measured and
+    # unresolvable, and the gap is smaller than the difference the set can detect.
+    nearly = list(perfect)
+    nearly[5], nearly[6] = nearly[6], nearly[5]  # last active / first decoy
+    small = lbvs.paired_difference(perfect, nearly, labels, samples=1000, seed=3)
+    assert small["difference"] > 0.0, "perfect is the better ranking"
+    assert small["resolvable"] is False
+    assert small["mdd"] > 0.0
+    assert small["difference"] < small["mdd"], (
+        "one discordant pair is far below what 6 actives and 24 decoys can detect"
+    )
+
+
+def test_the_report_compares_methods_in_library_order_not_ranking_order():
+    """The bug the first paired test had: two rankings are in different orders.
+
+    Method B is scored by *reversing* the scores within each label class, so its
+    ranking lists the molecules in a different order from A's.  If the comparison
+    paired B's scores with A's label vector, the labels would be misaligned and the
+    difference would be wrong; aligned by name it is exactly the two AUCs' gap.
+    """
+    actives = [named("N=C(N)c1ccccc1", "benzamidine"),
+               named("N=C(N)c1ccc(O)cc1", "hydroxybenzamidine")]
+    decoys = [named("c1ccccc1", "benzene"), named("c1ccncc1", "pyridine"),
+              named("CCO", "ethanol")]
+    report = lbvs.benchmark(actives, decoys, methods=("fingerprint", "overlay"),
+                            conformers=1, bootstrap=10, controls=())
+    names, scores, labels = report._aligned("fingerprint_morgan")
+    assert names == [name for name, _ in report.labels], "library order, not rank order"
+    assert labels == [flag for _, flag in report.labels]
+    assert lbvs.auc(scores, labels) == pytest.approx(
+        report.by_method()["fingerprint_morgan"].stats["auc"], abs=5e-5
+    )
+    for method in ("fingerprint_morgan", "overlay_esp"):
+        assert len(report._aligned(method)[1]) == len(report.labels)
+    with pytest.raises(ValueError, match="no method"):
+        report._aligned("nonsense")
+    comparison = report.compare("fingerprint_morgan", "overlay_esp", samples=50)
+    assert comparison["method_a"] == "fingerprint_morgan"
+    assert comparison["n"] == len(report.labels)
+    assert "MDD" in report.paired_table(samples=20)
+    assert "resolvable" in report.paired_table(samples=20)
+    power = report.power(samples=20)
+    assert power["n_actives"] == 2 and power["pairs"] == 1
+    assert power["min_mdd"] <= power["max_mdd"]
+    assert report.as_dict()["power"]["pairs"] == 1
+
+
+def test_read_targets_and_the_per_target_benchmark(molecules, actives):
+    """The multi-target entry point, exercised on a small synthetic mapping.
+
+    Two "targets" are defined over the bundled library so the stratification is
+    real: the machinery must report an AUC per target, pool the targets with a
+    mean-over-targets estimate, and **record the reason** it skipped the ones it
+    could not score rather than dropping them silently.
+    """
+    pool = [
+        named("Nc1ccccn1", "2_aminopyridine"),
+        named("Nc1ncccn1", "2_aminopyrimidine"),
+        named("Nc1nccs1", "2_aminothiazole"),
+        named("NCc1ccccn1", "2_aminomethylpyridine"),
+        named("Nc1ccccc1O", "2_aminophenol"),
+        named("NCc1ccccc1", "benzylamine"),
+        named("c1ccc2ccccc2c1", "naphthalene"),
+        named("OC(=O)CCC(=O)O", "succinic_acid"),
+        named("c1ccncc1", "pyridine"),
+        named("Cc1ccccc1", "toluene"),
+        named("OCC(O)CO", "glycerol"),
+        named("NCCc1ccccc1", "phenethylamine"),
+    ]
+    targets = {
+        "trypsin": actives[:3],
+        "other": actives[3:5],
+        "one_active": actives[:1],
+    }
+    report = lbvs.benchmark_per_target(
+        targets, pool, per_active=2, methods=("fingerprint", "overlay"),
+        conformers=1, bootstrap=10, min_decoys=2, controls=(),
+    )
+    assert set(report.reports) <= {"trypsin", "other"}
+    assert report.targets, "at least one target must be scorable"
+    assert "one_active" in report.skipped
+    assert "no reference" in report.skipped["one_active"]
+    for name in report.targets:
+        assert report.reports[name].n_actives >= 2
+        assert report.reports[name].n_decoys >= 2
+    table = report.per_target_table()
+    assert "pooled" in table and "not benchmarked" in table
+    assert set(report.methods) == {"fingerprint_morgan", "overlay_esp"}
+    comparison = report.compare("fingerprint_morgan", "overlay_esp", samples=20)
+    assert set(comparison) >= {"difference", "ci", "se", "mdd", "resolvable"}
+    assert "stratified" in report.paired_table(samples=20)
+    power = report.power(samples=20)
+    assert power["n_targets"] == len(report.targets)
+    assert power["n_actives"] == sum(r.n_actives for r in report.reports.values())
+    assert report.as_dict()["targets"]
+    # A mapping with nothing scorable is an error that names the reasons.
+    with pytest.raises(ValueError, match="no target could be benchmarked"):
+        lbvs.benchmark_per_target(
+            {"lonely": actives[:1]}, pool, per_active=2, methods=("fingerprint",),
+            conformers=1, bootstrap=5,
+        )
+
+
+def test_the_stratified_difference_pools_over_targets_not_molecules():
+    """A target with many molecules must not outvote a target with few.
+
+    Two strata: one with 10 actives and 10 decoys where A is perfect and B is
+    reversed, and one with 2 actives and 2 decoys where the two are identical.  The
+    mean-over-targets difference is 0.5 (half the targets differ), which is *not*
+    what pooling the molecules would give.
+    """
+    strata = [
+        {
+            "scores_a": [10.0 - i for i in range(20)],
+            "scores_b": [float(i) for i in range(20)],
+            "labels": [True] * 10 + [False] * 10,
+        },
+        {
+            "scores_a": [1.0, 0.5, 0.4, 0.3],
+            "scores_b": [1.0, 0.5, 0.4, 0.3],
+            "labels": [True, True, False, False],
+        },
+    ]
+    pooled = lbvs.stratified_difference(strata, samples=200, seed=11)
+    assert pooled["auc_a"] == pytest.approx(1.0, abs=0.02)
+    assert pooled["auc_b"] == pytest.approx(0.5, abs=0.02)
+    assert pooled["difference"] == pytest.approx(0.5, abs=0.02)
+    assert pooled["n_strata"] == 2
+    assert pooled["mdd"] > 0.0
+    assert pooled["resolvable"] is True, "a one-target-perfect split must resolve"
+    with pytest.raises(ValueError, match="no stratum"):
+        lbvs.stratified_difference([{"scores_a": [], "scores_b": [], "labels": []}])
+
+
+def test_read_targets_reads_the_shipped_multi_target_file(tmp_path):
+    path = ROOT / "demo" / "actives.smi"
+    if not path.exists():
+        pytest.skip("the bundled multi-target actives file is missing")
+    targets = lbvs.read_targets(path)
+    assert set(targets) == {"trypsin", "eralpha", "hiv_protease", "egfr", "streptavidin"}
+    assert len(targets["trypsin"]) == 5, "the published ring-amidine set"
+    assert len(targets["eralpha"]) == 2
+    names = [mol.GetProp("_Name") for mol in targets["trypsin"]]
+    assert names == ["benzamidine", "benzamidine_methyl", "hydroxybenzamidine",
+                     "fluorobenzamidine", "chloro_benzamidine"]
+    # The two ligands whose structure file is not bundled are checked against their
+    # published formula and the heavy-atom count the PDB file actually contains.
+    from rdkit.Chem import rdMolDescriptors
+
+    erlotinib = targets["egfr"][0]
+    assert rdMolDescriptors.CalcMolFormula(erlotinib) == "C22H23N3O4"
+    assert erlotinib.GetNumHeavyAtoms() == 29
+    assert targets["streptavidin"][0].GetNumHeavyAtoms() == 16
+    with pytest.raises(ValueError, match="expected 'SMILES name target'"):
+        lbvs.read_targets(_write_tmp(tmp_path, "broken.smi", "CCO ethanol\n"))
+
+
+def _write_tmp(tmp_path, name, text):
+    target = tmp_path / name
+    target.write_text(text, encoding="utf-8")
+    return target
+
+
+def test_read_targets_validates_its_input(tmp_path):
+    with pytest.raises(ValueError, match="not a parsable SMILES"):
+        lbvs.read_targets(_write_tmp(tmp_path, "bad.smi", "not a molecule x y\n"))
+    with pytest.raises(ValueError, match="holds no actives"):
+        lbvs.read_targets(_write_tmp(tmp_path, "empty.smi", "# nothing\n"))
+
+
+# ---------------------------------------------------------------------------
 # Methods and controls
 # ---------------------------------------------------------------------------
 
@@ -287,3 +520,167 @@ def test_require_rdkit_and_argument_validation(monkeypatch):
     monkeypatch.setattr(lbvs, "_HAVE_RDKIT", False)
     with pytest.raises(ImportError, match=r"pip install rdkit"):
         lbvs.require_rdkit()
+
+
+# ---------------------------------------------------------------------------
+# The two shape engines, and the pre-filter that scales the 3-D one
+# ---------------------------------------------------------------------------
+
+
+def test_the_shape_engine_flag_selects_between_the_two_overlays(molecules, actives):
+    """Both engines stay available and are named apart, so the delta is visible.
+
+    ``overlay`` is the default (analytic Gaussian densities, an optimised pose,
+    both terms reported per molecule); ``crude`` is the original single-pose grid
+    overlay, kept so the two can be measured on the same data.
+    """
+    names = [mol.GetProp("_Name") for mol in molecules]
+    overlay = lbvs.shape_scores(molecules, actives, conformers=1, names=names)
+    crude = lbvs.shape_scores(
+        molecules, actives, engine="crude", conformers=1, names=names
+    )
+    assert overlay.method == "overlay_esp"
+    assert crude.method == "crude_esp"
+    assert len(overlay) == len(crude) == len(molecules)
+    assert set(overlay.names) == set(crude.names) == set(names)
+    # The overlay reports its terms per molecule; the grid scorer does not have
+    # them to report.
+    assert overlay.details and overlay.terms()["n"] == len(molecules)
+    assert overlay.details["benzamidine"]["shape"] > 0.0
+    assert crude.details == {}
+    assert any("rigid grid overlay" in note for note in crude.notes)
+    # Shape-only variants, and the deprecated alias still pointing at the chosen
+    # engine.
+    assert lbvs.shape_scores(
+        molecules, actives, conformers=1, names=names, electrostatic=False
+    ).method == "overlay_shape"
+    assert lbvs.shape_scores(
+        molecules, actives, engine="crude", conformers=1, names=names,
+        electrostatic=False,
+    ).method == "crude_shape"
+    with pytest.raises(ValueError, match="unknown shape engine"):
+        lbvs.shape_scores(molecules, actives, engine="nonsense")
+
+
+def test_the_benchmark_can_run_both_shape_engines_side_by_side(molecules, actives):
+    """The comparison the default documents, on one labelled set, one run."""
+    small_actives = actives[:2]
+    decoys = [
+        named("Nc1ccccn1", "2_aminopyridine"),
+        named("Nc1ncccn1", "2_aminopyrimidine"),
+        named("Nc1nccs1", "2_aminothiazole"),
+        named("NCc1ccccn1", "2_aminomethylpyridine"),
+    ]
+    report = lbvs.benchmark(
+        small_actives, decoys, methods=("overlay", "overlay_only", "crude", "crude_only"),
+        conformers=1, bootstrap=10, controls=(),
+    )
+    methods = [result.method for result in report.results]
+    assert methods == ["overlay_esp", "overlay_shape", "crude_esp", "crude_shape"]
+    for result in report.results:
+        assert 0.0 <= result.stats["auc"] <= 1.0
+    assert report.by_method()["overlay_esp"].ranking.details
+    # `shape` follows the engine flag; the default engine is the overlay.
+    default = lbvs.benchmark(
+        small_actives, decoys, methods=("shape",), conformers=1, bootstrap=5, controls=()
+    )
+    assert default.results[0].method == "overlay_esp"
+    flagged = lbvs.benchmark(
+        small_actives, decoys, methods=("shape",), shape_engine="crude",
+        conformers=1, bootstrap=5, controls=(),
+    )
+    assert flagged.results[0].method == "crude_esp"
+
+
+def test_the_prefilter_switches_between_the_2d_and_the_3d_filter(molecules, actives):
+    """``usr`` delegates to :func:`odock.overlay.usr_prefilter` and says more."""
+    fingerprint = lbvs.prefilter(molecules, actives, keep=0.5)
+    assert fingerprint["method"] == "fingerprint"
+    assert "overlay_seconds_kept" not in fingerprint
+    usr = lbvs.prefilter(molecules, actives, keep=0.5, method="usr", conformers=1)
+    assert usr["method"] == "usr"
+    assert usr["n_library"] == len(molecules)
+    assert usr["n_kept"] == fingerprint["n_kept"]
+    assert usr["self_match_recall"] == 1.0, "the leak is reported, not hidden"
+    assert usr["overlay_seconds_kept"] > 0.0
+    assert usr["overlay_seconds_full_estimate"] > usr["overlay_seconds_kept"]
+    with pytest.raises(ValueError, match="unknown pre-filter method"):
+        lbvs.prefilter(molecules, actives, method="nonsense")
+
+
+@pytest.mark.slow
+def test_the_duplicate_decoy_band_still_cannot_separate_the_two_engines(molecules, actives):
+    """The load-bearing negative result, pinned so it cannot quietly be claimed away.
+
+    Measured on the bundled easy band (5 actives, 25 decoys, 2 conformers,
+    leave-one-out): the *crude* grid overlay scores AUC 1.000 and the analytic
+    overlay 0.920, and the two bootstrap intervals overlap — [1.00, 1.00] against
+    [0.79, 1.00] — so this set cannot rank the engines, and the overlay does **not**
+    improve the enrichment numbers.  `docs/LBVS.md` says so next to the table.
+    """
+    from odock import decoys as D
+
+    if not POOL.exists():
+        pytest.skip("the bundled decoy pool is missing")
+    pool = []
+    for line in POOL.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        fields = line.split()
+        mol = Chem.MolFromSmiles(fields[0])
+        mol.SetProp("_Name", " ".join(fields[1:]))
+        pool.append(mol)
+    selection = D.match_decoys(actives, pool, per_active=5)
+    chosen = {name for name in selection.names()}
+    decoys = [mol for mol in pool if mol.GetProp("_Name") in chosen]
+    assert len(decoys) == 25
+    report = lbvs.benchmark(
+        actives, decoys, methods=("overlay", "crude"), conformers=2, bootstrap=50,
+        controls=(), decoy_quality=selection.quality(),
+    )
+    overlay = report.by_method()["overlay_esp"]
+    crude = report.by_method()["crude_esp"]
+    assert crude.stats["auc"] >= overlay.stats["auc"]
+    assert overlay.stats["auc"] >= 0.85, "the overlay is not broken, it is not better"
+    # The interval is the reason the default did not change on this evidence.
+    assert overlay.intervals["auc"][1] >= crude.intervals["auc"][0]
+    assert report.n_actives == 5 and report.n_decoys == 25
+
+
+@pytest.mark.slow
+def test_the_usr_prefilter_costs_active_recall_on_the_whole_library(molecules, actives):
+    """The 3-D pre-filter's measured price, on the 142-molecule library.
+
+    Keeping 5 % of the 142 molecules keeps 2 of the 5 actives (40 % recall) and cuts
+    the estimated docking workload 436 s -> 25 s (94 %).  That is the honest
+    characterisation of the speedup: a 3-D shape descriptor that ignores element
+    identity cannot tell the amidines from the pool's other flat aromatics, and the
+    2-D fingerprint filter keeps all five.  The self-match row is 5/5 for free.
+    """
+    if not POOL.exists():
+        pytest.skip("the bundled decoy pool is missing")
+    pool = []
+    for line in POOL.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        fields = line.split()
+        mol = Chem.MolFromSmiles(fields[0])
+        mol.SetProp("_Name", " ".join(fields[1:]))
+        pool.append(mol)
+    everything = list(molecules) + pool
+    assert len(everything) == 142
+    summary = lbvs.prefilter(everything, actives, keep=0.05, method="usr", conformers=4)
+    assert summary["n_library"] == 142
+    assert summary["n_kept"] == 8
+    assert summary["actives_kept"] == 2
+    assert summary["active_recall"] == pytest.approx(0.4)
+    assert summary["self_match_actives_kept"] == 5
+    assert summary["estimated_seconds_full"] == pytest.approx(436.0, abs=1.0)
+    assert summary["estimated_seconds_kept"] == pytest.approx(25.0, abs=1.0)
+    assert summary["workload_saved_fraction"] > 0.9
+    # The 2-D filter on the same library keeps every active at the same cut.
+    fingerprint = lbvs.prefilter(everything, actives, keep=0.05)
+    assert fingerprint["actives_kept"] == 5
+    assert fingerprint["active_recall"] == 1.0

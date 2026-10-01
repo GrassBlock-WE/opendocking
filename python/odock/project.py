@@ -202,12 +202,14 @@ RUN_LIMITS: Tuple[str, ...] = (
 )
 
 #: Absolute-path shapes that must never reach a published file.  The first is a
-#: Windows drive path, the second and third are POSIX home directories, and the
-#: last catches a UNC share.
+#: Windows drive path, the second a POSIX home directory, and the third a UNC
+#: share — which needs a *host* and a *share*, because two backslashes alone are
+#: how a SMILES string in Python source looks (``"\\c1ccc(O)cc1"``), and matching
+#: that produced 18 false "absolute path" hits in this tree's own release check.
 _ABSOLUTE_PATTERNS: Tuple[re.Pattern, ...] = (
     re.compile(r"[A-Za-z]:[\\/][^\s\"'|<>;,)]*"),
     re.compile(r"/(?:home|Users|root)/[^\s\"'|<>;,)]*"),
-    re.compile(r"\\\\[^\s\"'|<>;,)]*"),
+    re.compile(r"\\\\[A-Za-z0-9._$-]+\\[^\s\"'|<>;,)]+"),
 )
 
 
@@ -245,15 +247,22 @@ def portable_path(value: PathLike, *, base: Optional[PathLike] = None,
     The rules, in order:
 
     1. a relative path is returned as-is (with ``/`` separators);
-    2. a path inside `base` (the project's directory, or the working directory)
+    2. a path inside `base` (the project's directory) or the working directory
        becomes relative to it;
     3. a path inside the user's home becomes ``~/...``;
     4. anything else absolute is reduced to its **file name**.
 
-    Rule 4 is deliberate.  A shipped file once recorded the absolute checkout
-    path of the machine that produced it; a path that exists on one laptop is
-    not information, and keeping its tail would still publish a stranger's
-    directory layout.  The file name is what a reader can act on.
+    Rule 4 is deliberate, and its *choice of what to keep* is deliberate too.  A
+    shipped file once recorded the absolute checkout path of the machine that
+    produced it; a path that exists on one laptop is not information, and keeping
+    its tail would still publish a stranger's directory layout.  So the drive, the
+    user directory and every intermediate directory are dropped.
+
+    What is kept is the final component, **not** ``.``: the file name is the part
+    a reader can act on (``poses.pdbqt`` says what the file was), whereas replacing
+    a foreign path with ``.`` would silently claim the file lives inside the
+    project being read.  ``tests/test_project.py`` pins both halves of this: an
+    inside-the-checkout path becomes relative, a foreign one keeps only its name.
     """
     raw = os.fspath(value)
     if not raw:
@@ -304,6 +313,37 @@ def portable_path(value: PathLike, *, base: Optional[PathLike] = None,
     return path.name or _as_posix(raw)
 
 
+def _plausible_absolute_path(token: str, *, before: str = "") -> bool:
+    """Whether a regex match really looks like an absolute path.
+
+    Two false positives have to be rejected, and both were measured on this
+    project rather than imagined:
+
+    * the scan also runs over *serialised* documents (JSON, a whole notebook),
+      where a colon followed by a backslash is usually an escape —
+      ``"project:\\"`` and ``"note:\\n"`` both look like ``X:\\``;
+    * a URL contains a letter, a colon and two slashes: ``https://www.w3.org/2000/svg``
+      contains ``p://www.w3.org/2000/svg``, which the naive pattern reads as drive
+      ``p:``.  A drive path never has two separators after the colon, and it never
+      starts in the middle of a word (``http`` ends in ``p``), so both are checked.
+
+    `before` is the character immediately preceding the match, which is how the
+    mid-word case is caught.
+    """
+    if before and (before.isalnum() or before == "_"):
+        return False
+    text = token.rstrip(".,;:")
+    match = re.match(r"^([A-Za-z]):([\\/])(.*)$", text)
+    if match:
+        rest = match.group(3)
+        if len(rest) < 2 or rest in ("n", "t", "r"):
+            return False
+        if rest.startswith(("\\", "/")):  # `X://…` is a URL scheme, not a drive
+            return False
+        return True
+    return True
+
+
 def find_absolute_paths(text: str) -> List[str]:
     """Every absolute-path-looking token in `text` (for tests and guards)."""
     if not isinstance(text, str):
@@ -312,7 +352,8 @@ def find_absolute_paths(text: str) -> List[str]:
     for pattern in _ABSOLUTE_PATTERNS:
         for match in pattern.finditer(text):
             token = match.group(0).rstrip(".,;:")
-            if token and token not in found:
+            before = text[match.start() - 1] if match.start() > 0 else ""
+            if token and token not in found and _plausible_absolute_path(token, before=before):
                 found.append(token)
     return found
 
@@ -331,6 +372,9 @@ def redact_paths(text: str, *, base: Optional[PathLike] = None) -> str:
             # A sentence-ending period is punctuation, not part of the file name.
             stripped = token.rstrip(".,;:")
             trailing = token[len(stripped):]
+            before = out[match.start() - 1] if match.start() > 0 else ""
+            if not _plausible_absolute_path(stripped, before=before):
+                continue
             replacement = portable_path(stripped, base=base) + trailing
             out = out[: match.start()] + replacement + out[match.end():]
     return out
@@ -1099,6 +1143,24 @@ class Project:
         return dict(block) if isinstance(block, Mapping) else {}
 
     @property
+    def audit(self) -> Dict[str, Any]:
+        """Who wrote this project, with what, and when.
+
+        Falls back to the fields a schema-2 manifest carries separately, so the
+        accessor works on every version this build can read.
+        """
+        block = self.manifest.get("audit")
+        found = dict(block) if isinstance(block, Mapping) else {}
+        tool = self.tool
+        found.setdefault("tool_version", tool.get("version"))
+        found.setdefault("kernel_version", tool.get("kernel_version"))
+        found.setdefault("python", tool.get("python"))
+        found.setdefault("platform", tool.get("platform"))
+        found.setdefault("created_utc", self.created)
+        found.setdefault("operator", None)
+        return found
+
+    @property
     def warnings(self) -> List[str]:
         items = self.manifest.get("warnings")
         return [str(item) for item in items] if isinstance(items, list) else []
@@ -1438,6 +1500,7 @@ class Project:
             "schema_note": self.version_note,
             "min_reader_version": self.manifest.get("min_reader_version"),
             "tool": self.tool,
+            "audit": self.audit,
             "created_utc": self.created,
             "title": self.title,
             "kind": run.get("kind"),
@@ -1474,6 +1537,7 @@ class Project:
             f"  tool        : opendocking {self.tool.get('version', '?')} "
             f"(kernel {self.tool.get('kernel_version', '?')}, "
             f"{self.tool.get('platform', '?')})",
+            f"  operator    : {_shown(self.audit.get('operator'))}",
             f"  run         : {run.get('kind', '?')}, {info['n_pose_rows']} pose(s), "
             f"best {run.get('best_affinity', '?')} kcal/mol",
             f"  scoring     : {engine.get('scoring', '?')}, "
@@ -1973,6 +2037,7 @@ def save_project(
     seed: Optional[int] = None,
     scoring: Optional[str] = None,
     title: Optional[str] = None,
+    operator: Optional[str] = None,
     notes: Optional[Sequence[str]] = None,
     created: Optional[str] = None,
     strain: bool = False,
@@ -2020,6 +2085,11 @@ def save_project(
         Provenance: which screening campaign a member came from, the exact
         command, an override for the seed or the force field, a title, extra
         notes, and a fixed creation time (which makes a save reproducible).
+    operator
+        Who ran it.  Recorded in the manifest's ``audit`` block together with the
+        tool version and the creation time, so a directory of projects can be
+        attributed without guessing from file ownership.  Free text: a name, an
+        initials, a lab, whatever the reader will recognise.
     strain
         Also compute the opt-in per-pose ligand strain.
     verify
@@ -2412,6 +2482,16 @@ def save_project(
             "python": platform.python_version(),
             "platform": _platform_label(),
         },
+        # The flat block a directory scan reads: who, with what, when.  The same
+        # values as `tool` and `created_utc`, gathered where an audit looks.
+        "audit": {
+            "operator": (str(operator) if operator else None),
+            "tool_version": tool_version(),
+            "kernel_version": _kernel_version(),
+            "python": platform.python_version(),
+            "platform": _platform_label(),
+            "created_utc": str(created or _now()),
+        },
         "run": run_block,
         "engine": engine_block,
         "box": box_spec.as_dict(),
@@ -2508,6 +2588,7 @@ def save_screen_projects(
     receptor: Optional[str] = None,
     only_ok: bool = True,
     figures: bool = False,
+    operator: Optional[str] = None,
 ) -> List[Project]:
     """Turn the docked molecules of a screening campaign into projects.
 
@@ -2635,6 +2716,7 @@ def save_screen_projects(
             campaign=campaign,
             command=campaign["command"],
             title=f"{label} ({receptor_name})",
+            operator=operator,
             notes=[
                 f"screening campaign member {position + 1} of {len(records)}; "
                 "the campaign settings are recorded under `campaign`",
@@ -3137,6 +3219,7 @@ def _finish_reproduction(
             box=loaded.box(),
             engine=outcome.settings_used,
             title=f"reproduction of {loaded.title}",
+            operator=loaded.audit.get("operator"),
             notes=notes,
             campaign={
                 "kind": "reproduction",
@@ -3798,6 +3881,7 @@ def cmd_project_save(args) -> int:
             preparation=preparation,
             command=command,
             title=args.title,
+            operator=args.operator,
             notes=args.note,
             strain=bool(args.strain),
         )
@@ -3902,6 +3986,7 @@ def cmd_project_screen(args) -> int:
             top=int(args.top or 0),
             receptor=args.receptor,
             only_ok=not args.all,
+            operator=args.operator,
         )
     except ProjectError as exc:
         _cli_err(f"odock project screen: error: {exc}")
@@ -3997,6 +4082,10 @@ def add_project_parser(sub) -> None:
     save.add_argument("--strain", action="store_true", help="also compute the ligand strain")
     save.add_argument("--command", help="the exact command to record (default: this one)")
     save.add_argument("--title", help="a human title for the run")
+    save.add_argument(
+        "--operator",
+        help="who ran it, recorded in the manifest's audit block (free text)",
+    )
     save.add_argument("--note", action="append", help="a free-text note (repeatable)")
     save.add_argument("--json", action="store_true", help="print the project info as JSON")
     save.add_argument("-q", "--quiet", action="store_true", help="no summary")
@@ -4067,9 +4156,19 @@ def add_project_parser(sub) -> None:
     screen.add_argument("--receptor", help="restrict to one receptor of a panel")
     screen.add_argument("--all", action="store_true",
                         help="include the rows whose status is not 'ok'")
+    screen.add_argument(
+        "--operator", help="who ran the campaign, recorded in each member's audit block"
+    )
     screen.add_argument("--json", action="store_true", help="print the result as JSON")
     screen.add_argument("-q", "--quiet", action="store_true", help="no per-file listing")
     screen.set_defaults(func=cmd_project_screen)
+
+    # `odock project notebook` lives in odock.notebook (it owns the nbformat
+    # document); imported here so a broken notebook module costs only that one
+    # sub-action.
+    from .notebook import add_notebook_parser
+
+    add_notebook_parser(actions)
 
     reproduce = actions.add_parser(
         "reproduce",

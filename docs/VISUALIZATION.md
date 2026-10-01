@@ -97,24 +97,76 @@ the reentrant patches, where "point away from the nearest atom" is visibly
 wrong. A test asserts every normal points away from the atom the vertex
 belongs to.
 
-### 1.3 Cost at 2 000 atoms, and how the window stays alive
+### 1.3 The default spacing, chosen from a convergence table
 
-Measured on the bundled 3PTB receptor (**1 994 atoms**) with the project's
-interpreter, on this machine:
+The mesh is a triangulated isosurface, so its area sits *under* the analytic
+Shrake–Rupley integral and closes as the grid is refined. That gap is the honest
+cost of the representation, so the default is chosen from the measurement rather
+than from convenience. `tools/surface_convergence.py` builds the bundled 3PTB
+receptor (**1 994 atoms**) at every setting:
+
+| spacing Å | grid points | triangles | area Å² | error vs SR | wall time |
+|---|---|---|---|---|---|
+| 1.20 | 105 092 | 52 152 | 8 473.2 | −8.64 % | 2.21 s |
+| 1.00 | 173 600 | 76 600 | 8 588.5 | −7.40 % | 3.49 s |
+| 0.80 | 315 248 | 121 592 | 8 705.5 | −6.14 % | 5.49 s |
+| **0.65 (default)** | 565 064 | 186 652 | 8 804.5 | **−5.07 %** | **9.21 s** |
+| 0.50 | 1 188 260 | 319 624 | 8 902.0 | −4.02 % | 20.54 s |
+| 0.40 | 2 237 742 | 503 848 | 8 974.2 | −3.24 % | 24.37 s |
+
+(the reference is the analytic SASA of the same atoms, **9 274.9 Å²**; the
+automatic setting, `spacing = 0`, picks 0.63 Å from the point budget for this
+receptor and lands at −5.04 % in 9.5 s.)
+
+**0.65 Å is the knee of that table**: the largest accuracy step short of the
+0.50 Å setting, which costs 2.2× the time and 1.7× the triangles for one more
+point of error. The default therefore changed from 0.8 Å to 0.65 Å, and the
+price is stated: on this receptor a full-receptor build went from 5.5 s / 122 k
+triangles / −6.1 % to **9.2 s / 187 k triangles / −5.1 %**. 0.8 Å remains the
+quick-look setting, and 0.4 Å is available when the area itself is the point.
+
+The residual several-per-cent deficit does not vanish quickly because it is not
+faceting: a single sphere converges to −0.27 % at 0.4 Å, while a protein keeps
+losing area in the *crevices* between atoms, where the field has ridges that a
+linear interpolant rounds off. `docs` and the code both say so rather than
+implying the mesh area is the SASA.
+
+The same table for the **SES** reports a *ratio*, not an error — the SES has no
+analytic reference in this project (MSMS is not available offline), and it is
+genuinely smaller than the SAS by construction:
+
+| spacing Å | grid points | triangles | area Å² | SES/SAS | wall time |
+|---|---|---|---|---|---|
+| 1.20 | 105 092 | 43 836 | 6 989.8 | 75.4 % | 7.4 s |
+| 1.00 | 173 600 | 65 876 | 7 329.0 | 79.0 % | 7.0 s |
+| 0.80 | 315 248 | 105 108 | 7 473.2 | 80.6 % | 13.7 s |
+| 0.65 (default) | 565 064 | 164 640 | 7 765.6 | 83.7 % | 13.4 s |
+| 0.50 | 1 188 260 | 287 176 | 8 030.8 | 86.6 % | 21.8 s |
+| 0.40 | 2 237 742 | 462 560 | 8 303.2 | 89.5 % | 30.5 s |
+
+The ratio is still moving at 0.4 Å, so an SES area should be read as a *rendered*
+quantity, not a measured one — which is exactly why `Surface.stats` reports the
+analytic SAS alongside it and why §3 measures areas with `odock.sasa` instead.
+
+### 1.4 Cost at 2 000 atoms, and how the window stays alive
+
+Measured on the same receptor, at the settings a user actually picks:
 
 | build | grid spacing | grid points | triangles | area | wall time |
 |---|---|---|---|---|---|
-| whole receptor, SAS, automatic spacing | 0.61 Å | 607 240 | 197 340 | 8 807 Å² | **10.6 s** |
-| whole receptor, SAS, 0.8 Å | 0.80 Å | 315 248 | 121 592 | 8 705 Å² | **4.3 s** |
-| whole receptor, SES, 0.8 Å | 0.80 Å | 315 248 | 105 108 | 7 473 Å² | **12.6 s** |
+| whole receptor, SAS, default | 0.65 Å | 565 064 | 186 652 | 8 805 Å² | **9.2 s** |
+| whole receptor, SAS, quick look | 0.80 Å | 315 248 | 121 592 | 8 705 Å² | **5.5 s** |
+| whole receptor, SAS, automatic | 0.63 Å | 607 240 | 197 340 | 8 807 Å² | **9.5 s** |
+| whole receptor, SES, default | 0.65 Å | 565 064 | 164 640 | 7 766 Å² | **13.4 s** |
 | pocket (277 atoms within 11 Å), SAS, 0.45 Å | 0.45 Å | 248 292 | 104 016 | 2 351 Å² | **4.1 s** |
 | pocket (277 atoms), SES, 0.45 Å | 0.45 Å | 248 292 | 84 416 | 1 928 Å² | **3.9 s** |
-| pocket lining (123 atoms within 8 Å), SES, 0.4 Å | 0.40 Å | 162 792 | 56 772 | 1 020 Å² | **2.9 s** |
+| pocket lining (126 atoms within 8 Å), SES, 0.4 Å | 0.40 Å | 162 792 | 56 772 | 1 020 Å² | **2.9 s** |
 
 The numbers are printed by the workbench itself (View ▸ Surface ▸ Surface
 statistics, and every build logs them): `Surface.stats` carries the atom count,
 the grid shape and point count, the spacing, the triangle count, the area, the
-analytic SAS reference for an SES build, and the wall time.
+enclosed volume and whether the mesh is closed, the analytic SAS reference for
+an SES build, the lid triangles of a capped mesh, and the wall time.
 
 Three decisions keep that affordable and the interface responsive:
 
@@ -195,6 +247,62 @@ screening (`κ = 0.104·√I` in 1/Å at 298 K) is optional.
 
 This is a *picture* of the field, not the scoring function, and the legend says
 so: it carries the unit (kcal/(mol·e)) and the exact range that was used.
+
+**The dielectric is a control, not a hidden constant.** View ▸ Surface ▸
+Dielectric switches between
+
+* **`ε = 4r`** (default) — the AutoDock 4 distance-dependent convention, i.e.
+  the screening the scoring kernel itself uses, and much the better contrasted
+  picture on a protein surface;
+* **`ε = 4`** — a constant dielectric, the unscreened local field.
+
+Both are the same Coulomb sum with a different ε, and both are documented at
+their definition. On the 3PTB S1 pocket the two differ by an order of magnitude
+in absolute value (site-centre potential −24.5 vs −274.0 kcal/(mol·e)) while
+ranking the same residues first, which is the honest way to read them: the
+*ranking* is robust, the *number* is model-dependent.
+
+### Which residues make the pocket electropositive
+
+The potential at a point is a **sum over atoms**, so it splits exactly:
+View ▸ Surface ▸ *Potential breakdown…* evaluates each residue's own
+contribution — no approximation is involved in asking who is responsible.
+
+`tools/potential_breakdown.py` on the 3PTB S1 pocket, `ε = 4r`, site centre at
+(−1.96, 14.12, 16.31), 2 004 of 108 168 surface points sampled:
+
+| residue | atoms | Σq | at the site | share | mean over the surface |
+|---|---|---|---|---|---|
+| A/ASP189 | 9 | −0.44 | **−1.61** | 6.6 % | −0.46 |
+| A/SER190 | 8 | −0.19 | −1.15 | 4.7 % | −0.20 |
+| A/GLY219 | 5 | −0.12 | −0.81 | 3.3 % | −0.12 |
+| A/GLN192 | 12 | −0.20 | −0.76 | 3.1 % | −0.21 |
+| A/TRP215 | 16 | −0.47 | −0.75 | 3.1 % | −0.45 |
+| A/GLY216 | 5 | −0.12 | −0.72 | 2.9 % | −0.14 |
+| A/TYR228 | 14 | −0.39 | −0.62 | 2.5 % | −0.42 |
+| A/CYS191 | 7 | −0.15 | −0.55 | 2.3 % | −0.14 |
+
+ASP189 — the residue that gives trypsin's S1 pocket its specificity for basic
+ligands — is the largest single contributor at the site, and the rest of the
+list is the S1 lining. The *mean over the whole surface* column is much less
+discriminating (every residue looks similar), which is why the site value is the
+headline number: a mean over a pocket dilutes exactly the residue you are
+looking for.
+
+**What this is not, and what it costs in interpretation.** It is a point-charge
+Coulomb sum with a stated dielectric: no Poisson–Boltzmann solution, no
+dielectric boundary, no ionic atmosphere beyond the optional Debye term, and no
+polarisation. The decomposition is exact *for that model*. And the model is only
+as good as the charge column it reads — the dialog prints the diagnostic:
+
+> charge column: 1866 of 1994 atoms non-zero, sum **−48.5 e**
+
+A 1 994-atom protein is not −48.5 electrons. The bundled demo receptor carries
+the project's default hydrogen-suppressed Gasteiger column, which is
+backbone-dominated and non-conserving, so **the map is relative, not
+absolute** — it is good for "which part of this pocket is negative compared with
+which other part", and a caller who needs a defensible ESP must supply a
+properly parameterised charge set. The dialog says this in the same words.
 
 ### Element
 
@@ -296,6 +404,46 @@ contact is local by construction, so a sphere that contains the contact gives
 the same answer, and a test asserts the shell and the whole protein agree
 exactly.
 
+### 3.1 Is the pocket-lining surface open, and how big is it?
+
+"Pocket lining only" builds from a subset of atoms, and the question is whether
+that leaves an open cut sheet with a rim. It does not, and the reason is
+structural rather than incidental: the zero level of the field over a subset of
+atoms is the boundary of a **union of balls**, which is a closed set with a
+closed boundary. `tools/pocket_closure.py` measures it rather than asserting it:
+
+| build | atoms | triangles | area Å² | boundary loops | closed | volume Å³ |
+|---|---|---|---|---|---|---|
+| whole receptor SAS | 1 994 | 186 652 | 8 804.6 | **0** | yes | 15 420.3 |
+| pocket lining SAS, r = 11 Å | 277 | 48 644 | 2 308.1 | **0** | yes | 3 125.7 |
+| pocket lining SAS, r = 8 Å | 126 | 28 628 | 1 355.6 | **0** | yes | 1 790.0 |
+| pocket lining SES, r = 8 Å | 126 | 21 156 | 1 009.1 | **0** | yes | 1 185.3 |
+
+So for the same region the lining is 26 % of the whole receptor's area at
+r = 11 Å and 15 % at r = 8 Å, and the closed form has a **volume**: 3 125.7 Å³
+for the r = 11 Å lining against 15 420.3 Å³ for the whole receptor (all at the
+default spacing). The lining of a pocket is a thin curved slab, so that volume
+is the slab's — the *cavity* the ligand sits in is a different quantity and is
+not claimed here.
+
+What *does* need closing is a mesh that was **cut** — by the clip plane, or by
+keeping only the triangles near a site — because a hole has no inside and
+therefore no volume. `SurfaceSettings.close_rim` adds flat lid triangles over
+every boundary loop (found by welding coincident vertices and counting edges
+used by exactly one triangle), drawn in a neutral grey, counted separately in
+`Surface.stats` as `cap_triangles`/`cap_area` and excluded from the reported
+surface area, so a capped figure still reports the surface it is a figure *of*.
+`Surface.volume` returns `None` for an open mesh rather than a number for a
+shape that has no inside.
+
+Volume is measured by the divergence theorem, which needs one consistent
+outside, so the builder re-winds every triangle against the field-gradient
+normals (`orient_mesh`). That is also what makes the exported OBJ a well-formed
+surface for another program. The closed forms check it: a hand-built cube gives
+exactly 8.0 Å³, a single atom's SAS sphere gives 123.2 Å³ against an exact
+124.8 Å³, and two contacting spheres give 206.4 Å³ against an analytic union of
+208.3 Å³.
+
 ---
 
 ## 4. Interop: the result into somebody else's tool
@@ -344,7 +492,57 @@ the right numbers, which is the one error a picture cannot show you.
 
 ---
 
-## 5. Using it
+## 5. Interaction dashes: the "many white lines" report
+
+A user reported "many white lines after docking" they could not identify, and
+asked whether bonds were being drawn to the wrong atoms. The answer, measured by
+ablation (re-render with one draw pass replaced by a no-op and count the
+changed pixels) is neither: the lines are the **contact annotations**, the
+geometry is correct, and the defect was **legibility**. On a 900×700 frame of the
+docked 3PTB pose:
+
+| pass | pixels it owns |
+|---|---|
+| the whole interaction pass | 23 966 px |
+| the hydrophobic contacts alone | 17 473 px |
+| the receptor/ligand mesh (control) | 234 925 px |
+
+The cause was the hydrophobic swatch: `(0.62, 0.64, 0.68)` — luminance 0.64
+against a canvas of 0.09, and a chroma of 0.06, i.e. **grey**. The mesh shader
+lights a fragment as `colour·(0.34 + 0.72·d) + d²⁴·0.28 + rim`, so an achromatic
+pale swatch reaches the top of the range on its lit side: which is why the
+contacts read as stray white strokes. Two changes, both in
+`odock/gui/viewport.py`:
+
+* the swatch is now a **muted olive** `(0.56, 0.58, 0.44, 0.90)` — luminance
+  0.565, chroma 0.141, and legible against *both* viewport backgrounds (the dark
+  canvas 0.086/0.094/0.125 and the light one 0.784/0.804/0.831);
+* every dash now carries a **dark under-stroke**: a 1.9× fatter cylinder of
+  `(0.05, 0.06, 0.09)` pushed away from the camera along its own view direction
+  by exactly the radius difference (plus 4 mÅ), so the coloured core always wins
+  the depth test and only the rim survives. That generalises the fix past this
+  one colour: no contact can read as a bare white line on either background, and
+  a pale contact on the light canvas gets the dark edge it needs to be visible.
+
+Measured on the same frame, over exactly the pixels the swatch governs
+(8 540 px), old swatch → new:
+
+| quantity | before | after |
+|---|---|---|
+| pixels reading light (luminance ≥ 0.55) | 1 320 | **122** (10.8× fewer) |
+| median / 99th-percentile luminance | 0.438 / 0.638 | 0.411 / 0.555 |
+| contrast to the light canvas | 0.16 | **0.25** |
+| swatch chroma | 0.059 | **0.141** |
+
+`tools/measure_interactions.py` reproduces the table and writes the before/after
+frames; `tests/test_viewport_interactions.py` pins the contract (both
+backgrounds, mutual distinguishability of the six kinds, the geometry of the
+under-stroke, and a rendered before/after pixel count), and
+`tests/test_interop.py` asserts the exported scripts carry the *same* colours.
+
+---
+
+## 6. Using it
 
 **View ▸ Surface**
 
@@ -354,6 +552,8 @@ the right numbers, which is the one error a picture cannot show you.
 | Rebuild surface | rebuilds from the current settings (worker thread) |
 | Surface type ▸ SAS / SES | probe-centre surface, or the molecular surface |
 | Colour by ▸ hydrophobicity / potential / element | rebuilds with that property |
+| Dielectric ▸ Distance (ε=4r) / Uniform (ε=4) | which screening the potential uses; rebuilds |
+| Potential breakdown… | each residue's own contribution to the potential at the site, plus the charge-column diagnostic |
 | Colour range… | `low, high`, or `0` for automatic |
 | Opacity… | 0.05–1.0; below 1.0 the surface blends without writing depth, so a ligand inside the pocket shows through the wall |
 | Pocket lining only | builds from the atoms within 9 Å of the ligand (or the box) |
@@ -361,8 +561,8 @@ the right numbers, which is the one error a picture cannot show you.
 | Cut in front of site | a world-fixed clipping plane through the camera direction, placed 0.5 Å in front of the ligand's frontmost atom |
 | Cut through the site | the same plane through the ligand's centroid |
 | Remove the cut | clears it |
-| Surface statistics | the measured cost of the last build |
-| Colour bar | shows/hides the legend |
+| Surface statistics | the measured cost of the last build, whether the mesh is closed, and the volume it encloses |
+| Colour bar | shows/hides the legend, including the charge caveat when there is one |
 
 The clipping plane is **fixed in the model**, unlike the camera-space front
 clip: two poses of the same protein are cut identically, which is what makes two
@@ -446,7 +646,24 @@ surface (figure 06) hides it.
 * The **SAS mesh area is a few per cent below the analytic Shrake–Rupley
   area** at the default spacing, because a triangulated isosurface inscribes
   the true surface. The gap is measured, printed in the statistics and falls as
-  the grid is refined; it is not asserted away.
+  the grid is refined; it is not asserted away. §1.3 is the table.
+* The **SES area is a rendered quantity**, not a measured one: its ratio to the
+  SAS is still moving at 0.4 Å (75 % → 90 % across the table) and there is no
+  analytic SES reference in this project. Use `odock.sasa` when an area is the
+  point.
+* **An electrostatic map is only as good as its charge column, and the column
+  can lie in two detectable ways** — it may not carry a group's formal charge
+  (Gasteiger gives benzamidine's formally cationic amidine nitrogens **−0.31 e
+  each**), and it may not conserve charge at all (the bundled demo receptor sums
+  to **−48.5 e** over 1 994 atoms). `odock.gui.surface.charge_caveat` runs
+  `odock.protonation.detect_groups`/`salt_bridge_warnings` — imported, not
+  re-implemented — and the workbench prints the caveat in the log and under the
+  legend title. A map that may be wrong-signed is labelled as such rather than
+  left looking like an answer.
+* The **pocket-lining mode is a closed shell around the lining atoms**, not an
+  open cut sheet (measured: zero boundary loops), so its volume is the thin
+  slab's and *not* the cavity's. The cavity volume is a different quantity and
+  is not claimed here.
 * The **surface is built from the atoms it is handed**, so a structure whose
   atom order changed between preparation and display would be painted wrongly.
   Every path that maps vertices back to atoms goes through

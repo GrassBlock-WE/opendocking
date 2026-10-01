@@ -1,0 +1,50 @@
+# Multi-target actives for the enriched ligand-based benchmark (docs/LBVS.md).
+#
+# Every molecule here is an *active* because it is documented to be one, not
+# because a model said so:
+#
+#   * `trypsin`     — benzamidine is the co-crystallised ligand of 3PTB (code BEN),
+#                     and the four substituted analogues plus benzylamidine are
+#                     the congeneric series demo/library.smi ships as a
+#                     structure-activity set;
+#   * `eralpha`     — 4-hydroxytamoxifen (OHT) and estradiol (EST) are the
+#                     co-crystallised ligands of 3ERT and 1ERE_A;
+#   * `hiv_protease`— XK263 (XK2) is the co-crystallised ligand of 1HVR;
+#   * `egfr`        — erlotinib (AQ4) is the co-crystallised ligand of 1M17;
+#   * `streptavidin`— biotin (BTN) is the co-crystallised ligand of 1STP.
+#
+# The four ligands whose structure file is bundled in tests/data are written out
+# from that file (tests/data/BTN.sdf, EST.sdf, OHT.sdf, XK2.sdf).  Erlotinib has no
+# bundled file, so it is written from the published structure and checked in
+# tests/test_lbvs.py against its molecular formula (C22H23N3O4) and the 29 heavy
+# atoms the 1M17 file actually contains.  Two ligands were deliberately left out:
+#
+#   * ritonavir, the co-crystallised ligand of 1HXW (RIT): a hand-written SMILES
+#     did not reproduce C37H48N6O5S2, and deriving the bond orders from the
+#     coordinates fails on every ligand in tests/data ("final molecular charge does
+#     not match"), so it is excluded rather than guessed at;
+#   * the second ligand of 1HVR and 1ERE_A, which are the same molecule in another
+#     copy of the asymmetric unit rather than a different active.
+#
+# A target needs at least two actives for a leave-one-out benchmark to score it at
+# all: with one active there is no reference left once the active is removed, which
+# is why `streptavidin` and `egfr` appear here and cannot be benchmarked.
+#
+# `trypsin` is deliberately the **five ring-amidines** and not the six amidines of
+# demo/library.smi: benzylamidine is a series member rather than a co-crystallised
+# ligand, and adding it was measured to *cost* power rather than add it (the pooled
+# minimal detectable difference goes from 0.174 to 0.354 AUC, because the extra
+# active is neither property-matched by the pool nor ranked consistently by the
+# methods).  The measurement is in docs/LBVS.md §9.
+#
+# SMILES name target
+c1ccc(cc1)C(=N)N                benzamidine             trypsin
+c1ccc(cc1)C(=N)NC               benzamidine_methyl      trypsin
+N=C(N)c1ccc(O)cc1               hydroxybenzamidine      trypsin
+N=C(N)c1ccc(F)cc1               fluorobenzamidine       trypsin
+N=C(N)c1ccccc1Cl                chloro_benzamidine      trypsin
+C[C@]12CC[C@@H]3c4ccc(O)cc4CC[C@H]3[C@@H]1CC[C@@H]2O  estradiol  eralpha
+CC/C(=C(\c1ccc(O)cc1)c1ccc(OCCN(C)C)cc1)c1ccccc1      OHT        eralpha
+O=C1N(Cc2ccc3ccccc3c2)[C@H](Cc2ccccc2)[C@H](O)[C@@H](O)[C@@H](Cc2ccccc2)N1Cc1ccc2ccccc2c1  XK263  hiv_protease
+C#Cc1cccc(Nc2ncnc3cc(OCCOC)c(OCCOC)cc23)c1            erlotinib  egfr
+O=C(O)CCCC[C@@H]1SC[C@@H]2NC(=O)N[C@@H]21              biotin     streptavidin

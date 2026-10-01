@@ -904,7 +904,16 @@ class PocketTrack:
 
     @property
     def cryptic(self) -> bool:
-        """Transient, or absent from the reference, and passing the checks."""
+        """Transient (or absent from the reference) **and** genuinely closed.
+
+        A cavity that is only *narrowed* -- the site still holds free volume where
+        it was not found -- is reported as its own verdict and not as a cryptic
+        site: "the pocket is gone" and "the pocket got smaller" are different
+        claims, and only the first is what a cryptic site means.  A
+        :attr:`presence_artefact` is excluded earlier, in :attr:`confident`.
+        """
+        if self.narrowed:
+            return False
         return bool(self.confident and (self.transient or self.absent_from_reference))
 
     @property

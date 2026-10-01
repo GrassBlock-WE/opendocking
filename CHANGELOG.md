@@ -4,6 +4,56 @@ All notable changes to OpenDocking are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.2.2 — 2026-10-01
+
+A patch release whose main purpose is to remove files that should never have
+been published.
+
+### Fixed
+
+* **Interaction lines were drawn to the wrong endpoint.** A dash segment is
+  `(pos_a, rgba, pos_b, rgba)` — fourteen floats — so the second position starts
+  at index **7**; the tube builder read index **6**, i.e. `(alpha, y_b, z_b)`.
+  Every contact was therefore swept from a real atom to a nonsense point, so a
+  2.8 Å contact was drawn **14–21 Å long** and read as an interaction acting
+  across the protein. Every swept tube is now at most `DASH_LENGTH` (0.45 Å) and
+  lies on the line between the two named atoms to within 0.05 Å. The reported
+  distances were always correct, which is why an earlier check of the
+  interaction *rows* could not see this: **verifying the data is not verifying
+  the pixels.**
+* **Hiding the receptor left lines pointing at nothing.** `_draw_interactions`
+  read `scene.receptor` without consulting `show_receptor`, and the
+  interaction-focus pass drew its ball-and-stick mesh without the visibility
+  check its sphere half already had. Both now respect it: a hidden receptor
+  draws no contacts and no emphasis (24 046 px → 0 px).
+* **The search box was the same colour as a hydrogen bond** — RGB distance
+  **0.112**, indistinguishable by eye. The box is now teal (0.15, 0.55, 0.55),
+  ≥ 0.415 from every interaction colour.
+* **Four Chrome profile directories reached the published repository**
+  (`odock-chrome-*`, each with `metadata`, `settings.dat`,
+  `CrashpadMetrics-active.pma`). They were left behind by the Chrome-based PDF
+  attempt, which correctly reported that no PDF was produced but wrote its
+  profile into the working directory — because the environment temp directory is
+  not writable, so it fell back to the checkout. They are deleted here and the
+  family is now denied in every rule that decides what ships.
+* Contact dashes are drawn longer (33 segments → 20 for the same five contacts)
+  and every interaction now has an endpoint marker at each atom it names, so a
+  line visibly lands on something instead of disappearing behind the ribbon.
+
+### Added
+
+* `odock docs` — a self-contained documentation site built from the published
+  markdown, with a search index, a rendered-link guard, and a generator that
+  reads the source with `ast` rather than importing it.
+* `odock tutorial` — the whole toolchain on the bundled data in one runnable
+  command, with the numbers it measured printed inline.
+* `odock release` — prepare / stage / check / notes / publish, encoding the
+  failures that were previously made by hand.
+
+### Changed
+
+* Every new documentation page is part of the site's set-equality check, so a
+  module or document cannot be missing from it silently.
 ## 0.2.1 — 2026-10-01
 
 The ligand side of the science, ensembles instead of one rigid structure, runs
@@ -268,7 +318,7 @@ a pure-Rust kernel, with a Python API, a command line and a 3-D workbench.
 
 ### Known limitations
 
-Recorded in full in [`docs/VALIDATION.md`](docs/VALIDATION.md#6-what-is-not-validated).
+Recorded in full in [`docs/VALIDATION.md`](docs/VALIDATION.md#7-what-is-not-validated).
 In short: the search is rigid-receptor (a flexible-residue PDBQT can be written,
 but the kernel's receptor reader folds it back to rigid and says so); the
 Kollman charge model is the united-atom scheme, not the AMBER residue tables;

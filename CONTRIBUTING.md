@@ -153,6 +153,16 @@ tools/                maintenance scripts (e.g. tools/inspect_dist.py)
   The suite has several that were written from a real failure (a `SIGKILL`
   mid-campaign, a results file from another receptor, a changed seed on resume);
   they run the real command, in a real subprocess where that is what it takes.
+* **Check where your temporary files land.** If `TMPDIR`/`TEMP`/`TMP` is not
+  writable, `tempfile` falls back to the working directory and every test's
+  `tmp_path` (and every `tempfile` call in the code under test) lands in the
+  repository root as `tmp*`. That put **165 directories and 48 files** in the root
+  once, and 42 of them reached a release snapshot. Run pytest with
+  `--basetemp .pytest-tmp` (or set `TMPDIR` to a writable directory), and if you
+  see `tmp*` entries appear, `odock doctor` names the cause:
+  `python -m odock.cli doctor --only-temp` style output is in `docs/DOCTOR.md`.
+  `odock release stage` refuses to build a release while any `tmp*` entry exists,
+  so this cannot ship by accident.
 
 ## 6. Style
 
@@ -249,21 +259,51 @@ than disabling the check.
 
 ## 9. Releases (maintainers)
 
+The procedure is `odock release`, in five steps. It replaces a hand-written
+checklist whose gaps cost real time: a hand-made exclude list that let 42 `tmp*`
+files into a snapshot, a release body written with a byte-order mark that GitHub
+silently rejected, and a stale commit-message file that titled the 0.2.1 commit
+"OpenDocking 0.2.0". Each of those is now a refusal. `docs/RELEASE.md` is the
+reference — what every check does, and what it cannot tell you.
+
 ```bash
-# 1. Everything green on a clean checkout
-make test && make test-slow && make lint && make rust-test
+# 0. Write the changelog section first: `prepare`, `publish` and `notes` all
+#    refuse a version without one, and it is the release body.
+#    CHANGELOG.md -> "## 0.2.2 — <date>" with what changed.
 
-# 2. The accuracy gate
-make bench
+# 1. Bump the version everywhere it lives (pyproject.toml [project],
+#    Cargo.toml [workspace.package], every path pin on a workspace member).
+#    A patch bump is the default; a minor release needs --minor, so 0.3.0
+#    cannot be reached by accident. --dry-run reports without writing.
+odock release prepare 0.2.2
 
-# 3. The artefacts, inspected
-make wheel && make sdist
+# 2. Build the published set from the working tree. It uses the repository's own
+#    .gitignore, so no exclude list is maintained by hand, and it refuses while
+#    any stray tmp* entry is in the root (see §5).
+odock release stage ../opendocking-0.2.2
 
-# 4. Tag; the Wheels workflow builds Windows, Linux and macOS and smoke-tests
-#    the first two from a clean environment.
-git tag -a v0.1.0 -m "OpenDocking 0.1.0"
-git push origin v0.1.0
+# 3. Every gate in one place, each with its measured result: the content rules,
+#    out/verify/release_check.py, tools/inspect_dist.py --self-test,
+#    `odock doctor --strict`, the benchmark baseline check and the test suite.
+#    Non-zero if any gate fails. --quick validates the baseline instead of
+#    re-docking (19 minutes) and skips the slow tests.
+odock release check -o out/release-check.json
+
+# 4. The release body, extracted from CHANGELOG.md as a BOM-free JSON body.
+odock release notes 0.2.2
+
+# 5. Commit the bump, tag, publish and VERIFY. Needs a git worktree; the branch
+#    and tag refs go through the `gh` API, so `git push` is not required.
+#    `--dry-run` prints the plan and what it could not check.
+odock release publish 0.2.2 --check-report out/release-check.json
 ```
+
+`release publish` refuses without a passing `release check` report from the same
+run, refuses a tree with changes other than its own version bump, refuses a
+commit message that names a different version, and then re-reads the remote
+(branch head, commit message, tag target, release tag, file count) and reports the
+comparison rather than a success. The Wheels workflow builds Windows, Linux and
+macOS and smoke-tests the first two from a clean environment.
 
 `maturin publish` is deliberately **not** wired into a workflow: uploading to
 PyPI needs a token and a human decision. The Wheels workflow stops at "built,

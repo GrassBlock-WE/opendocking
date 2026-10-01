@@ -53,12 +53,21 @@ __all__ = [
     "REPORT_VERSION",
     "add_report_html_parser",
     "build_report",
+    "build_comparison_report",
+    "build_campaign_index",
+    "build_study_diff_report",
+    "build_study_report",
     "cmd_report_html",
     "find_external_references",
     "pdf_converter",
     "rasterise_svg",
+    "study_diff_text",
+    "write_campaign_index",
+    "write_comparison_report",
     "write_html_report",
     "write_pdf",
+    "write_study_diff",
+    "write_study_report",
 ]
 
 PathLike = Union[str, os.PathLike]
@@ -1360,6 +1369,45 @@ def _section(anchor: str, heading: str, content: str) -> str:
     return f'<section id="{_escape(anchor)}">\n<h2>{_escape(heading)}</h2>\n{content}\n</section>'
 
 
+#: The report stylesheet, as one string.
+#:
+#: Exposed rather than buried in :func:`_document` so the documentation site can
+#: use the *same* conventions instead of inventing a second look (it imports this
+#: and adds only the layout rules a multi-page site needs: sidebar, search box).
+#: `tests/test_htmlreport.py` pins the report output byte-for-byte, so this is the
+#: one definition of both.
+DOCUMENT_CSS = """
+:root { color-scheme: light; }
+body { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+        margin: 0 auto; max-width: 62rem; padding: 1.5rem; color: #212121;
+        line-height: 1.45; background: #ffffff; }
+h1 { font-size: 1.6rem; margin-bottom: 0.2rem; }
+h2 { font-size: 1.15rem; margin-top: 2rem; border-bottom: 1px solid #cfd8dc;
+      padding-bottom: 0.25rem; }
+h3 { font-size: 1rem; margin-top: 1.2rem; }
+p.subtitle { color: #546e7a; margin-top: 0; }
+table { border-collapse: collapse; width: 100%; margin: 0.6rem 0; font-size: 0.92rem; }
+th, td { border: 1px solid #cfd8dc; padding: 0.32rem 0.5rem; text-align: left;
+          vertical-align: top; }
+th { background: #eceff1; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+dl { display: grid; grid-template-columns: minmax(12rem, max-content) 1fr;
+      gap: 0.15rem 1rem; margin: 0.6rem 0; }
+dt { font-weight: 600; }
+dd { margin: 0; }
+code { background: #f5f5f5; padding: 0.05rem 0.25rem; word-break: break-all; }
+figure { margin: 1rem 0; }
+figure img, figure svg { max-width: 100%; height: auto;
+                          border: 1px solid #eceff1; background: #fff; }
+figcaption { color: #546e7a; font-size: 0.88rem; margin-top: 0.3rem; }
+ul { margin: 0.4rem 0 0.4rem 1.2rem; padding: 0; }
+section#limits { background: #fff8e1; padding: 0.5rem 1rem 1rem 1rem;
+                  border: 1px solid #ffe082; border-radius: 4px; }
+footer { margin-top: 2rem; color: #546e7a; font-size: 0.85rem;
+          border-top: 1px solid #cfd8dc; padding-top: 0.6rem; }
+"""
+
+
 def _document(title: str, body: str) -> str:
     """The whole document: one inline stylesheet, no external resource."""
     return f"""<!DOCTYPE html>
@@ -1369,36 +1417,7 @@ def _document(title: str, body: str) -> str:
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <meta name="generator" content="opendocking"/>
 <title>{_escape(title)}</title>
-<style>
-:root {{ color-scheme: light; }}
-body {{ font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
-        margin: 0 auto; max-width: 62rem; padding: 1.5rem; color: #212121;
-        line-height: 1.45; background: #ffffff; }}
-h1 {{ font-size: 1.6rem; margin-bottom: 0.2rem; }}
-h2 {{ font-size: 1.15rem; margin-top: 2rem; border-bottom: 1px solid #cfd8dc;
-      padding-bottom: 0.25rem; }}
-h3 {{ font-size: 1rem; margin-top: 1.2rem; }}
-p.subtitle {{ color: #546e7a; margin-top: 0; }}
-table {{ border-collapse: collapse; width: 100%; margin: 0.6rem 0; font-size: 0.92rem; }}
-th, td {{ border: 1px solid #cfd8dc; padding: 0.32rem 0.5rem; text-align: left;
-          vertical-align: top; }}
-th {{ background: #eceff1; }}
-td.num, th.num {{ text-align: right; font-variant-numeric: tabular-nums; }}
-dl {{ display: grid; grid-template-columns: minmax(12rem, max-content) 1fr;
-      gap: 0.15rem 1rem; margin: 0.6rem 0; }}
-dt {{ font-weight: 600; }}
-dd {{ margin: 0; }}
-code {{ background: #f5f5f5; padding: 0.05rem 0.25rem; word-break: break-all; }}
-figure {{ margin: 1rem 0; }}
-figure img, figure svg {{ max-width: 100%; height: auto;
-                          border: 1px solid #eceff1; background: #fff; }}
-figcaption {{ color: #546e7a; font-size: 0.88rem; margin-top: 0.3rem; }}
-ul {{ margin: 0.4rem 0 0.4rem 1.2rem; padding: 0; }}
-section#limits {{ background: #fff8e1; padding: 0.5rem 1rem 1rem 1rem;
-                  border: 1px solid #ffe082; border-radius: 4px; }}
-footer {{ margin-top: 2rem; color: #546e7a; font-size: 0.85rem;
-          border-top: 1px solid #cfd8dc; padding-top: 0.6rem; }}
-</style>
+<style>{DOCUMENT_CSS}</style>
 </head>
 <body>
 {body}
@@ -1823,8 +1842,19 @@ def build_comparison_report(
     *,
     title: Optional[str] = None,
     created: Optional[str] = None,
+    extra_sections: Optional[Sequence[Tuple[str, str, str]]] = None,
+    extra_limits: Optional[Sequence[str]] = None,
+    payload_extras: Optional[Mapping[str, Any]] = None,
 ) -> HtmlReport:
-    """Build the side-by-side comparison page for several runs."""
+    """Build the side-by-side comparison page for several runs.
+
+    `extra_sections` are ``(anchor, heading, html)`` triples appended after the
+    comparison's own sections and before the limits.  That is how a study diff
+    adds its protocol, membership and hit-list tables **without a second
+    renderer**: the document builder, the stylesheet, the self-containment check
+    and the limits section are not forked.  `extra_limits` are added to the
+    caveat list and `payload_extras` to the JSON sibling.
+    """
     payload = _comparison_payload(comparison)
     runs = list(payload.get("runs") or [])
     if not runs:
@@ -2013,7 +2043,13 @@ def build_comparison_report(
         )
     )
 
+    for anchor, heading, content in extra_sections or ():
+        body.append(_section(str(anchor), str(heading), content))
+
     limits = list(COMPARISON_LIMITS)
+    for item in extra_limits or ():
+        if str(item) not in limits:
+            limits.append(str(item))
     for run in runs:
         for item in run.get("does_not_establish") or []:
             if item not in limits:
@@ -2040,6 +2076,9 @@ def build_comparison_report(
         )
     payload = dict(payload)
     payload.setdefault("title", report_title)
+    if payload_extras:
+        payload.update(dict(payload_extras))
+    payload["does_not_establish"] = limits
     payload["tool"] = {
         "name": "opendocking",
         "version": _tool_version(),
@@ -2308,6 +2347,546 @@ def write_campaign_index(
 
 def _now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+# ---------------------------------------------------------------------------
+# Studies: a diff of two collections, and a report over one
+#
+# Both are built on the comparison renderer above, through its
+# `extra_sections` hook: the study-specific tables are *sections*, not a second
+# document builder, so the self-containment guarantee and the limits section are
+# the same code.
+# ---------------------------------------------------------------------------
+
+
+def _protocol_table(differences: Sequence[Mapping[str, Any]]) -> str:
+    """The metadata/protocol fields that differ, with both values."""
+    if not differences:
+        return (
+            "<p>The two studies recorded identical metadata and protocol fields: "
+            "any difference in the members is a difference in the molecules or the "
+            "runs, not in what was asked of them.</p>"
+        )
+    rows = [
+        [
+            _escape(item.get("field")),
+            _escape(item.get("kind")),
+            # A field one study never recorded is shown as a dash, not as an empty
+            # cell that reads like "false" or "zero".
+            _dash(item.get("values", [None, None])[0]),
+            _dash(item.get("values", [None, None])[1]),
+            _escape(item.get("note")),
+        ]
+        for item in differences
+    ]
+    return _table(
+        ["field", "kind", "study A", "study B", "note"],
+        rows,
+        table_id="protocol",
+    )
+
+
+def _membership_table(payload: Mapping[str, Any]) -> str:
+    """Members added, removed and shared."""
+    members = payload.get("members") or {}
+    parts: List[str] = []
+    added = list(members.get("added") or [])
+    removed = list(members.get("removed") or [])
+    shared = list(members.get("shared") or [])
+    parts.append(
+        f"<p>{len(shared)} shared member(s), {len(added)} added, {len(removed)} "
+        "removed.</p>"
+    )
+    rows = []
+    for item in shared:
+        rows.append(["shared", _escape(item.get("label")), "—", ""])
+    for item in added:
+        rows.append(
+            [
+                "added",
+                _escape(item.get("label")),
+                _number(item.get("best_affinity")),
+                f"rank {_number(item.get('rank_b'), 0)} in study B",
+            ]
+        )
+    for item in removed:
+        rows.append(
+            [
+                "removed",
+                _escape(item.get("label")),
+                _number(item.get("best_affinity")),
+                f"rank {_number(item.get('rank_a'), 0)} in study A",
+            ]
+        )
+    if rows:
+        parts.append(
+            _table(["change", "member", "best affinity (kcal/mol)", "note"], rows,
+                   table_id="membership", numeric=(2,))
+        )
+    return "\n".join(parts)
+
+
+def _hit_list_table(payload: Mapping[str, Any]) -> str:
+    """The movement of the hit list: ranks and top-N membership, with numbers."""
+    hit = payload.get("hit_list") or {}
+    rows = [
+        [
+            _escape(item.get("member")),
+            _number(item.get("best_a")),
+            _number(item.get("best_b")),
+            _number(item.get("best_affinity_delta")),
+            _number(item.get("rank_a"), 0),
+            _number(item.get("rank_b"), 0),
+            f"{int(item['rank_delta']):+d}" if item.get("rank_delta") is not None else "—",
+            _escape(item.get("movement")),
+        ]
+        for item in hit.get("members") or []
+    ]
+    table = (
+        _table(
+            ["member", "best A", "best B", "Δbest (kcal/mol)", "rank A", "rank B",
+             "Δrank", "movement"],
+            rows,
+            table_id="hitlist",
+            numeric=(1, 2, 3, 4, 5, 6),
+        )
+        if rows
+        else "<p>No member appears in both studies, so no rank moved.</p>"
+    )
+    top_n = int(hit.get("top_n") or 0)
+    entered = ", ".join(str(name) for name in hit.get("entered_top") or []) or "none"
+    left = ", ".join(str(name) for name in hit.get("left_top") or []) or "none"
+    return (
+        table
+        + f"<p>Top {top_n}: <strong>entered</strong> {_escape(entered)}; "
+        f"<strong>left</strong> {_escape(left)}. Ranks are within each study, and a "
+        "rank can move because the pool changed rather than because the molecule "
+        "did.</p>"
+    )
+
+
+def build_study_diff_report(
+    payload: Any,
+    *,
+    title: Optional[str] = None,
+    created: Optional[str] = None,
+) -> HtmlReport:
+    """The study diff page, built on the comparison renderer."""
+    document = (
+        dict(payload)
+        if isinstance(payload, Mapping)
+        else json.loads(Path(os.fspath(payload)).read_text(encoding="utf-8"))
+    )
+    studies = document.get("studies") or {}
+    left = studies.get("a") or {}
+    right = studies.get("b") or {}
+    report_title = str(
+        title or f"{left.get('name')} → {right.get('name')} (study diff)"
+    )
+    comparison = document.get("comparison") or {}
+    extras = [
+        (
+            "protocol",
+            "Protocol and metadata that changed",
+            _protocol_table(list(document.get("metadata_differences") or [])),
+        ),
+        ("membership", "Members added, removed, shared", _membership_table(document)),
+        (
+            "hitlist",
+            "How the hit list moved",
+            _hit_list_table(document),
+        ),
+    ]
+    built = build_comparison_report(
+        comparison,
+        title=report_title,
+        created=created or document.get("created_utc"),
+        extra_sections=extras,
+        extra_limits=list(document.get("does_not_establish") or []),
+        payload_extras={"studies": studies, "study_diff": {
+            "top_n": document.get("top_n"),
+            "metadata_differences": document.get("metadata_differences"),
+            "members": document.get("members"),
+            "hit_list": document.get("hit_list"),
+        }},
+    )
+    # Replace the run-oriented lead paragraph with one about the two studies.
+    built.html = built.html.replace(
+        f'<p class="subtitle">OpenDocking comparison — baseline '
+        f'<strong>{_escape(comparison.get("baseline"))}</strong>, generated ',
+        f'<p class="subtitle">OpenDocking study diff — '
+        f'<strong>{_escape(left.get("name"))}</strong> ({left.get("n_members")} member(s), '
+        f'{_escape(left.get("created_utc"))}) → '
+        f'<strong>{_escape(right.get("name"))}</strong> ({right.get("n_members")} member(s), '
+        f'{_escape(right.get("created_utc"))}), generated ',
+        1,
+    )
+    built.title = report_title
+    built.text = study_diff_text(document, title=report_title)
+    return built
+
+
+def study_diff_text(payload: Mapping[str, Any], *, title: Optional[str] = None) -> str:
+    """The plain-text sibling of a study diff."""
+    studies = payload.get("studies") or {}
+    left, right = studies.get("a") or {}, studies.get("b") or {}
+    name = str(title or f"{left.get('name')} -> {right.get('name')}")
+    lines = [
+        name,
+        "=" * len(name),
+        "",
+        f"study A : {left.get('name')} ({left.get('n_members')} member(s), "
+        f"{left.get('created_utc')}, operator {left.get('operator')})",
+        f"study B : {right.get('name')} ({right.get('n_members')} member(s), "
+        f"{right.get('created_utc')}, operator {right.get('operator')})",
+        "",
+        "Protocol and metadata that changed",
+        "----------------------------------",
+    ]
+    differences = list(payload.get("metadata_differences") or [])
+    if not differences:
+        lines.append("  none: the two studies recorded identical metadata")
+    for item in differences:
+        values = item.get("values") or [None, None]
+        lines.append(
+            f"  {item.get('field')}: {values[0]} -> {values[1]}"
+            + (f" ({item['note']})" if item.get("note") else "")
+        )
+    members = payload.get("members") or {}
+    lines += ["", "Members", "-------"]
+    lines.append(
+        f"  shared {len(members.get('shared') or [])}, "
+        f"added {len(members.get('added') or [])}, "
+        f"removed {len(members.get('removed') or [])}"
+    )
+    for item in members.get("added") or []:
+        lines.append(f"  + {item.get('label')} ({_number(item.get('best_affinity'))} kcal/mol)")
+    for item in members.get("removed") or []:
+        lines.append(f"  - {item.get('label')} ({_number(item.get('best_affinity'))} kcal/mol)")
+    hit = payload.get("hit_list") or {}
+    lines += [
+        "",
+        f"How the hit list moved (top {hit.get('top_n')})",
+        "-" * 34,
+        f"  {'member':<28} {'best A':>8} {'best B':>8} {'dBest':>8} "
+        f"{'rank A':>7} {'rank B':>7} {'dRank':>6}  movement",
+    ]
+    for item in hit.get("members") or []:
+        rank_delta = item.get("rank_delta")
+        lines.append(
+            f"  {str(item.get('member'))[:28]:<28} {_number(item.get('best_a')):>8} "
+            f"{_number(item.get('best_b')):>8} {_number(item.get('best_affinity_delta')):>8} "
+            f"{_number(item.get('rank_a'), 0):>7} {_number(item.get('rank_b'), 0):>7} "
+            f"{(f'{int(rank_delta):+d}' if rank_delta is not None else '-'):>6}  "
+            f"{item.get('movement')}"
+        )
+    entered = ", ".join(str(item) for item in hit.get("entered_top") or []) or "none"
+    left_top = ", ".join(str(item) for item in hit.get("left_top") or []) or "none"
+    lines.append(f"  entered the top {hit.get('top_n')}: {entered}")
+    lines.append(f"  left the top {hit.get('top_n')}: {left_top}")
+    lines += ["", "What this comparison does not establish", "-" * 38]
+    for item in payload.get("does_not_establish") or []:
+        lines.append(f"  - {item}")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def write_study_diff(
+    path: PathLike,
+    payload: Any,
+    *,
+    title: Optional[str] = None,
+    json_out: Optional[PathLike] = None,
+    text_out: Optional[PathLike] = None,
+) -> ReportFiles:
+    """Write the study diff page plus its JSON and text siblings."""
+    built = build_study_diff_report(payload, title=title)
+    return _write_siblings(path, built, json_out=json_out, text_out=text_out)
+
+
+def build_study_report(
+    payload: Any,
+    *,
+    title: Optional[str] = None,
+    created: Optional[str] = None,
+    study_dir: Optional[PathLike] = None,
+    page_dir: Optional[PathLike] = None,
+) -> HtmlReport:
+    """One self-contained page over a study.
+
+    `report_href` in the payload is relative to the *study directory*.  When the
+    page is written somewhere else (and `study_dir` is given), the links are
+    rewritten relative to `page_dir` so they still resolve: a page whose links
+    only work from one directory is a broken page.
+    """
+    document = (
+        dict(payload)
+        if isinstance(payload, Mapping)
+        else json.loads(Path(os.fspath(payload)).read_text(encoding="utf-8"))
+    )
+    entries = list(document.get("entries") or [])
+    if not entries:
+        raise ValueError("the study holds no member")
+    if study_dir is not None and page_dir is not None:
+        base = Path(study_dir).resolve()
+        page = Path(page_dir).resolve()
+        rewritten = []
+        for entry in entries:
+            entry = dict(entry)
+            href = str(entry.get("report_href") or "")
+            if href and entry.get("has_report"):
+                try:
+                    entry["report_href"] = _project._as_posix(
+                        str((base / href).resolve().relative_to(page))
+                    )
+                except ValueError:
+                    entry["report_href"] = _project._as_posix(
+                        os.path.relpath(str(base / href), str(page))
+                    )
+            rewritten.append(entry)
+        entries = rewritten
+        document["entries"] = entries
+        document["top"] = [
+            entry for entry in entries if entry.get("rank", 0) <= int(document.get("top_n") or 10)
+        ]
+    report_title = str(title or f"{document.get('name')} — study report")
+    created_at = str(created or document.get("created_utc") or _now())
+    notes: List[str] = []
+    verify = document.get("verify") or {}
+    if verify.get("problems"):
+        notes.extend(str(item) for item in verify["problems"])
+    if not verify.get("ok", True):
+        notes.append(
+            "at least one member did not verify; the page marks the members "
+            "individually rather than hiding the failure in a total"
+        )
+
+    body: List[str] = [
+        f'<header><h1>{_escape(report_title)}</h1>'
+        f'<p class="subtitle">OpenDocking study report — {len(entries)} member(s), '
+        f'{document.get("n_verified")} verified, generated {_escape(created_at)}. '
+        "Every link is a file next to this page.</p></header>"
+    ]
+
+    audit = document.get("audit") or {}
+    body.append(
+        _section(
+            "study",
+            "The study",
+            _definition_list(
+                [
+                    ("name", _escape(document.get("name"))),
+                    ("title", _escape(document.get("title"))),
+                    ("created (UTC)", _escape(document.get("created_utc_study"))),
+                    ("operator", _escape(audit.get("operator") or "not recorded")),
+                    ("tool version", _escape(audit.get("tool_version"))),
+                    ("members", _escape(document.get("n_members"))),
+                    ("best affinity (kcal/mol)", _number(document.get("best_affinity"))),
+                    ("worst affinity (kcal/mol)", _number(document.get("worst_affinity"))),
+                ]
+            ),
+        )
+    )
+
+    metadata = document.get("metadata") or {}
+    protocol = document.get("protocol") or {}
+    body.append(
+        _section(
+            "protocol",
+            "Protocol and metadata",
+            _definition_list(
+                [
+                    ("target", _escape(metadata.get("target") or "not recorded")),
+                    ("library", _escape(metadata.get("library") or "not recorded")),
+                    (
+                        "receptors",
+                        _escape(", ".join(str(item) for item in metadata.get("receptors") or [])
+                                or "not recorded"),
+                    ),
+                ]
+                + [(f"protocol.{key}", _escape(value)) for key, value in sorted(protocol.items())]
+                + [("notes", _escape("; ".join(document.get("notes") or []) or "none"))]
+            ),
+        )
+    )
+
+    body.append(
+        _section(
+            "members",
+            "Members",
+            _table(
+                ["member", "title", "best affinity (kcal/mol)", "poses", "seed",
+                 "force field", "heavy atoms", "LE (kcal/mol/HA)", "key residues",
+                 "verifies", "KiB"],
+                [
+                    [
+                        (
+                            f'<a href="{_escape(entry.get("report_href"))}">'
+                            f'{_escape(entry.get("label"))}</a>'
+                            if entry.get("has_report")
+                            else _escape(entry.get("label"))
+                        ),
+                        _escape(entry.get("title")),
+                        _number(entry.get("best_affinity")),
+                        _number(entry.get("n_poses"), 0),
+                        _escape(entry.get("seed")),
+                        _escape(entry.get("scoring")),
+                        _number(entry.get("heavy_atoms"), 0),
+                        _number(entry.get("ligand_efficiency")),
+                        _escape(entry.get("key_residues")),
+                        _dash(entry.get("verify_ok")),
+                        _number((entry.get("size_bytes") or 0) / 1024.0, 1),
+                    ]
+                    for entry in entries
+                ],
+                table_id="members",
+                numeric=(2, 3, 6, 7, 10),
+            ),
+        )
+    )
+
+    top = list(document.get("top") or [])[: int(document.get("top_n") or 10)]
+    body.append(
+        _section(
+            "top",
+            f"Top {document.get('top_n')} across the study",
+            _table(
+                ["rank", "member", "best affinity (kcal/mol)", "LE (kcal/mol/HA)",
+                 "key residues", "verifies"],
+                [
+                    [
+                        _number(entry.get("rank"), 0),
+                        _escape(entry.get("label")),
+                        _number(entry.get("best_affinity")),
+                        _number(entry.get("ligand_efficiency")),
+                        _escape(entry.get("key_residues")),
+                        _dash(entry.get("verify_ok")),
+                    ]
+                    for entry in top
+                ],
+                table_id="top",
+                numeric=(0, 2, 3),
+            )
+            + "<p>The ranking is by best affinity across this study's members only, "
+            "and only members whose numbers come from the same protocol are "
+            "comparable.</p>",
+        )
+    )
+
+    limits = list(document.get("does_not_establish") or [])
+    body.append(
+        _section(
+            "limits",
+            "What this study does not establish",
+            _bullet_list([_escape(item) for item in limits]),
+        )
+    )
+    notes_block = ""
+    if notes:
+        notes_block = '<section id="notes"><h2>Notes on this study</h2>' + _bullet_list(
+            [_escape(note) for note in notes]
+        ) + "</section>"
+    built = HtmlReport(
+        title=report_title,
+        html=_document(report_title, "\n".join(body) + notes_block),
+        payload=document,
+        text=_study_report_text(report_title, document),
+        figures=[],
+        notes=notes,
+    )
+    external = find_external_references(built.html)
+    if external:
+        raise RuntimeError("the study report would not be self-contained: " + "; ".join(external))
+    return built
+
+
+def _study_report_text(title: str, document: Mapping[str, Any]) -> str:
+    lines = [
+        title,
+        "=" * len(title),
+        "",
+        f"name      : {document.get('name')}",
+        f"directory : {document.get('directory')}",
+        f"created   : {document.get('created_utc_study')}",
+        f"operator  : {(document.get('audit') or {}).get('operator') or 'not recorded'}",
+        f"members   : {document.get('n_members')} ({document.get('n_verified')} verified)",
+        f"best      : {_number(document.get('best_affinity'))} kcal/mol",
+        "",
+    ]
+    protocol = document.get("protocol") or {}
+    if protocol:
+        lines.append("protocol")
+        lines.append("--------")
+        for key, value in sorted(protocol.items()):
+            lines.append(f"  {key:<24} {value}")
+        lines.append("")
+    lines.append("members")
+    lines.append("-------")
+    for entry in document.get("entries") or []:
+        lines.append(
+            f"  {entry.get('rank'):>3}. {str(entry.get('label'))[:32]:<34} "
+            f"{_number(entry.get('best_affinity')):>8} kcal/mol  "
+            f"{'OK' if entry.get('verify_ok') else 'FAILED'}"
+        )
+    lines += ["", "What this study does not establish", "-" * 35]
+    for item in document.get("does_not_establish") or []:
+        lines.append(f"  - {item}")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def write_study_report(
+    path: PathLike,
+    payload: Any,
+    *,
+    title: Optional[str] = None,
+    study_dir: Optional[PathLike] = None,
+    json_out: Optional[PathLike] = None,
+    text_out: Optional[PathLike] = None,
+) -> ReportFiles:
+    """Write the study report page plus its JSON and text siblings.
+
+    Pass `study_dir` when the page is written outside the study directory: the
+    member links are then rewritten relative to the page, so they resolve from
+    wherever the file ends up.
+    """
+    target = Path(path)
+    built = build_study_report(
+        payload, title=title, study_dir=study_dir, page_dir=target.parent
+    )
+    return _write_siblings(target, built, json_out=json_out, text_out=text_out)
+
+
+def _write_siblings(
+    path: PathLike,
+    built: HtmlReport,
+    *,
+    json_out: Optional[PathLike],
+    text_out: Optional[PathLike],
+) -> ReportFiles:
+    """Write an HTML document and its JSON/text siblings (shared by the pages)."""
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(built.html, encoding="utf-8")
+    files = ReportFiles(
+        path=target,
+        n_figures=len(built.figures),
+        n_images=built.n_images,
+        size_bytes=target.stat().st_size,
+        notes=list(built.notes),
+    )
+    if json_out is not False:
+        destination = Path(json_out) if json_out else target.with_suffix(".json")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(
+            json.dumps(built.payload, indent=2, ensure_ascii=False, default=str) + "\n",
+            encoding="utf-8",
+        )
+        files.json_path = destination
+    if text_out is not False:
+        destination = Path(text_out) if text_out else target.with_suffix(".txt")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(built.text, encoding="utf-8")
+        files.text_path = destination
+    return files
 
 
 # ---------------------------------------------------------------------------

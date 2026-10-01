@@ -11,6 +11,7 @@ pinned to the documented vocabulary of each program instead.
 from __future__ import annotations
 
 import math
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -460,3 +461,164 @@ def test_the_pdb_writer_never_emits_a_non_finite_coordinate():
     # so the writer has to be able to produce something parseable.
     assert "nan" not in line.lower()
     assert len(line) >= 78
+
+
+# ---------------------------------------------------------------------------
+# the round trip: the live scene -> the files -> the scene's own values
+# ---------------------------------------------------------------------------
+#
+# The scripts are generated *from* the scene, so the test that matters is that
+# they still describe that scene once they are on disk: the same interaction
+# colours, the same representation, the same view matrix, and the same per-atom
+# property in the B-factor column. These drive a real window offscreen and read
+# the exported files back.
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+os.environ.setdefault("QT_QPA_FONTDIR", r"C:\Windows\Fonts")
+
+RECEPTOR_PDBQT = "\n".join(
+    [
+        # Two residue types on purpose: the exported property must be able to
+        # vary, or the B-factor check would pass on a constant column.
+        f"ATOM  {index + 1:5d}  CA  {'ALA' if index % 2 == 0 else 'LEU'} A"
+        f"{1 if index % 2 == 0 else 2:4d}    "
+        f"{3.0 * math.cos(index / 3.0):8.3f}{3.0 * math.sin(index / 3.0):8.3f}"
+        f"{0.7 * index - 3.0:8.3f}  1.00  0.00     0.000 C"
+        for index in range(24)
+    ]
+    + ["TER", ""]
+)
+
+LIGAND_PDBQT = "\n".join(
+    [
+        "REMARK  VINA RESULT:      -7.991      0.000      0.000",
+        "ROOT",
+        "ATOM      1  C1  LIG A   1       0.000   0.000   0.000  1.00  0.00     0.000 C",
+        "ATOM      2  C2  LIG A   1       1.390   0.000   0.000  1.00  0.00     0.000 C",
+        "ATOM      3  O1  LIG A   1       2.000   1.300   0.000  1.00  0.00    -0.300 OA",
+        "ENDROOT",
+        "TORSDOF 0",
+        "",
+    ]
+)
+
+
+@pytest.fixture(scope="module")
+def qapp():
+    QtWidgets = pytest.importorskip("PyQt6.QtWidgets")
+    pytest.importorskip("moderngl")
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    yield app
+
+
+@pytest.fixture()
+def live_scene(tmp_path, qapp):
+    """A real workbench with a receptor, a ligand, a surface and two contacts."""
+    from odock.gui import i18n
+    from odock.gui import surface as surface_module
+    from odock.gui.app import DockingWorkbench
+
+    i18n.set_language("en")
+    receptor_file = tmp_path / "receptor.pdbqt"
+    ligand_file = tmp_path / "ligand.pdbqt"
+    receptor_file.write_text(RECEPTOR_PDBQT, encoding="utf-8")
+    ligand_file.write_text(LIGAND_PDBQT, encoding="utf-8")
+
+    window = DockingWorkbench()
+    window.load_receptor(str(receptor_file))
+    window.load_ligand(str(ligand_file))
+    surface = surface_module.build_surface(
+        window.scene.receptor,
+        surface_module.SurfaceSettings(
+            mode="sas", spacing=0.6, property="hydrophobicity"
+        ),
+    )
+    window.viewport.set_surface(surface)
+    window.scene.interactions = [
+        Interaction("hbond", 0, 0),
+        Interaction("hydrophobic", 4, 1),
+    ]
+    window.scene.style_protein = "cartoon"
+    window.scene.style_ligand = "sticks"
+    window.viewport.camera.azimuth = 1.05
+    window.viewport.camera.elevation = 0.22
+    window.viewport.camera.distance = 31.5
+    window.viewport.camera.target = (0.5, -0.5, 0.25)
+    yield window
+    window.close()
+    window.deleteLater()
+    i18n.set_language("en")
+
+
+def test_the_exported_pymol_colours_are_the_scene_colours(live_scene, tmp_path):
+    """Round trip: the RGB in the script is the RGB the renderer used."""
+    from odock.gui.viewport import INTERACTION_COLORS
+
+    state = live_scene._interop_state()
+    manifest = interop.export_bundle(tmp_path / "out", state)
+    script = manifest["pymol"].read_text(encoding="utf-8")
+    assert state.interactions, "the scene has no contacts to export"
+    for item in state.interactions:
+        kind = item.kind
+        red, green, blue, _alpha = INTERACTION_COLORS[kind]
+        assert f"set_color {kind}_color, [{red:.3f}, {green:.3f}, {blue:.3f}]" in script
+        assert f"color {kind}_color, {kind}_" in script
+    # ChimeraX gets the same colours, as #rrggbb.
+    chimerax = manifest["chimerax"].read_text(encoding="utf-8")
+    for index, item in enumerate(state.interactions, start=1):
+        red, green, blue, _alpha = INTERACTION_COLORS[item.kind]
+        hexcode = "#%02x%02x%02x" % (
+            int(round(red * 255)),
+            int(round(green * 255)),
+            int(round(blue * 255)),
+        )
+        assert f"color {item.kind}_{index} {hexcode}" in chimerax
+
+
+def test_the_exported_representation_is_the_scene_representation(live_scene, tmp_path):
+    state = live_scene._interop_state()
+    manifest = interop.export_bundle(tmp_path / "out", state)
+    script = manifest["pymol"].read_text(encoding="utf-8")
+    assert state.style_protein == live_scene.scene.style_protein
+    assert state.style_ligand == live_scene.scene.style_ligand
+    for command in interop.STYLE_PROTEIN[state.style_protein]:
+        assert command.format(obj="receptor", scale=f"{state.receptor_scale:g}") in script
+    for command in interop.STYLE_LIGAND[state.style_ligand]:
+        assert command.format(obj="ligand", scale=f"{state.ball_scale:g}") in script
+
+
+def test_the_exported_view_matrix_is_the_live_camera(live_scene, tmp_path):
+    """The 18 numbers must describe the camera the frame was drawn with."""
+    state = live_scene._interop_state()
+    manifest = interop.export_bundle(tmp_path / "out", state)
+    script = manifest["pymol"].read_text(encoding="utf-8")
+    line = next(line for line in script.splitlines() if line.startswith("set_view ("))
+    numbers = [float(value) for value in line[len("set_view (") : -1].split(",")]
+    right, up, forward, eye, target, _distance = interop.camera_vectors(state.camera)
+    assert numbers[0:3] == pytest.approx(list(right), abs=1e-5)
+    assert numbers[3:6] == pytest.approx(list(up), abs=1e-5)
+    assert numbers[6:9] == pytest.approx(list(forward), abs=1e-5)
+    assert numbers[9:12] == pytest.approx(list(eye), abs=1e-5)
+    assert numbers[12:15] == pytest.approx(list(target), abs=1e-5)
+    # ... and that camera is the widget's own, not a copy taken at load time.
+    assert eye == pytest.approx(live_scene.viewport.camera.eye(), abs=1e-6)
+    assert target == pytest.approx(live_scene.viewport.camera.target, abs=1e-9)
+
+
+def test_the_exported_pdb_carries_the_surface_property_per_atom(live_scene, tmp_path):
+    """The B-factor column is the bridge: it is what makes ``spectrum b`` work."""
+    surface = live_scene.scene.surface
+    assert surface is not None and surface.property_name == "hydrophobicity"
+    state = live_scene._interop_state()
+    assert state.receptor_values is not None
+    assert len(state.receptor_values) == len(live_scene.scene.receptor)
+    assert state.property_range == pytest.approx(surface.value_range)
+    text = interop.pose_pdb_text(state)
+    records = [line for line in text.splitlines() if line.startswith(("ATOM", "HETATM"))]
+    values = [float(line[60:66]) for line in records[: len(state.receptor_values)]]
+    assert values == pytest.approx([float(v) for v in state.receptor_values], abs=0.005)
+    assert len({round(value, 3) for value in values}) > 1     # not a constant
+    assert "REMARK  PROPERTY  hydrophobicity" in text
+    # And the script asks for the ramp that column drives.
+    script = interop.pymol_script(state)
+    assert "spectrum b, yellow_white_blue, receptor" in script

@@ -120,6 +120,28 @@ def _structure_outside_test_data(name: str) -> bool:
     return _structure(name) and "tests/data/" not in name
 
 
+def _browser_profile(name: str) -> bool:
+    """A headless-browser profile directory that leaked into the working directory.
+
+    **Four of these reached the published 0.2.1 tree** (`odock-chrome-hylyoa4p` and
+    three siblings, each holding `CrashpadMetrics-active.pma`, `metadata` and
+    `settings.dat`).  They come from the PDF path's Chrome profile: `tempfile.mkdtemp`
+    fell back to the working directory because the environment's temp directory is not
+    writable, and the cleanup in `finally` cannot always remove a directory a browser
+    still holds open on Windows.  The family is what matters, not the four names: this
+    build's prefix was `odock-chrome-`, the current one is `odock-report-`, and Chrome
+    also makes `chrome_*`, `scoped_dir*` and `Crashpad*` directories of its own.
+    """
+    return (
+        _root_dir_prefix(name, "odock-chrome")
+        or _root_dir_prefix(name, "odock-report")
+        or _root_dir_prefix(name, "odock-ensemble")
+        or _root_dir_prefix(name, "chrome_")
+        or _root_dir_prefix(name, "scoped_dir")
+        or _root_dir_prefix(name, "Crashpad")
+    )
+
+
 #: (label, predicate) for paths that must never appear in **any** artefact.  Note
 #: what is *not* here: a `.pdb` rule.  A wheel must carry no structure at all,
 #: while an sdist legitimately carries `tests/data/*.pdb`; a single over-broad
@@ -134,6 +156,7 @@ DENY_ANY: Sequence[Tuple[str, Callable[[str], bool]]] = (
     ("scratch directories", lambda n: _root_dir(n, "scratch")),
     ("pytest's temporary directories", lambda n: _root_dir_prefix(n, "pytest-of-")),
     ("stray temporary directories", lambda n: _root_dir_prefix(n, "tmp")),
+    ("a headless-browser profile directory", _browser_profile),
     ("compiled bytecode", _bytecode),
 )
 
@@ -328,6 +351,12 @@ _LEAKS: Tuple[Tuple[str, str], ...] = (
     ("scratch/notes.txt", "scratch directories"),
     ("pytest-of-x/pytest-1/f", "pytest's temporary directories"),
     ("tmp69pnmksh/r.csv", "stray temporary directories"),
+    # The leak that reached the published 0.2.1 tree: four of these, from the PDF
+    # path's headless-browser profile.  The *current* prefix is listed too, because
+    # renaming the directory is exactly how the rule would stop catching it.
+    ("odock-chrome-hylyoa4p/settings.dat", "a headless-browser profile directory"),
+    ("odock-report-abc12345/metadata", "a headless-browser profile directory"),
+    ("scoped_dir1234/CrashpadMetrics-active.pma", "a headless-browser profile directory"),
     ("python/odock/__pycache__/cli.cpython-310.pyc", "compiled bytecode"),
     ("odock/cli.py", "a release snapshot of this repository"),
     ("python/odock/_odock.cp310-win_amd64.pyd", "a built extension module"),

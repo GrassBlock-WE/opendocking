@@ -28,10 +28,13 @@ EXPECTED_SUBCOMMANDS = frozenset(
     {
         "box",
         "cluster",
+        "conformers",
         "decoys",
         "diagram",
         "diverse",
         "dock",
+        "docs",
+        "doctor",
         "ensemble",
         "export",
         "fetch",
@@ -42,8 +45,10 @@ EXPECTED_SUBCOMMANDS = frozenset(
         "lbvs",
         "pharmacophore",
         "pocket",
+        "pocket-score",
         "prepare",
         "project",
+        "release",
         "report",
         "report-html",
         "rgroups",
@@ -52,6 +57,9 @@ EXPECTED_SUBCOMMANDS = frozenset(
         "screen",
         "similar",
         "split",
+        "study",
+        "triage",
+        "tutorial",
     }
 )
 

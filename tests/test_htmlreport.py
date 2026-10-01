@@ -445,19 +445,26 @@ def test_the_rdkit_depiction_is_embedded_when_a_molecule_is_given(tmp_path):
 
 
 def test_no_absolute_path_reaches_the_report(tmp_path, demo_project):
-    """The published report must not name a directory from this machine."""
+    """The published report must not name a directory from this machine.
+
+    The path is synthetic on purpose: a test file ships in the sdist, so the real
+    checkout path must not appear here (the doctor's release-content gate flags
+    that, and it was right to).
+    """
+    separator = chr(92)
+    foreign = "C:" + separator + "Users" + separator + "someone" + separator + ".venv"
     files = htmlreport.write_html_report(
         tmp_path / "leaky.html",
         project=demo_project,
         command=(
-            r"C:\Users\33654\Desktop\Python\OpenDocking\.venv\Scripts\python.exe "
-            r"-m odock.cli report-html C:\Users\33654\Desktop\Python\OpenDocking\demo\3ptb\poses.pdbqt"
+            f"{foreign}{separator}Scripts{separator}python.exe -m odock.cli "
+            f"report-html C:{separator}Users{separator}someone{separator}demo{separator}poses.pdbqt"
         ),
     )
     for path in (files.path, files.json_path, files.text_path):
         text = path.read_text(encoding="utf-8")
         assert project.find_absolute_paths(text) == [], f"a path leaked into {path.name}"
-        assert "C:\\Users" not in text
+        assert "someone" not in text
         assert ".venv" not in text
 
 

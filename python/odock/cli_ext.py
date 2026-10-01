@@ -42,6 +42,11 @@ _REGISTRARS: tuple[tuple[str, str], ...] = (
     (".ligandcli", "attach_ligand_chemistry"),  # similar, diverse, scaffolds, rgroups
     (".ensemble", "add_ensemble_parser"),       # ensemble
     (".project", "add_report_parsers"),         # project, report-html
+    (".study", "add_study_parser"),             # study create|add|verify|diff|report
+    (".doctor", "add_doctor_parser"),           # doctor: diagnose this installation
+    (".release", "add_release_parser"),         # release prepare|stage|check|notes|publish
+    (".docs", "add_docs_parser"),               # docs build|check|serve
+    (".tutorial", "add_tutorial_parser"),       # tutorial: the whole toolchain on the bundled data
 )
 
 

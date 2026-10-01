@@ -1342,6 +1342,91 @@ def test_cli_decoys_and_lbvs_are_advertised(capsys):
 
 
 # ---------------------------------------------------------------------------
+# `odock triage`: structural alerts, drug-likeness and the series view
+# ---------------------------------------------------------------------------
+
+
+def test_cli_triage_reports_alerts_rates_and_series(tmp_path, capsys):
+    library = tmp_path / "hits.smi"
+    library.write_text(
+        "O=C1C=CC(=O)C=C1 benzoquinone\n"
+        "Nc1ccccc1 aniline\n"
+        "C=CC(=O)N acrylamide\n"
+        "c1ccc(cc1)C(=N)N benzamidine\n"
+        "CCO ethanol\n",
+        encoding="utf-8",
+    )
+    target = tmp_path / "triage.csv"
+    payload = tmp_path / "triage.json"
+    code, out, err = run_cli(
+        [
+            "triage",
+            "-i", str(library),
+            "--catalogues", "PAINS,NIH",
+            "-o", str(target),
+            "--json-out", str(payload),
+        ],
+        capsys,
+    )
+    assert code == 0
+    assert "triage: 5 molecule(s)" in out
+    assert "alert rates" in out and "PAINS" in out and "NIH" in out
+    assert "series:" in out and "Murcko scaffold" in out
+    assert "michael_acceptor_enone" in out, "the SMARTS liability set is reported"
+    assert "clean" in out, "ethanol has no alert and must be reported as clean"
+    assert "wrote" in err
+    rows = list(csv.reader(target.open(encoding="utf-8", newline="")))
+    assert rows[0][:5] == ["name", "affinity", "clean", "scaffold", "n_alerts"]
+    assert len(rows) == 6
+    report = json.loads(payload.read_text(encoding="utf-8"))
+    assert report["n_molecules"] == 5
+    assert report["n_clean"] >= 1
+    assert report["rates"]["PAINS"]["flagged"] >= 1
+    assert report["series"], "the report groups by scaffold series"
+
+
+def test_cli_triage_filters_and_affinities(tmp_path, capsys):
+    library = tmp_path / "hits.smi"
+    library.write_text(
+        "O=C1C=CC(=O)C=C1 benzoquinone\nCCO ethanol\n", encoding="utf-8"
+    )
+    results = tmp_path / "results.jsonl"
+    results.write_text(
+        json.dumps(
+            {
+                "receptor": "r",
+                "ligand": "benzoquinone",
+                "name": "benzoquinone",
+                "status": "ok",
+                "affinity": -6.4,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    code, out, _ = run_cli(
+        ["triage", "-i", str(library), "--affinities", str(results), "--flagged-only"],
+        capsys,
+    )
+    assert code == 0
+    assert "benzoquinone" in out and "-6.400" in out
+    assert "ethanol" not in out
+    code, out, _ = run_cli(
+        ["triage", "-i", str(library), "--catalogues", "none", "--clean-only"],
+        capsys,
+    )
+    assert code == 0
+    assert "ethanol" in out
+    assert "benzoquinone" not in out
+
+
+def test_cli_triage_is_advertised(capsys):
+    from odock.cli import _subcommands, build_parser
+
+    assert "triage" in _subcommands(build_parser())
+
+
+# ---------------------------------------------------------------------------
 # `odock ensemble`: docking against several receptor conformations
 # ---------------------------------------------------------------------------
 

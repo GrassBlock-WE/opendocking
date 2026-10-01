@@ -105,6 +105,84 @@ def _report(option: str, recorded: list, what: str, fix: str) -> bool:
     return True
 
 
+# ---------------------------------------------------------------------------
+# Process-global state, restored around every test
+# ---------------------------------------------------------------------------
+
+#: Module-level containers that live for the whole process and are written by the code
+#: under test or by a test's own fixture.  A test that appends to one changes what a
+#: *later* test sees, which is how a suite starts depending on file order.  The list is
+#: explicit rather than clever: each entry is ``"module:attribute"`` and is restored
+#: (mutated in place, so existing references keep working) after every test.
+_GLOBAL_REGISTRIES = (
+    # `ensemble._scratch_dir` registers every scratch directory it hands out for
+    # teardown at exit; a test that measures its *own* scratch usage would otherwise
+    # see the directories every earlier test left behind.
+    "odock.ensemble:_SCRATCH",
+)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_process_globals():
+    """Restore the process-global state a test may have written.
+
+    Two failures in this repository have been *"passes alone, fails in the full run"*,
+    and the general shape of that bug is a piece of process-global state — an
+    environment variable, the working directory, a module-level registry, a seeded
+    generator the previous test reset.  This fixture makes the *known* state explicit
+    and restores it, so a leak of that kind is silenced at the source rather than
+    reordered around.  It is deliberately cheap: three snapshots and a restore per
+    test, and no behaviour of its own.
+
+    It does not hide an order dependence that lives in a *library* global (a Qt
+    singleton, an RDKit logger); `tools/check_test_order.py` is the gate that catches
+    those, and the fix for them is in the test that starts them.
+    """
+    import importlib
+    import os
+    import random
+
+    environment = dict(os.environ)
+    cwd = os.getcwd()
+    python_state = random.getstate()
+    numpy = sys.modules.get("numpy")
+    numpy_state = numpy.random.get_state() if numpy is not None else None
+    saved: list = []
+    for entry in _GLOBAL_REGISTRIES:
+        module_name, _, attribute = entry.partition(":")
+        module = sys.modules.get(module_name)
+        if module is None:
+            continue
+        value = getattr(module, attribute, None)
+        if isinstance(value, list):
+            saved.append((value, list(value)))
+        elif isinstance(value, dict):
+            saved.append((value, dict(value)))
+        elif isinstance(value, set):
+            saved.append((value, set(value)))
+
+    yield
+
+    os.environ.clear()
+    os.environ.update(environment)
+    try:
+        os.chdir(cwd)
+    except OSError:  # pragma: no cover - a test removed its own cwd
+        pass
+    random.setstate(python_state)
+    if numpy is not None and numpy_state is not None:
+        numpy.random.set_state(numpy_state)
+    for container, contents in saved:
+        if isinstance(container, list):
+            container[:] = contents
+        elif isinstance(container, dict):
+            container.clear()
+            container.update(contents)
+        else:
+            container.clear()
+            container.update(contents)
+
+
 def pytest_sessionfinish(session, exitstatus) -> None:
     """With the matching flag, a silently skipped suite fails the session."""
     failed = False

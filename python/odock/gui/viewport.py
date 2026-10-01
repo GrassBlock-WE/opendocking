@@ -305,12 +305,22 @@ void main() {
 """
 
 #: Colour per interaction type, as the interaction-profile specification requires.
+#:
+#: These are read against **two** backgrounds — the dark viewport
+#: (0.086, 0.094, 0.125) and the light one (0.784, 0.804, 0.831) — so each
+#: colour has to be distinguishable from the other five *and* from the canvas on
+#: both. The hydrophobic contact used to be a near-white grey (158, 163, 173),
+#: which a user reported as "many white lines after docking" they could not
+#: identify: on the dark canvas it was the brightest thing in the frame apart
+#: from the ligand. It is now a muted olive, and every dash additionally carries
+#: a dark under-stroke (see :data:`Renderer.INTERACTION_OUTLINE`), so no contact
+#: can read as a stray white stroke on either background.
 INTERACTION_COLORS = {
     "hbond": (0.20, 0.90, 0.95, 0.95),        # cyan
     "salt_bridge": (0.95, 0.25, 0.85, 0.95),  # magenta
     "pi_pi": (0.25, 0.90, 0.35, 0.95),        # green
     "cation_pi": (0.98, 0.60, 0.15, 0.95),    # orange
-    "hydrophobic": (0.62, 0.64, 0.68, 0.75),  # grey
+    "hydrophobic": (0.56, 0.58, 0.44, 0.90),  # muted olive — deliberately not white
     "clash": (1.00, 0.15, 0.15, 1.00),        # red
 }
 
@@ -443,6 +453,39 @@ FOCUS_PADDING = 0.06
 FOCUS_KEY_BOOST = 1.65
 
 
+def lift_for_light(color, amount: float = 0.45):
+    """Lift a colour towards white, for the light viewport.
+
+    ``c' = c + (1 - c)·amount`` in each channel: a mid-grey carbon (0.55, 0.58,
+    0.62) becomes (0.75, 0.77, 0.79), which reads as a stick on a pale canvas
+    instead of as a dark stroke, and saturated colours keep their hue because
+    the lift shrinks as the channel approaches 1. ``amount = 0`` is the identity,
+    which is what the dark theme asks for.
+    """
+    if amount <= 0.0:
+        return color
+    return tuple(
+        float(min(1.0, channel + (1.0 - channel) * amount)) for channel in color[:3]
+    )
+
+
+#: The search box is drawn in **teal**, deliberately far from every interaction
+#: hue. It used to be ``(0.30, 0.85, 0.95)``, which is a measured RGB distance of
+#: **0.112** from the hydrogen-bond cyan ``(0.20, 0.90, 0.95)`` — a user read the
+#: box as "a hydrogen bond acting at a long distance". The teal below is at least
+#: 0.42 from all six contact colours and 0.61 from the dark canvas, so the search
+#: volume reads as an instrument overlay rather than as chemistry.
+BOX_COLOR = (0.15, 0.55, 0.55)
+
+#: Opacity of the translucent box fill, 0.0–1.0. ``0.0`` hides the fill and
+#: keeps the edges, so the search volume is never invisible. The default is
+#: deliberately light: the fill is depth-tested, but at a close camera the box
+#: covers most of the viewport and anything heavier washes the structure out.
+#: The edges are drawn at ``box_alpha + 0.45`` so they stay readable under a
+#: faint fill.
+BOX_FILL_ALPHA = 0.22
+
+
 def focus_color(element: str) -> Tuple[float, float, float]:
     """A saturated, brighter version of an element's colour.
 
@@ -552,6 +595,15 @@ class Scene:
     show_axes: bool = False
     ssao: bool = True
     ssao_strength: float = 1.1
+    #: Whether the viewport behind the model is a light one.
+    #:
+    #: The element palette is tuned for a dark canvas, where a mid-grey carbon
+    #: reads as a stick. On the light canvas the same grey reads as near-black —
+    #: a user reported the perceived-bond sticks as "long dark strokes" — so
+    #: element-coloured geometry is lifted towards white when this is set.
+    #: Property colours (the surface's hydrophobicity or potential) are *not*
+    #: touched: they mean something, and lightening them would change the map.
+    light_background: bool = False
 
     # -- annotations --------------------------------------------------------
     #: :class:`odock.analysis.Interaction` objects, drawn as dashed lines.
@@ -1481,6 +1533,28 @@ def build_group_mesh(
     return np.zeros((0, 9), dtype="f4")
 
 
+def push_along_view(points, distance, eye, bias: float = 0.0) -> np.ndarray:
+    """Move points away from the eye along their own view direction, in Å.
+
+    This is what makes the dash under-stroke work. The outline is a *fatter*
+    cylinder than the core it frames, so with the depth test on it would simply
+    hide the core: its near surface is closer to the camera by exactly the
+    radius difference. Pushing it away from the eye by that difference (plus
+    ``bias``) puts the core's near surface in front everywhere they overlap, and
+    only the rim survives.
+
+    Written as a free function because it is pure geometry: the renderer calls
+    it with its stored eye, and the test suite calls it with a known one.
+    """
+    pts = np.asarray(points, dtype="f8").reshape(-1, 3)
+    origin = np.asarray(eye, dtype="f8").reshape(3)
+    direction = pts - origin[None, :]
+    length = np.linalg.norm(direction, axis=1)
+    direction = direction / np.maximum(length, 1e-9)[:, None]
+    offsets = np.asarray(distance, dtype="f8").reshape(-1) + float(bias)
+    return pts + direction * offsets[:, None]
+
+
 class Renderer:
     """A small instanced-sphere renderer."""
     def __init__(self, ctx, scene: Scene) -> None:
@@ -1622,8 +1696,16 @@ class Renderer:
         self.handle_count = 0
         #: How many emphasis spheres the last frame drew.
         self.focus_sphere_count = 0
-        #: How many triangles the translucent box fill drew last frame.
-        self.box_fill_triangles = 0
+        #: How many endpoints the last frame drew (two per contact).
+        self.endpoint_atoms = 0
+        #: How many contacts the last frame *skipped* because one of their atoms
+        #: is not drawn (a hidden receptor, a binding-site cut-off).
+        self.interactions_skipped = 0
+        #: How many marker pucks the last frame drew.
+        self.marker_count = 0
+        #: ``{"receptor": bool, "ligand": bool}``: which halves of the emphasis
+        #: mesh the last frame drew (both False when the focus is off).
+        self.focus_mesh_drawn = {"receptor": False, "ligand": False}
         #: The box edge vertex count of the last frame.
         self.box_edge_vertices = 0
 
@@ -1650,6 +1732,28 @@ class Renderer:
         self._last_proj = np.eye(4)
 
     # -- uploads -----------------------------------------------------------
+
+    #: How far element colours are lifted towards white on the light canvas.
+    LIGHT_LIFT = 0.45
+
+    def _element_amount(self) -> float:
+        """The lift applied to element-coloured geometry for this theme."""
+        return self.LIGHT_LIFT if getattr(self.scene, "light_background", False) else 0.0
+
+    def _lift_colors(self, mesh: np.ndarray) -> np.ndarray:
+        """Lift the colour columns of a 9-float mesh, if the canvas is light.
+
+        Applied to the *element*-coloured passes (sticks, balls, the cartoon's
+        base colours) and never to the surface, whose colours are a property
+        with a legend rather than a decoration.
+        """
+        amount = self._element_amount()
+        if mesh is None or getattr(mesh, "size", 0) == 0 or amount <= 0.0:
+            return mesh
+        data = np.array(mesh, dtype="f4", copy=True)
+        colours = data[:, 6:9]
+        data[:, 6:9] = colours + (1.0 - colours) * amount
+        return data
 
     def _ensure_capacity(self, which: str, needed: int) -> None:
         capacity = self._receptor_capacity if which == "receptor" else self._ligand_capacity
@@ -1689,6 +1793,7 @@ class Renderer:
 
     def _upload_mesh(self, which: str, data: np.ndarray) -> None:
         """Upload one rebuilt mesh, growing the buffer only when it must."""
+        data = self._lift_colors(data)
         vertices = 0 if data is None or data.size == 0 else int(data.shape[0])
         if which == "receptor":
             self.mesh_receptor_vertices = vertices
@@ -1941,6 +2046,7 @@ class Renderer:
 
     def _upload_focus_mesh(self, which: str, data: np.ndarray) -> None:
         """Upload one focus mesh (the same 9-float vertex format)."""
+        data = self._lift_colors(data)
         vertices = 0 if data is None or data.size == 0 else int(data.shape[0])
         if which == "receptor":
             self.focus_mesh_receptor_vertices = vertices
@@ -2179,7 +2285,7 @@ class Renderer:
 
         if style == "dots":
             atoms = list(atoms)[:: max(1, len(atoms) // 4000)]
-            return self._pack(atoms, base_scale * 0.35)
+            return self._pack_instances(atoms, base_scale * 0.35)
         if style in ("cartoon", "ribbon"):
             # The mesh carries this style; no spheres at all.
             return np.zeros((0, 7), dtype="f4")
@@ -2215,15 +2321,15 @@ class Renderer:
             # draws the impostor 1.35 x the radius it is handed, so
             # BALL_STICK_SCALE puts a carbon ball at ~0.30 Å on screen — an atom
             # you can see, with the two bond halves still readable under it.
-            return self._pack(atoms, BALL_STICK_SCALE)
+            return self._pack_instances(atoms, BALL_STICK_SCALE)
         if style == "spacefill":
             # Real van der Waals radii at 1:1 — no shrink factor at all — so the
             # ligand is exactly as large as it is and the pocket atoms whose
             # surfaces interpenetrate it are the ones it really touches. This is
             # the style for finding the binding atoms by eye.
-            return self._pack(atoms, 1.0)
+            return self._pack_instances(atoms, 1.0)
         # spheres
-        return self._pack(atoms, base_scale)
+        return self._pack_instances(atoms, base_scale)
 
     @staticmethod
     def _pack(atoms: Sequence[Atom], scale: float, radii_already: bool = False) -> np.ndarray:
@@ -2237,6 +2343,15 @@ class Renderer:
             data[i, 2] = a.z
             data[i, 3] = max(element_radius(a.element) * scale, 0.05)
             data[i, 4:7] = element_color(a.element)
+        return data
+
+    def _pack_instances(self, atoms: Sequence[Atom], scale: float) -> np.ndarray:
+        """:meth:`_pack`, with the element colours lifted for the light canvas."""
+        data = self._pack(atoms, scale)
+        amount = self._element_amount()
+        if data.size and amount > 0.0:
+            colours = data[:, 4:7]
+            data[:, 4:7] = colours + (1.0 - colours) * amount
         return data
 
     def box_handle_positions(self) -> List[Tuple[str, Tuple[float, float, float]]]:
@@ -2344,6 +2459,10 @@ class Renderer:
         mvp = (proj @ view).astype("f4")
         self._last_view = view
         self._last_proj = proj
+        # The eye is kept for the passes that have to offset geometry *along the
+        # view direction* (the dash outline): a draw call receives matrices, not
+        # a camera.
+        self._eye = np.asarray(camera.eye(), dtype="f8")
 
         if self.dirty_receptor:
             self.upload("receptor")
@@ -2527,6 +2646,39 @@ class Renderer:
         )
         return count
 
+    def _drawn_atom_ids(self, which: str) -> Optional[set]:
+        """``id()`` of the atoms of one group the base pass actually draws.
+
+        ``None`` means "not filtered" (no distance cut-off is in force), which
+        keeps the common case free. A group that is hidden returns an **empty**
+        set, so nothing that belongs to it is drawn.
+        """
+        if which == "receptor":
+            if not self.scene.show_receptor:
+                return set()
+            if self.scene.receptor_cutoff is None or self.scene.receptor_radius <= 0:
+                return None
+            return {id(atom) for atom in self.scene.visible_receptor()}
+        if not self.scene.show_ligand:
+            return set()
+        return None
+
+    def _atom_is_drawn(self, which: str, index: int) -> bool:
+        """Whether the atom an annotation names is part of the drawn scene.
+
+        A user reported "long parallel strips radiating from a small atom cluster
+        into empty space" with the receptor hidden: the contact lines were drawn
+        to receptor atoms that were no longer rendered, so every line ended in
+        nothing. The rule is simply that an annotation may not point at something
+        the frame does not contain — which is also why a contact to an atom
+        dropped by the binding-site cut-off must go with it.
+        """
+        atoms = self.scene.receptor if which == "receptor" else self.scene.ligand
+        if not (0 <= index < len(atoms)):
+            return False
+        allowed = self._drawn_atom_ids(which)
+        return allowed is None or id(atoms[index]) in allowed
+
     def _draw_focus(self, mvp: np.ndarray, view: np.ndarray) -> None:
         """Draw the emphasised interaction site, un-dimmed and on top.
 
@@ -2535,6 +2687,11 @@ class Renderer:
         atom — covering both the atoms the interaction names and the rest of
         their residues. The contact dashes are drawn after this pass, so the
         geometry of the interaction is never buried under the emphasis.
+
+        Both halves respect the **receptor** visibility switch. The mesh half
+        used to ignore it, so hiding the receptor left a cluster of focused
+        residues floating in the frame with contact lines running out of it —
+        which is exactly how a user described it.
         """
         program = self.mesh_prog
         program["u_dim"].value = 0.0
@@ -2542,15 +2699,21 @@ class Renderer:
         program["u_view"].write(np.ascontiguousarray(view.T, dtype="f4").tobytes())
         program["u_light_view"].value = (0.35, 0.45, 0.82)
         program["u_alpha"].value = 1.0
+        self.focus_mesh_drawn = {"receptor": False, "ligand": False}
         for which in ("receptor", "ligand"):
             if which == "receptor":
+                if not self.scene.show_receptor:
+                    continue
                 vertices = self.focus_mesh_receptor_vertices
                 vao = self.focus_mesh_receptor_vao
             else:
+                if not self.scene.show_ligand:
+                    continue
                 vertices = self.focus_mesh_ligand_vertices
                 vao = self.focus_mesh_ligand_vao
             if vertices and vao is not None:
                 vao.render(moderngl.TRIANGLES, vertices=vertices)
+                self.focus_mesh_drawn[which] = True
 
         entries = []
         key_entries = []
@@ -2718,9 +2881,17 @@ class Renderer:
         self.handle_prog["u_alpha"].value = 1.0
         self.handle_vao.render(moderngl.TRIANGLES, vertices=6, instances=len(entries))
 
-    #: Dash geometry: a dashed line is just many short segments.
-    DASH_LENGTH = 0.28
-    DASH_GAP = 0.20
+    #: The dark under-stroke on every dash is what makes a pale contact legible
+    #: on both viewport backgrounds (see :data:`Renderer.INTERACTION_OUTLINE`).
+    #: Dash geometry: a dashed line is many short segments, and the *count* is a
+    #: legibility choice — a 3 Å contact broken into seven 0.28 Å dashes reads as
+    #: a comb of parallel stripes rather than as one line, which is what a user
+    #: described as "a dozen or more parallel stripes". Longer dashes with longer
+    #: gaps give three or four segments per contact, so the eye follows the line
+    #: to its endpoint instead of counting its teeth. The endpoints do not move:
+    #: the drawn length is still exactly the reported distance.
+    DASH_LENGTH = 0.45
+    DASH_GAP = 0.38
 
     def _dashed(self, a, b, color, width: float = 1.0) -> List[tuple]:
         """A dashed segment as a list of (x1,y1,z1,r,g,b,a, x2,y2,z2,r,g,b,a)."""
@@ -2749,6 +2920,37 @@ class Renderer:
     INTERACTION_PIXELS = 3.0
     #: Radial segments of a dash tube: a handful is plenty at 3 px.
     INTERACTION_SIDES = 5
+    #: An **endpoint marker** at every atom an interaction names.
+    #:
+    #: A user reported that with the ``cartoon``/``ribbon`` styles a legitimate
+    #: 3.8 Å contact "reads as a long stroke emerging from nowhere": the line is
+    #: correct, but the *ribbon is not where the atoms are* — the tube is swept
+    #: along the C-alpha trace with a 1.05 Å half-width, so it swallows the atom
+    #: the dash ends on and the dash's end vanishes inside it. The marker is a
+    #: small puck at each named atom, sized in screen space like the dash, pushed
+    #: towards the camera far enough to clear the ribbon (the same "push along the
+    #: view direction" trick the dash under-stroke uses). It is drawn with the
+    #: depth test on, so protein genuinely in front of it still hides it.
+    INTERACTION_MARKER_PIXELS = 7.0
+    #: How far towards the camera the marker is pushed, in Å: the cartoon
+    #: ribbon's half-width (``_SS_SHAPE`` helix 1.05) plus a margin, so a marker
+    #: on a C-alpha is never inside the tube that swallowed the dash.
+    INTERACTION_MARKER_CLEARANCE = 1.25
+    #: A dark under-stroke on every dash: the outline is a fatter cylinder of
+    #: this colour, pushed away from the camera by exactly the radial difference
+    #: plus :data:`INTERACTION_OUTLINE_BIAS`, so the coloured core always wins
+    #: the depth test where they overlap and only the rim survives. It is what
+    #: makes a contact legible on *both* viewport backgrounds — a pale dash on
+    #: the dark canvas reads as a dark-edged object rather than a stray white
+    #: stroke, and a pale dash on the light canvas gets the dark edge it needs to
+    #: be visible at all.
+    INTERACTION_OUTLINE = (0.05, 0.06, 0.09, 0.85)
+    #: Outline radius as a multiple of the dash radius.
+    INTERACTION_OUTLINE_SCALE = 1.9
+    #: Extra outline width in Å, so a very thin dash still gets a rim.
+    INTERACTION_OUTLINE_MIN = 0.006
+    #: Extra depth bias in Å on top of the radial difference.
+    INTERACTION_OUTLINE_BIAS = 0.004
 
     def _draw_interactions(
         self,
@@ -2766,6 +2968,8 @@ class Renderer:
         receptor = self.scene.receptor
         ligand = self.scene.ligand
         segments: List[tuple] = []
+        endpoints: List[tuple] = []
+        skipped = 0
         for item in interactions:
             kind = getattr(item, "kind", "")
             a = getattr(item, "a", None)
@@ -2774,6 +2978,14 @@ class Renderer:
                 continue
             if not (0 <= a < len(receptor) and 0 <= b < len(ligand)):
                 continue
+            # An annotation may only point at something the frame contains: a
+            # hidden receptor (or a binding-site cut-off) takes its contacts with
+            # it, otherwise the lines end in empty space.
+            if not self._atom_is_drawn("receptor", a) or not self._atom_is_drawn(
+                "ligand", b
+            ):
+                skipped += 1
+                continue
             color = INTERACTION_COLORS.get(kind, (0.8, 0.8, 0.8, 0.9))
             ra = receptor[a]
             rb = ligand[b]
@@ -2781,11 +2993,62 @@ class Renderer:
             pb = (rb.x, rb.y, rb.z)
             if kind == "hydrophobic":
                 # A hydrophobic contact is a contact, not a directional bond:
-                # draw it as a sparse dotted column instead of a dashed line.
-                segments.extend(self._dotted(pa, pb, color, step=0.55))
+                # draw it as a sparse dotted column instead of a dashed line. The
+                # step is a legibility choice like the dash pitch — a dot every
+                # 0.55 Å put six dots on a 3 Å contact and read as a comb.
+                segments.extend(self._dotted(pa, pb, color, step=0.85))
             else:
                 segments.extend(self._dashed(pa, pb, color))
+            # The two atoms this dash names, for the endpoint markers.
+            endpoints.append((pa, color[:3]))
+            endpoints.append((pb, color[:3]))
+        self.endpoint_atoms = len(endpoints)
+        self.interactions_skipped = skipped
         self._draw_interaction_tubes(segments, mvp, view, height)
+        self._draw_interaction_markers(endpoints, mvp, view, height)
+
+    def _draw_interaction_markers(
+        self, endpoints, mvp: np.ndarray, view: np.ndarray, height: int
+    ) -> None:
+        """A small puck at every atom an interaction names.
+
+        Without one, a dash that ends on an atom inside the cartoon ribbon looks
+        like a stroke that comes from nowhere: the ribbon is swept along the
+        C-alpha trace and is 2 Å across, so it hides the atom the contact
+        actually makes. The puck is sized in screen space (the same projection
+        arithmetic the dashes use), pushed towards the camera by
+        :data:`INTERACTION_MARKER_CLEARANCE` so it clears that ribbon, and drawn
+        with the depth test on so real protein in front still hides it.
+        """
+        self.marker_count = 0
+        if not endpoints:
+            return
+        projection = np.asarray(self._last_proj, dtype="f8")
+        if abs(projection[1, 1]) < 1e-9:  # pragma: no cover - degenerate camera
+            return
+        matrix = np.asarray(view, dtype="f8")
+        eye = getattr(self, "_eye", None)
+        entries = []
+        for point, colour in endpoints:
+            middle = np.append(np.asarray(point, dtype="f8"), 1.0)
+            depth = -float((matrix @ middle)[2])
+            if depth <= 1e-4:
+                continue  # behind the camera
+            world_per_pixel = 2.0 * depth / (projection[1, 1] * max(height, 1))
+            radius = min(0.9, max(0.06, 0.5 * self.INTERACTION_MARKER_PIXELS * world_per_pixel))
+            place = np.asarray(point, dtype="f8")
+            if eye is not None:
+                place = push_along_view(
+                    place.reshape(1, 3),
+                    [-self.INTERACTION_MARKER_CLEARANCE],
+                    np.asarray(eye, dtype="f8"),
+                )[0]
+            entries.append((*place, radius, *colour))
+        if not entries:
+            return
+        self.marker_count = self._overlay_draw(
+            "markers", entries, 1.0, self._clip_front
+        )
 
     def _draw_interaction_tubes(
         self, segments, mvp: np.ndarray, view: np.ndarray, height: int
@@ -2809,8 +3072,17 @@ class Renderer:
         radii: List[float] = []
         colors: List[np.ndarray] = []
         for segment in segments:
+            # A segment is ``(pos_a, rgba, pos_b, rgba)`` — 14 floats, so the
+            # second endpoint starts at index **7**, not 6. Slicing at 6 took the
+            # colour's alpha channel as the x coordinate, which drew every dash
+            # tube to the point ``(1.0, y_b, z_b)``: a 3 Å contact became a strip
+            # 14-21 Å long running off into empty space. That is the mechanism
+            # behind both user reports ("many white lines after docking", and
+            # "long parallel strips radiating into empty space" with the receptor
+            # hidden); a test now asserts that every drawn tube's endpoints are
+            # the segment's endpoints.
             start = np.asarray(segment[0:3], dtype="f8")
-            end = np.asarray(segment[6:9], dtype="f8")
+            end = np.asarray(segment[7:10], dtype="f8")
             colour = np.asarray(segment[3:6], dtype="f8")
             middle = np.append(0.5 * (start + end), 1.0)
             depth = -float((matrix @ middle)[2])
@@ -2825,25 +3097,64 @@ class Renderer:
         if not starts:
             self.interaction_vertices = 0
             return
-        mesh = _cylinders(
-            np.asarray(starts),
-            np.asarray(ends),
-            np.asarray(radii),
-            np.asarray(colors),
-            sides=self.INTERACTION_SIDES,
-            caps=True,
-        )
-        self._upload_interaction_mesh(mesh)
-        if not self.interaction_vertices or self.interaction_vao is None:
-            return
+        starts_array = np.asarray(starts)
+        ends_array = np.asarray(ends)
+        radii_array = np.asarray(radii)
+        colors_array = np.asarray(colors)
+
         program = self.mesh_prog
         program["u_dim"].value = 0.0
         program["u_mvp"].write(np.ascontiguousarray(mvp.T, dtype="f4").tobytes())
         program["u_view"].write(np.ascontiguousarray(view.T, dtype="f4").tobytes())
         program["u_light_view"].value = (0.35, 0.45, 0.82)
         program["u_alpha"].value = 1.0
-        self.interaction_vao.render(
-            moderngl.TRIANGLES, vertices=self.interaction_vertices
+
+        # The dark under-stroke first, the coloured core over it. The outline is
+        # pushed away from the camera along the *view* direction of its own
+        # segment by exactly the radial difference it is wider by, so the core's
+        # near surface is always in front of the outline's and the depth test
+        # leaves only the rim visible. Without the push the fatter cylinder
+        # would simply occlude the core it is meant to frame.
+        outline_radii = radii_array * self.INTERACTION_OUTLINE_SCALE + self.INTERACTION_OUTLINE_MIN
+        outline = _cylinders(
+            self._push_from_camera(starts_array, outline_radii - radii_array),
+            self._push_from_camera(ends_array, outline_radii - radii_array),
+            outline_radii,
+            np.tile(np.asarray(self.INTERACTION_OUTLINE[:3], dtype="f8"), (len(starts), 1)),
+            sides=self.INTERACTION_SIDES,
+            caps=True,
+        )
+        self._upload_interaction_mesh(outline)
+        if self.interaction_vertices and self.interaction_vao is not None:
+            self.interaction_vao.render(
+                moderngl.TRIANGLES, vertices=self.interaction_vertices
+            )
+
+        mesh = _cylinders(
+            starts_array,
+            ends_array,
+            radii_array,
+            colors_array,
+            sides=self.INTERACTION_SIDES,
+            caps=True,
+        )
+        self._upload_interaction_mesh(mesh)
+        if not self.interaction_vertices or self.interaction_vao is None:
+            return
+        self.interaction_vao.render(moderngl.TRIANGLES, vertices=self.interaction_vertices)
+
+    def _push_from_camera(self, points: np.ndarray, distance: np.ndarray) -> np.ndarray:
+        """Move points away from the eye along their own view direction.
+
+        The eye is where the last frame was rendered from (there is nothing else
+        to know it from inside a draw call); a frame without a stored eye leaves
+        the geometry where it is, which only ever loses the outline.
+        """
+        eye = getattr(self, "_eye", None)
+        if eye is None:  # pragma: no cover - the first frame always stores one
+            return points
+        return push_along_view(
+            points, distance, eye, self.INTERACTION_OUTLINE_BIAS
         )
 
     def _upload_interaction_mesh(self, data: np.ndarray) -> None:
@@ -2997,7 +3308,7 @@ class Renderer:
         self.box_prog["u_mvp"].write(np.ascontiguousarray(mvp.T, dtype="f4").tobytes())
         # The edges keep a floor of their own alpha so a faint fill, or none at
         # all, still outlines the box.
-        self.box_prog["u_color"].value = (0.30, 0.85, 0.95, min(1.0, alpha + 0.45))
+        self.box_prog["u_color"].value = (*BOX_COLOR, min(1.0, alpha + 0.45))
         self.box_vao.render(moderngl.LINES)
         self.box_edge_vertices = 24
         if self.scene.show_box_handles:
@@ -3060,7 +3371,7 @@ class Renderer:
         data = np.asarray(vertices, dtype="f4")
         self.box_fill_buffer.write(data.tobytes())
         self.box_prog["u_mvp"].write(np.ascontiguousarray(mvp.T, dtype="f4").tobytes())
-        self.box_prog["u_color"].value = (0.30, 0.85, 0.95, alpha)
+        self.box_prog["u_color"].value = (*BOX_COLOR, alpha)
         self.box_fill_vao.render(moderngl.TRIANGLES, vertices=len(data))
         self.box_fill_triangles = len(data) // 3
 

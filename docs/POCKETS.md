@@ -60,17 +60,22 @@ The same structure, unchanged, re-detected at five settings:
 
 | structure | volume change of a tracked pocket | presence |
 |---|---|---|
-| 3ERT (ERα antagonist) | **±103 Å³ (35 % median)** | 7–11 pockets in the region |
-| 1ERE_A (ERα agonist) | **±89 Å³ (57 % median)** | 3–6 pockets in the region |
+| 3ERT (ERα antagonist) | **±103 Å³ (31 % median)** | 5–7 pockets in the region |
+| 1ERE_A (ERα agonist) | **±89 Å³ (79 % median)** | 2–3 pockets in the region |
+| 1HVR (HIV-1 protease) | ±199 Å³ (44 % median) | 4–7 pockets in the region |
+| 1HXW (HIV-1 protease) | ±117 Å³ (59 % median) | 6–8 pockets in the region |
 | 3PTB (trypsin) | ±51 Å³ (18 % median) | 1–2 pockets in the region |
 | 2PTN (trypsin) | ±136 Å³ (41 % median) | 1–2 pockets in the region |
 
 The detector's *absolute volume* is therefore **not a quantitative read-out**:
 sub-pocket partitioning cuts a cavity differently at a different grid spacing, so
 the same cavity's volume moves by tens of percent when nothing about the protein
-changes. The numbers move again when `--max-pockets` or the region changes
-(a 12-pocket cap on the same pair gives ±159 Å³ on 3ERT), which is why every
-number in this document is quoted with its configuration.
+changes. The numbers move again with `--max-pockets` and the region (a 40-pocket
+cap on the same ERα pair gives ±103 Å³ with a 35 % median on 3ERT, and anchoring
+the frame on 1ERE_A instead gives ±159 Å³), which is why every number in this
+document is quoted with its configuration — and why
+[`examples/ensemble_validation.py --pockets-only`](../examples/ensemble_validation.py)
+reproduces all six configurations in one run.
 
 What *is* readable is:
 
@@ -130,16 +135,15 @@ factor is printed, so the number can be recomputed by hand.
 
 | track | found in | volume (Å³) | free volume at the anchor (Å³) | resolution | ratio | verdict |
 |---|---|---|---|---|---|---|
-| 1 | 3ERT only | 474 | **410 → 4** | 71 | **5.7×** | closure → **cryptic** |
-| 2 | 3ERT only | 144 | **352 → 22** | 61 | **5.4×** | closure → **cryptic** |
-| 4 | 3ERT only | 55 | **366 → 4** | 64 | **5.7×** | closure, volume marginal → **cryptic** |
-| 5 | 3ERT only | 160 | 630 → 323 | 46 | 6.7× | **narrowed** (51 % remains) → not cryptic |
-| 6 | 1ERE_A only | 131 | 656 → 565 | 19 | 4.8× | **detector disagreement** (86 %) → not cryptic |
+| 1 | 3ERT only | 474 | **410 → 4** | 71 | **5.7×** | closure → **cryptic** (stability 1.00) |
+| 4 | 3ERT only | 55 | **366 → 4** | 64 | **5.7×** | closure, volume marginal → **cryptic** (0.60) |
+| 2 | 3ERT only | 144 | **352 → 22** | 61 | **5.4×** | closure → **cryptic** (0.80) |
+| 5 | 3ERT only | 160 | 630 → 323 | 46 | 6.7× | **narrowed** (51 % remains) → reported, not cryptic |
+| 6 | 1ERE_A only | 131 | 656 → 565 | 19 | 4.8× | **detector disagreement** (86 %) → reported, not cryptic |
 | 3 | both | 59–150 | 158 → 167 | 41 | 0.2× | unchanged → not cryptic |
 
-With the stability check on, **three** cavities are reported: tracks 1, 2 and 4,
-all present in 3ERT and gone in 1ERE_A, with stabilities 1.00, 0.80 and 0.60.
-The three that close are lined by
+With the stability check on, **three** cavities are reported: tracks 1, 4 and 2,
+all present in 3ERT and gone in 1ERE_A. The three that close are lined by
 
 * **THR347, ASP351, GLU380, TRP383, GLU419, ASN519, MET522, GLU523** (track 1,
   the largest: 474 Å³, 410 Å³ of free volume closed to 4 Å³);
@@ -188,7 +192,36 @@ noise", measured on the same pipeline.
 The raw detector output *does* differ between the two trypsins — one cavity is
 flagged in each structure and not the other — and the report says so, with the
 numbers that reject it. A control that passed because the detector happened to
-agree would have proved nothing.
+agree would have proved nothing. Reversing the frame (reference 2PTN, box from
+its sibling's benzamidine) gives the same answer: **zero candidates**, three
+transient tracks, all of them detector disagreements (free volumes 519/556,
+630/644, 527/565 Å³).
+
+## 5b. Measured: HIV-1 protease, a negative result worth having
+
+1HVR and 1HXW are two HIV-1 protease structures that differ by real motion — the
+**Ile50 flap tips move 1.4–1.6 Å** (section 1 of [`docs/ENSEMBLE.md`](ENSEMBLE.md))
+— so this is the pair where a cryptic cavity *should* be easiest to find if the
+method can find one. Region 14 Å around the XK263 box, `--max-pockets 12`:
+
+| track | found in | volume (Å³) | free volume (Å³) | resolution | ratio | verdict |
+|---|---|---|---|---|---|---|
+| 8 | 1HXW only | 129 | 542 (1HVR) / 693 (1HXW) | 39 | 3.9× | disagreement (128 %) → rejected |
+| 2 | 1HVR only | 308 | 445 / 483 | 49 | 0.8× | disagreement (109 %) → rejected |
+| 4 | 1HVR only | 143 | 525 / 553 | 45 | 0.6× | disagreement (105 %) → rejected |
+| 6 | 1HXW only | 239 | 592 / 645 | 53 | 1.0× | disagreement (109 %) → rejected |
+| 5, 1, 3 | both | 71–183 | e.g. 228 → 252 | 31–44 | ≤ 0.9× | unchanged → not cryptic |
+
+**Zero cryptic candidates in either reference direction**, and here the reason is
+not a small signal but the *wrong kind*: the free volume at those points is as
+large in the structure that does not reveal the cavity as in the one that does
+(542 vs 693 Å³, 445 vs 483 Å³, …), so what changed is the detector's sub-pocket
+partition, not the protein's free space. The flap motion is real — it moves the
+protein — but it does not open or close a cavity in this region by more than the
+method's resolution. That is a negative result obtained with the same pipeline
+that found the ERα closures, which is what makes it evidence rather than an
+absence of evidence. The detector noise here is also the largest measured
+(±199 Å³, 44 % median on 1HVR; ±117 Å³, 59 % on 1HXW), so the bar is higher.
 
 ## 6. Measured: synthetic cavities, where the arithmetic is exact
 
@@ -247,21 +280,26 @@ row is exact arithmetic, which is why `tests/test_pockets.py` can pin it.
 * **The region matters.** Without `--region-radius` the report is about the
   receptor's whole void network, including internal cavities and crystal-contact
   grooves that have nothing to do with the site of interest.
-* **The HIV-1 protease pair is not measured here for pockets.** `1HVR`/`1HXW`
-  is aligned and docked in [`docs/ENSEMBLE.md`](ENSEMBLE.md), but the pocket
-  analysis has not been run on it yet; the command in the header reproduces it in
-  about a minute if you want the numbers.
+* **A negative result is a result.** The HIV-1 protease pair (§5b) shows the
+  method can also say "the motion between these structures does not open or close
+  a cavity above the method's resolution", with the free volumes printed next to
+  it. That is the same pipeline, not a weaker version of it.
 
 ## 8. Reproducing every number
 
 ```bash
-python examples/ensemble_validation.py --pockets-only          # §4, §5, §6
+python examples/ensemble_validation.py --pockets-only   # §2, §4, §5, §5b, §6
 odock ensemble pockets -r 3ERT.pdb 1ERE_A.pdb --box-ligand OHT \
     --region-radius 14 --json-out pockets.json --pockets-pdb pockets.pdb
+odock ensemble pockets -r 1HVR.pdb 1HXW.pdb --box-ligand XK2 \
+    --region-radius 14 --max-pockets 12
 odock ensemble pockets -r 3PTB.pdb 2PTN.pdb --box-ligand BEN \
     --region-radius 12 --max-pockets 10
-python -m pytest tests/test_pockets.py -q                       # the same numbers
+python -m pytest tests/test_pockets.py -q                # the same numbers
 ```
+
+The script runs all six configurations (three pairs × both reference directions),
+writes `out/ensemble_validation.json` and prints the tables above.
 
 Operational note: redirect the report to a file rather than piping it into a
 filter that stops reading (`odock ... | Select-Object -First 20` on Windows kills

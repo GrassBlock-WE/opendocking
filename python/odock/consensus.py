@@ -66,6 +66,7 @@ __all__ = [
     "AD4_TYPES",
     "DEFAULT_SCORINGS",
     "PoseAtom",
+    "ChargeContext",
     "ConsensusPose",
     "ConsensusResult",
     "EnergyRow",
@@ -73,6 +74,7 @@ __all__ = [
     "StrainRow",
     "average_ranks",
     "box_from_any",
+    "charge_context",
     "consensus_score",
     "decomposition_rows",
     "decomposition_table",
@@ -648,6 +650,144 @@ class ConsensusPose:
 
 
 @dataclass
+class ChargeContext:
+    """What the AD4 component's electrostatics can and cannot be trusted to mean.
+
+    The AD4 kernel's electrostatic term is computed from the **PDBQT's** charges, so it
+    inherits whatever protonation state and charge model the preparation produced and
+    re-checks nothing.  The number is the kernel's and is not adjusted here; what this
+    context fixes is the *report*: a consumer can no longer present an
+    electrostatics-dependent number without saying whether the charges behind it can
+    represent the formal charges the chemistry implies.
+
+    ``ligand_known=False`` means the ligand's chemistry was not supplied, so the check
+    could not be made at all — which is itself a caveat, and it is stated rather than
+    left implicit.  See `docs/PROTONATION.md`.
+    """
+
+    #: Whether the ligand's chemistry was supplied at all.
+    ligand_known: bool = False
+    #: Whether a formal-charge correction was possible for this ligand
+    #: (:func:`odock.protonation.can_represent_formal_charge` on the charges it was
+    #: given), and whether this run applied one.
+    correction_possible: bool = False
+    correction_applied: bool = False
+    #: A one-line statement of the charge state, for a table cell.
+    state: str = ""
+    notes: List[str] = field(default_factory=list)
+
+    @property
+    def needs_attention(self) -> bool:
+        """Whether a report has to qualify its electrostatics.
+
+        True when the ligand is unknown, or when its charges cannot represent the
+        formal charges its groups imply and no correction was applied.
+        """
+        if not self.ligand_known:
+            return True
+        return bool(self.correction_possible and not self.correction_applied) or (
+            bool(self.notes) and not self.correction_applied and self.state.startswith("cannot")
+        )
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "ligand_known": bool(self.ligand_known),
+            "correction_possible": bool(self.correction_possible),
+            "correction_applied": bool(self.correction_applied),
+            "needs_attention": bool(self.needs_attention),
+            "state": self.state,
+            "notes": list(self.notes),
+        }
+
+
+def charge_context(
+    ligand=None,
+    *,
+    charges: Optional[Sequence[float]] = None,
+    correction_applied: bool = False,
+    ph: Optional[float] = None,
+    name: str = "",
+) -> ChargeContext:
+    """What the AD4 component's charges can support, for one ligand.
+
+    ``ligand`` is an RDKit molecule, a SMILES string or a path to a structure file;
+    ``charges`` is the partial-charge set that went into the PDBQT (the file's AD4
+    charges, usually).  Nothing is re-scored and no chemistry is changed: the AD4
+    number is the kernel's, and this only says whether the charges behind it can
+    represent the formal charges the chemistry implies.
+
+    **The RDKit import is deferred to this function.**  This module is deliberately
+    importable without RDKit (a CLI and the workbench both call it), and the whole
+    protonation check lives in :mod:`odock.protonation`, which is where the charge
+    reasoning belongs.
+    """
+    from . import protonation as _protonation
+
+    context = ChargeContext(correction_applied=bool(correction_applied))
+    if ligand is None:
+        context.state = "the ligand's chemistry was not supplied"
+        context.notes.append(
+            "the AD4 component's electrostatics are computed from the PDBQT's charges, "
+            "and this report was not given the ligand, so whether those charges can "
+            "represent its formal charges could not be checked.  Pass ligand=<mol>, "
+            "<SMILES> or a file path to have it checked (docs/PROTONATION.md)"
+        )
+        return context
+    mol = ligand
+    if isinstance(ligand, str):
+        try:
+            from rdkit import Chem as _Chem
+        except Exception:  # pragma: no cover - RDKit is a hard dependency for chemistry
+            context.state = "RDKit is unavailable, so the charges were not checked"
+            context.notes.append(context.state)
+            return context
+        text = ligand.strip()
+        if text and Path(text).exists():
+            from .chem.ligand import read_ligands
+
+            mols = read_ligands(text, embed=False)
+            mol = mols[0] if mols else None
+        else:
+            mol = _Chem.MolFromSmiles(text)
+    if mol is None:
+        context.state = "the ligand could not be parsed"
+        context.notes.append(
+            "the ligand's chemistry could not be parsed, so the AD4 component's charges "
+            "were not checked against its formal charges (docs/PROTONATION.md)"
+        )
+        return context
+    label = str(name) or _protonation._mol_name(mol, "ligand")
+    report = _protonation.protonation_report(
+        mol, name=label, ph=ph if ph else _protonation.DEFAULT_PH
+    )
+    values = None
+    if charges is not None:
+        candidate = np.asarray(charges, dtype=float).reshape(-1)
+        # The set has to line up with the molecule for any of this to mean anything; a
+        # mismatched array is ignored rather than silently mis-indexed.
+        values = candidate if candidate.shape[0] == mol.GetNumAtoms() else None
+    capability = _protonation.can_represent_formal_charge(mol, values)
+    context.ligand_known = True
+    context.correction_possible = not capability.possible
+    context.state = capability.statement()
+    if capability.possible:
+        context.notes.append(
+            f"{label}: the charges behind the AD4 term can represent this molecule's "
+            f"formal charges ({context.state})"
+        )
+        return context
+    context.notes.append(
+        f"{label}: {context.state}.  The AD4 number is the kernel's and is unchanged; "
+        "what this says is that its electrostatic part was computed for a different "
+        "species than the chemistry implies, so do not read the AD4 column as chemistry "
+        "(docs/PROTONATION.md)"
+    )
+    for warning in report.warnings:
+        context.notes.append(warning)
+    return context
+
+
+@dataclass
 class ConsensusResult:
     """The ranked consensus of one pose set across several force fields.
 
@@ -664,6 +804,10 @@ class ConsensusResult:
         The per-field weight actually used (normalised to sum to 1).
     correlations
         ``[(field_a, field_b, rho), ...]`` for every unordered pair.
+    charge
+        A :class:`ChargeContext`: what the AD4 component's charges can support.  The
+        AD4 number is not adjusted — this only stops the report implying more than
+        the charges allow.
     """
 
     poses: List[ConsensusPose] = field(default_factory=list)
@@ -671,6 +815,7 @@ class ConsensusResult:
     method: str = "rank"
     weights: Dict[str, float] = field(default_factory=dict)
     correlations: List[Tuple[str, str, float]] = field(default_factory=list)
+    charge: ChargeContext = field(default_factory=ChargeContext)
 
     # -- agreement ---------------------------------------------------------
 
@@ -718,6 +863,7 @@ class ConsensusResult:
             "method": self.method,
             "weights": dict(self.weights),
             "agreement": self.agreement,
+            "charges": self.charge.as_dict(),
             "correlations": [
                 {"a": a, "b": b, "rho": rho} for a, b, rho in self.correlations
             ],
@@ -793,6 +939,9 @@ def consensus_score(
     method: str = "rank",
     weights=None,
     components: Optional[Dict[str, Dict[str, Any]]] = None,
+    ligand=None,
+    ligand_charges: Optional[Sequence[float]] = None,
+    formal_charge_correction_applied: bool = False,
 ) -> ConsensusResult:
     """Rescore `poses` with each force field and combine them into one ranking.
 
@@ -812,6 +961,12 @@ def consensus_score(
     components
         A pre-computed :func:`rescore_poses` result, so a caller that has already
         paid for the rescoring does not pay twice.
+    ligand, ligand_charges, formal_charge_correction_applied
+        The ligand's chemistry (an RDKit molecule, a SMILES or a path) and the partial
+        charges that went into its PDBQT.  Supplying them makes the report say what the
+        AD4 component's electrostatics can support — the kernel's number is **not**
+        adjusted — and leaving them out makes the report say that the check was not
+        made.  See :func:`charge_context` and `docs/PROTONATION.md`.
 
     Returns
     -------
@@ -895,6 +1050,10 @@ def consensus_score(
         method=method,
         weights=share,
         correlations=correlations,
+        charge=charge_context(
+            ligand, charges=ligand_charges,
+            correction_applied=bool(formal_charge_correction_applied),
+        ),
     )
 
 

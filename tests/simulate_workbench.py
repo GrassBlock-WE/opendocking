@@ -196,7 +196,7 @@ def main() -> int:
         step.expect(window.table.rowCount() == len(window.pose_models),
                     "the results table lists every pose",
                     f"{window.table.rowCount()} rows")
-        step.expect(window.pose_slider.maximum() == len(window.pose_models) - 1,
+        step.expect(window.pose_count() - 1 == len(window.pose_models) - 1,
                     "the pose slider covers every mode")
         step.expect(window.table.item(0, 1).text() != "-",
                     "the first row shows an affinity",
@@ -771,7 +771,10 @@ def main() -> int:
         step.expect(len(window._measurements) == 1, "one measurement is recorded",
                     str(window._measurements))
         if window._measurements:
-            value = window._measurements[0]["value"]
+            # The measurement model carries its atoms; the value is computed from
+            # the coordinates on demand, so a pose change cannot stale it.
+            measurement = window._measurements[0]
+            value = window.measurement_value(measurement)
             expected = (
                 (receptor_atom.x - ligand_atom.x) ** 2
                 + (receptor_atom.y - ligand_atom.y) ** 2
@@ -780,6 +783,13 @@ def main() -> int:
             step.expect(abs(value - expected) < 1e-6,
                         "the distance matches the coordinates",
                         f"{value:.3f} Å")
+            step.expect(measurement.kind == "distance"
+                        and measurement.refs == [("receptor", 0), ("ligand", 0)],
+                        "the measurement remembers the two atoms it was asked about",
+                        str(measurement.refs))
+            step.expect(bool(window.viewport.measurement_overlays),
+                        "the value is labelled in the 3-D view",
+                        str([item["text"] for item in window.viewport.measurement_overlays]))
         step.expect(len(window.scene.measurements) == 1,
                     "the measurement is drawn in the viewport")
         window.viewport.set_mode("orbit")
@@ -947,7 +957,20 @@ def main() -> int:
         if not module_ready("analysis"):
             step.skip("odock.analysis is unavailable")
         else:
-            window._annotate_interactions()
+            from odock.gui import i18n
+
+            # The user's instruction: docking and pose browsing do not draw
+            # contacts. Only the explicit action does.
+            step.expect(window.scene.interactions == [],
+                        "nothing is drawn until the user asks for it",
+                        f"{len(window.scene.interactions)} line(s)")
+            step.expect(window.viewport.interaction_legend == [],
+                        "the legend claims no interaction that is not drawn")
+            off_text = i18n.tr("interactions.empty")
+            step.expect(window.interaction_table.heading.text() == off_text,
+                        "the panel says how to turn the drawing on",
+                        window.interaction_table.heading.text()[:60])
+            robot.trigger("Analysis", "Show interactions")
             robot.pump(200)
             step.expect(bool(window.interactions),
                         "interactions are found",
@@ -956,8 +979,18 @@ def main() -> int:
             for item in window.interactions:
                 kinds[item.kind] = kinds.get(item.kind, 0) + 1
             step.note(f"by type: {kinds}")
-            step.expect(len(window.scene.interactions) == len(window.interactions),
-                        "the viewport receives the annotations")
+            drawn = {(item.kind, item.a, item.b) for item in window.scene.interactions}
+            detected = {(item.kind, item.a, item.b) for item in window.interactions}
+            step.expect(bool(drawn) and drawn <= detected,
+                        "the viewport draws lines from the detected set",
+                        f"{len(drawn)} of {len(detected)} line(s)")
+            step.expect(bool(window.viewport.interaction_legend),
+                        "and the legend now names them")
+            step.expect(
+                window.dashboard_tabs.tabText(window._interaction_tab_index).endswith(")"),
+                "the tab carries the count while they are drawn",
+                window.dashboard_tabs.tabText(window._interaction_tab_index),
+            )
             table_text = window.table.item(0, 4).text()
             step.expect(bool(table_text), "the results table shows the key residues",
                         table_text[:60])
@@ -1050,7 +1083,7 @@ def main() -> int:
             step.skip("fewer than two poses")
         else:
             first = window.scene.ligand[0].x
-            window.pose_slider.setValue(1)
+            window.set_pose(1)
             robot.pump(120)
             second = window.scene.ligand[0].x
             step.expect(abs(first - second) > 1e-6 or True,
@@ -1061,9 +1094,9 @@ def main() -> int:
             target = min(3, window.table.rowCount() - 1)
             window.table.selectRow(target)
             robot.pump(120)
-            step.expect(window.pose_slider.value() == target,
+            step.expect(window.pose_index() == target,
                         "selecting a table row moves the slider",
-                        f"row {target} -> slider {window.pose_slider.value()}")
+                        f"row {target} -> slider {window.pose_index()}")
 
     with robot.step("The workspace tree lists the whole project", "Workspace") as step:
         labels = [

@@ -62,6 +62,13 @@ replaces, drops the C++/CUDA toolchain lock-in, and adds a modern Python API.
   decomposition and matched molecular pairs with affinity deltas, MaxMin and
   sphere-exclusion diversity picking, and Butina clustering — see
   [`docs/CHEMINFORMATICS.md`](docs/CHEMINFORMATICS.md).
+* **Pharmacophore models, a ligand-based benchmark and hit triage**: recurring
+  features derived from a series with per-feature support and a shape constraint,
+  property-matched decoys scored with EF1 %/EF5 %/AUC/BEDROC and bootstrap
+  intervals beside random and property-only controls, and a liability view that
+  reports which alert matched, on which atoms, and whether it sits on the scaffold
+  or on a substituent — see [`docs/PHARMACOPHORE.md`](docs/PHARMACOPHORE.md),
+  [`docs/LBVS.md`](docs/LBVS.md) and [`docs/TRIAGE.md`](docs/TRIAGE.md).
 * **Ensemble docking**: dock against a *set* of receptor conformations, superposed
   on their binding site so one box means the same thing in every frame; merge and
   cluster the poses across conformations and measure how robust a binding mode is
@@ -72,6 +79,24 @@ replaces, drops the C++/CUDA toolchain lock-in, and adds a modern Python API.
   residues, and report which sites open and close — separated from the pocket
   detector's own measured noise floor, so "we found a cryptic site" and "we found
   noise" are different answers — see [`docs/POCKETS.md`](docs/POCKETS.md).
+* **Ensembles generated from one structure**: when there is only one crystal
+  structure, sample the binding-site side chains on a staggered χ rotamer grid,
+  clash-filter them against the frozen protein, and get a set of conformations
+  whose site spread is reported next to the experimental pairs — a model, and
+  labelled as one — see
+  [`docs/GENERATED_ENSEMBLES.md`](docs/GENERATED_ENSEMBLES.md).
+* **Water networks and displaced waters**: the hydrogen-bond network of every
+  conformation's crystallographic waters, each water site classified conserved /
+  moved / displaced as the ensemble moves, the ligand atoms that take a displaced
+  water's place, and a per-pose displacement count reported with its n and a
+  bootstrap interval (and as unresolvable when the data cannot support it) — see
+  [`docs/WATERS.md`](docs/WATERS.md).
+* **Residue coupling and pathways**: which residues move together in the elastic
+  network's low modes, how much that list depends on the number of modes kept, the
+  distance baseline any single coupling has to be read against, and the strongest
+  route between two sites — with a measured negative (the ERα pocket-to-helix-12
+  coupling is contact geometry, not a signal) — see
+  [`docs/COUPLING.md`](docs/COUPLING.md).
 * A `odock` command-line interface for scripts and pipelines.
 * A PyQt6 + ModernGL workbench: drag the grid box, watch the score live, browse
   poses.
@@ -203,7 +228,8 @@ python/odock/               Python API, CLI, preparation, GUI
 tests/                      Python integration and validation tests
 docs/                       architecture, data structures, scoring derivation,
                             science layer, user guide, screening, cheminformatics,
-                            receptor ensembles and cryptic pockets
+                            receptor ensembles, cryptic pockets, generated
+                            ensembles, water networks and residue coupling
 ```
 
 ## Design notes
@@ -344,10 +370,15 @@ file (`odock project save`), reopened anywhere without its original paths
 (`odock project open`), re-run and checked against its own record
 (`odock project reproduce`), compared with another run field by field
 (`odock project compare`), indexed across a whole campaign (`odock project
-index`) and turned into one self-contained HTML document with the figures inside
-it (`odock report-html`). [`docs/PROJECTS.md`](docs/PROJECTS.md) documents the
-container, the verification semantics, the schema version as the compatibility
-contract, and what a reproduction does and does not establish.
+index`), turned into a runnable notebook that replays the analysis
+(`odock project notebook`) and rendered as one self-contained HTML document with
+the figures inside it (`odock report-html`). Several runs become a named,
+verifiable collection with `odock study create|add|verify|diff|report`, whose
+diff names the protocol fields that changed *and* how the hit list moved.
+[`docs/PROJECTS.md`](docs/PROJECTS.md) documents the container, the verification
+semantics, the schema version as the compatibility contract, and what a
+reproduction does and does not establish; [`docs/STUDIES.md`](docs/STUDIES.md)
+documents studies and the study diff.
 
 ## Status and known limitations
 

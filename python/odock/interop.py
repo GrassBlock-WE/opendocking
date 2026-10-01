@@ -72,7 +72,7 @@ INTERACTION_COLORS: Dict[str, Tuple[float, float, float, float]] = {
     "salt_bridge": (0.95, 0.25, 0.85, 0.95),
     "pi_pi": (0.25, 0.90, 0.35, 0.95),
     "cation_pi": (0.98, 0.60, 0.15, 0.95),
-    "hydrophobic": (0.62, 0.64, 0.68, 0.75),
+    "hydrophobic": (0.56, 0.58, 0.44, 0.90),
     "clash": (1.00, 0.15, 0.15, 1.00),
 }
 
@@ -214,6 +214,19 @@ class SceneState:
     receptor_values: Optional[Sequence[float]] = None
     #: Same for the ligand, so a ligand property survives the trip too.
     ligand_values: Optional[Sequence[float]] = None
+    #: Viewer annotations, in the shape ``odock.gui.app`` hands them over:
+    #: ``{"text": str, "anchor": ("receptor"|"ligand", index) |
+    #: {"residue": (chain, res_id, res_name)} | {"measurement": int},
+    #: "color": (r, g, b), "visible": bool}``. An annotation anchored to a
+    #: residue is placed at that residue's centroid; an invisible one is
+    #: skipped, because that is what the viewer shows.
+    annotations: Sequence = ()
+    #: Atom-referenced measurements (the richer kind the measurement tool
+    #: records): ``{"kind": "distance"|"angle"|"dihedral"|"centroid"|"plane"|
+    #: "plane_angle"|"plane_bond", "refs": [("receptor"|"ligand", index), ...],
+    #: "split": int | None, "value": float, "unit": "Å"|"°"}``. This supplements
+    #: :attr:`measurements`, which are world-space point pairs.
+    viewer_measurements: Sequence = ()
     property_name: str = ""
     property_unit: str = ""
     property_range: Optional[Tuple[float, float]] = None
@@ -503,9 +516,88 @@ def _pymol_set_view(camera: Optional[dict]) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 
+def _value_text(value, unit: str) -> str:
+    """``"3.21 A"`` for a measurement value, or ``""`` when there is none."""
+    if value is None:
+        return ""
+    try:
+        number = f"{float(value):.2f}"
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        return ""
+    return f"{number} {unit}".strip()
+
+
+def _escape_pymol(text: str) -> str:
+    """Make a label safe inside a PyMOL double-quoted string."""
+    return str(text).replace("\\", "/").replace('"', "'").replace("\n", " ")
+
+
 def _pymol_color(kind: str) -> str:
     red, green, blue, _alpha = INTERACTION_COLORS.get(kind, (0.8, 0.8, 0.8, 1.0))
     return f"set_color {kind}_color, [{red:.3f}, {green:.3f}, {blue:.3f}]"
+
+
+def _anchor_point(state: "SceneState", anchor):
+    """``(point, atom or None)`` for an annotation anchor, or ``(None, None)``.
+
+    ``anchor`` is the viewer's own shape: a ``("receptor"|"ligand", index)``
+    pair, a ``{"residue": (chain, res_id, res_name)}`` mapping (placed at the
+    residue's centroid) or a ``{"measurement": index}`` reference (placed at the
+    first atom that measurement names).
+    """
+    if isinstance(anchor, dict):
+        if "residue" in anchor:
+            key = tuple(anchor["residue"])[:3]
+            members = [
+                atom
+                for atom in state.receptor
+                if (
+                    str(getattr(atom, "chain", "") or ""),
+                    int(getattr(atom, "res_id", 0) or 0),
+                    str(getattr(atom, "res_name", "") or ""),
+                )
+                == (str(key[0]), int(key[1]), str(key[2]))
+            ]
+            if not members:
+                return None, None
+            point = tuple(
+                sum(float(getattr(atom, axis)) for atom in members) / len(members)
+                for axis in ("x", "y", "z")
+            )
+            return point, None
+        if "measurement" in anchor:
+            try:
+                index = int(anchor["measurement"])
+                measurement = state.viewer_measurements[index]
+                refs = list(measurement.get("refs") or [])
+                if refs:
+                    return _anchor_point(state, tuple(refs[0]))
+            except Exception:
+                return None, None
+            return None, None
+        return None, None
+    try:
+        which, index = str(anchor[0]), int(anchor[1])
+    except (TypeError, IndexError, ValueError, KeyError):
+        return None, None
+    atom = state.receptor_atom(index) if which == "receptor" else state.ligand_atom(index)
+    if atom is None:
+        return None, None
+    return (float(atom.x), float(atom.y), float(atom.z)), atom
+
+
+def _measurement_ref_atoms(state: "SceneState", measurement):
+    """``(which, index, atom)`` triples for a viewer measurement, or ``[]``."""
+    out = []
+    for ref in list(measurement.get("refs") or []):
+        try:
+            which, index = str(ref[0]), int(ref[1])
+        except (TypeError, IndexError, ValueError):
+            continue
+        atom = state.receptor_atom(index) if which == "receptor" else state.ligand_atom(index)
+        if atom is not None:
+            out.append((which, index, atom))
+    return out
 
 
 def pymol_script(state: SceneState) -> str:
@@ -610,6 +702,82 @@ def pymol_script(state: SceneState) -> str:
         if label:
             lines.append(f'label m{index}, "{label}"')
     if state.measurements:
+        lines.append("")
+
+    # -- the measurement tool's richer measurements ------------------------
+    # A distance, an angle and a dihedral are commands both viewers have; a
+    # centroid, a plane and the plane/plane or plane/bond angles are not, so
+    # those are emitted as a labelled comment plus the pseudoatoms of the atoms
+    # involved rather than as an invented command (the viewer's own reported
+    # value is carried in the comment).
+    simple = {"distance": "distance", "angle": "angle", "dihedral": "dihedral"}
+    unsupported: List[str] = []
+    for index, measurement in enumerate(state.viewer_measurements or (), start=1):
+        kind = str(measurement.get("kind", "") or "").lower()
+        refs = _measurement_ref_atoms(state, measurement)
+        if not refs:
+            lines.append(f"# measurement {index} ({kind}) skipped: no usable atoms")
+            continue
+        value = measurement.get("value")
+        unit = str(measurement.get("unit", "") or "")
+        name = f"viewer_{kind}_{index}"
+        selections = [
+            f"{which} and index {atom_index + 1}" for which, atom_index, _atom in refs
+        ]
+        if kind in simple and len(selections) == (3 if kind in ("angle", "dihedral") else 2):
+            lines.append("# %s %s" % (kind, _value_text(value, unit)))
+            lines.append(f"{simple[kind]} {name}, " + ", ".join(selections))
+            lines.append(f"color yellow, {name}")
+        else:
+            unsupported.append(name)
+            lines.append(
+                "# %s %s -- %s has no single-verb equivalent in PyMOL; the atoms it"
+                % (kind, _value_text(value, unit), kind)
+            )
+            lines.append(
+                "# names are marked with pseudoatoms instead of guessing a command."
+            )
+            for position, (which, atom_index, atom) in enumerate(refs, start=1):
+                lines.append(
+                    "pseudoatom %s_%d, pos=[%.3f, %.3f, %.3f]"
+                    % (
+                        name,
+                        position,
+                        float(getattr(atom, "x", 0.0)),
+                        float(getattr(atom, "y", 0.0)),
+                        float(getattr(atom, "z", 0.0)),
+                    )
+                )
+            lines.append(f"show spheres, {name}_*")
+            lines.append(f"color orange, {name}_*")
+            lines.append(f'label {name}_1, "{kind} {_value_text(value, unit)}"')
+    if state.viewer_measurements:
+        lines.append("")
+
+    # -- viewer annotations ------------------------------------------------
+    labels: List[str] = []
+    for index, note in enumerate(state.annotations or (), start=1):
+        if not note.get("visible", True):
+            continue
+        text = str(note.get("text", "") or "").strip()
+        if not text:
+            continue
+        point, atom = _anchor_point(state, note.get("anchor"))
+        if point is None:
+            lines.append(f"# annotation {index} skipped: its anchor is not in the scene")
+            continue
+        name = f"note_{index}"
+        red, green, blue = (float(v) for v in (list(note.get("color") or (1.0, 1.0, 0.5)) + [0.5])[:3])
+        lines.append(f'pseudoatom {name}, pos=[{point[0]:.3f}, {point[1]:.3f}, {point[2]:.3f}]')
+        lines.append(f"set_color {name}_color, [{red:.3f}, {green:.3f}, {blue:.3f}]")
+        lines.append(f"color {name}_color, {name}")
+        lines.append(f"show spheres, {name}")
+        lines.append(f"set sphere_scale, 0.25, {name}")
+        lines.append(f'label {name}, "{_escape_pymol(text)}"')
+        lines.append(f"set label_color, {name}_color, {name}")
+        labels.append(name)
+        del atom
+    if labels:
         lines.append("")
 
     # The search box, as eight corner markers: cheap, and unmistakable.
@@ -749,6 +917,72 @@ def chimerax_script(state: SceneState) -> str:
             % (index, float(second[0]), float(second[1]), float(second[2]))
         )
         lines.append("distance m%d #90%d #91%d" % (index, index, index))
+
+    # The measurement tool's atom-referenced measurements: distance, angle and
+    # dihedral map onto ChimeraX commands; centroid/plane/plane-angle have no
+    # single-verb form, so those become labelled markers plus the value.
+    simple = {"distance": "distance", "angle": "angle", "dihedral": "dihedral"}
+    for index, measurement in enumerate(state.viewer_measurements or (), start=1):
+        kind = str(measurement.get("kind", "") or "").lower()
+        refs = _measurement_ref_atoms(state, measurement)
+        value = measurement.get("value")
+        unit = str(measurement.get("unit", "") or "")
+        if not refs:
+            lines.append(f"# measurement {index} ({kind}) skipped: no usable atoms")
+            continue
+        specs = [
+            _chimerax_atom_spec("#1" if which == "receptor" else "#2", atom)
+            for which, _atom_index, atom in refs
+        ]
+        if kind in simple and len(specs) == (3 if kind in ("angle", "dihedral") else 2):
+            lines.append("# %s %s" % (kind, _value_text(value, unit)))
+            lines.append(f"{simple[kind]} {kind}_{index} " + " ".join(specs))
+            lines.append(f"color {kind}_{index} goldenrod")
+        else:
+            lines.append(
+                "# %s %s -- ChimeraX has no single-verb equivalent for %s; the"
+                % (kind, _value_text(value, unit), kind)
+            )
+            lines.append("# atoms it names are marked instead of guessing a command.")
+            for position, (which, _atom_index, atom) in enumerate(refs, start=1):
+                lines.append(
+                    "marker #80%d%d position %.3f,%.3f,%.3f radius 0.25 color orange"
+                    % (
+                        index % 10,
+                        position,
+                        float(getattr(atom, "x", 0.0)),
+                        float(getattr(atom, "y", 0.0)),
+                        float(getattr(atom, "z", 0.0)),
+                    )
+                )
+
+    # Viewer annotations: a named marker at the anchor, with the label text.
+    for index, note in enumerate(state.annotations or (), start=1):
+        if not note.get("visible", True):
+            continue
+        text = str(note.get("text", "") or "").strip()
+        if not text:
+            continue
+        point, _atom = _anchor_point(state, note.get("anchor"))
+        if point is None:
+            lines.append(f"# annotation {index} skipped: its anchor is not in the scene")
+            continue
+        red, green, blue = (
+            float(v) for v in (list(note.get("color") or (1.0, 1.0, 0.5)) + [0.5])[:3]
+        )
+        lines.append(
+            "marker #70%d position %.3f,%.3f,%.3f radius 0.3 color #%02x%02x%02x"
+            % (
+                index % 10,
+                point[0],
+                point[1],
+                point[2],
+                int(round(red * 255)),
+                int(round(green * 255)),
+                int(round(blue * 255)),
+            )
+        )
+        lines.append('label #70%d text "%s"' % (index % 10, str(text).replace('"', "'")))
 
     if state.box is not None:
         center, size = state.box

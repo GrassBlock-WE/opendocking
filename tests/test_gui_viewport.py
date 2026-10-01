@@ -168,8 +168,13 @@ def test_loading_a_missing_file_does_not_block(qapp):
     window.close()
 
 
-def test_pose_slider_switches_the_displayed_model(qapp):
-    """Browsing poses must update the ligand shown in the viewport."""
+def test_choosing_a_pose_switches_the_displayed_model(qapp):
+    """Browsing poses must update the ligand shown in the viewport.
+
+    The pose slider was removed from the dock (the table is how a pose is chosen
+    now), so this drives the window's pose API, which is what the table, the
+    arrow keys, the player and the console all call.
+    """
     text = "MODEL 1\n" + LIGAND_PDBQT + "ENDMDL\n"
     text += "MODEL 2\n" + LIGAND_PDBQT.replace("0.000   0.000   0.000", "4.000   0.000   0.000") + "ENDMDL\n"
     window = DockingWorkbench(receptor=RECEPTOR_PDBQT, poses=text)
@@ -180,7 +185,7 @@ def test_pose_slider_switches_the_displayed_model(qapp):
     assert window.table.rowCount() == 2
 
     first = window.scene.ligand[0].x
-    window.pose_slider.setValue(1)
+    window.set_pose(1)
     qapp.processEvents()
     assert window.scene.ligand[0].x != first
     window.close()
@@ -956,7 +961,7 @@ def test_selecting_a_pose_reannotates_but_never_moves_the_camera(qapp, monkeypat
         float(window.viewport.camera.elevation),
     )
 
-    window.pose_slider.setValue(1)
+    window.set_pose(1)
     qapp.processEvents()
     assert window._pose_index == 1
 
@@ -964,7 +969,17 @@ def test_selecting_a_pose_reannotates_but_never_moves_the_camera(qapp, monkeypat
     assert seen, "choosing a pose must re-run the contact search"
     assert seen[-1]["hbond"] == pytest.approx(4.4)
     assert isinstance(window.scene.interactions, list)
-    assert len(window.scene.interactions) == len(window.interactions)
+    # What is *drawn* is the detection set reduced for legibility: the kind filter
+    # plus one hydrophobic line per receptor residue. Every drawn line must
+    # therefore be a detected one, and a residue must appear at most once.
+    detected = {(item.kind, item.a, item.b) for item in window.interactions}
+    drawn = {(item.kind, item.a, item.b) for item in window.scene.interactions}
+    assert drawn <= detected
+    assert len(drawn) == len(window.scene.interactions), "no duplicate lines"
+    hydrophobic = [
+        item for item in window.scene.interactions if item.kind == "hydrophobic"
+    ]
+    assert len(hydrophobic) == len({tuple(item.residue) for item in hydrophobic})
 
     # ...the pose label names what it binds (when it binds anything)...
     label = window.lbl_pose.text()
@@ -989,7 +1004,7 @@ def test_selecting_a_pose_reannotates_but_never_moves_the_camera(qapp, monkeypat
     qapp.processEvents()
     assert window._ghost_visible
     assert len(window.scene.ghost_ligand) == len(window.pose_models[0].atoms)
-    window.pose_slider.setValue(0)
+    window.set_pose(0)
     qapp.processEvents()
     assert window.scene.ghost_ligand == [], "pose 1 is its own reference"
     window._toggle_ghost(False)
@@ -1216,7 +1231,7 @@ def test_the_interaction_dashes_are_visible_not_hairlines(qapp):
     window.show()
     qapp.processEvents()
     assert window.viewport.renderer is not None
-    window.pose_slider.setValue(2)
+    window.set_pose(2)
     qapp.processEvents()
     window._annotate_interactions(quiet=True)
     qapp.processEvents()
@@ -1240,9 +1255,14 @@ def test_the_interaction_dashes_are_visible_not_hairlines(qapp):
     qapp.processEvents()
 
     changed = int((np.abs(with_dashes - without).sum(axis=2) > 12).sum())
-    assert changed > 400, (
+    # The budget is per contact, not absolute: the number of drawn lines depends
+    # on the pose and on the one-line-per-residue reduction, so a fixed total
+    # would measure the pose rather than the dash width.
+    per_contact = changed / max(1, len(saved))
+    assert per_contact > 60, (
         f"the contact dashes are hairline-thin again: {changed} pixels changed "
-        f"for {len(saved)} contacts (the old gl.LINES pass measured ~44)"
+        f"for {len(saved)} contacts ({per_contact:.0f} each; the old gl.LINES "
+        f"pass measured ~44 in total)"
     )
     window.close()
 
@@ -1349,7 +1369,7 @@ def test_every_pose_draws_the_same_protein(qapp):
 
     states = []
     for index in range(len(window.pose_models)):
-        window.pose_slider.setValue(index)
+        window.set_pose(index)
         qapp.processEvents()
         states.append(
             (
@@ -1382,7 +1402,7 @@ def test_every_pose_draws_the_same_protein(qapp):
     try:
         frames = []
         for index in range(len(window.pose_models)):
-            window.pose_slider.setValue(index)
+            window.set_pose(index)
             qapp.processEvents()
             clear_annotation()
             frames.append(_rendered_frame(window))
@@ -1399,7 +1419,7 @@ def test_every_pose_draws_the_same_protein(qapp):
     qapp.processEvents()
     shots = []
     for index in range(len(window.pose_models)):
-        window.pose_slider.setValue(index)
+        window.set_pose(index)
         qapp.processEvents()
         shots.append(_rendered_frame(window))
     assert not np.array_equal(shots[0], shots[1])

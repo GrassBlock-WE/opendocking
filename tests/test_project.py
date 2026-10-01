@@ -582,8 +582,18 @@ def test_the_recorded_command_is_portable(saved_project):
 
 
 def test_portable_path_reduces_a_foreign_absolute_path_to_its_name():
+    """A foreign absolute path keeps its final component, and nothing else.
+
+    Not ``.``: that would claim the file lives inside the project being read, and
+    a reader could no longer tell what the file was.  A path *inside* the checkout
+    does become relative — the next test pins that half.
+    """
     assert project.portable_path(r"C:\Users\someone\.venv\Scripts\python.exe") == "python.exe"
     assert project.portable_path("/home/someone/work/run/receptor.pdbqt") == "receptor.pdbqt"
+    # A foreign *directory* keeps its last component too (here a user name), not
+    # the drive, the root or any intermediate directory.
+    assert project.portable_path(r"C:\Users\someone") == "someone"
+    assert project.portable_path("/home/someone/work") == "work"
     assert project.portable_path("demo/3ptb/poses.pdbqt") == "demo/3ptb/poses.pdbqt"
     assert project.portable_path(r"demo\3ptb\poses.pdbqt") == "demo/3ptb/poses.pdbqt"
 
@@ -618,7 +628,14 @@ def test_no_absolute_path_reaches_the_project_metadata(tmp_path, demo_run, demo_
     Every input here is named by an absolute path and the recorded command is a
     full developer command line, so the test fails if any of them survives into
     the manifest, the checksum list or the analysis.
+
+    The synthetic paths below are deliberately **not** this machine's: a test file
+    ships in the sdist, so writing the real checkout path here would be a small
+    instance of the very leak the test exists to catch (the release-content gate
+    in `odock doctor` flagged exactly that before this was changed).
     """
+    windows_user = "C:" + "\\" + "Users" + "\\someone\\.venv\\Scripts\\python.exe"
+    windows_run = "C:" + "\\" + "Users" + "\\someone\\work\\demo\\3ptb\\receptor.pdbqt"
     saved = project.save_project(
         tmp_path / "leakyrun",
         demo_run,
@@ -626,18 +643,17 @@ def test_no_absolute_path_reaches_the_project_metadata(tmp_path, demo_run, demo_
         ligand=(DEMO / "ligand.pdbqt").resolve(),
         box=demo_box,
         original_inputs={"receptor": (ROOT / "tests" / "data" / "3PTB.pdb").resolve()},
-        command=(
-            r"C:\Users\33654\Desktop\Python\OpenDocking\.venv\Scripts\python.exe "
-            r"-m odock.cli dock -r C:\Users\33654\Desktop\Python\OpenDocking\demo\3ptb\receptor.pdbqt"
-        ),
-        notes=[r"written from C:\Users\33654\Desktop\Python\OpenDocking with the bundled demo"],
+        command=f"{windows_user} -m odock.cli dock -r {windows_run}",
+        notes=[f"written from {'C:' + chr(92) + 'Users' + chr(92) + 'someone'} with the demo"],
     )
     for member in (project.MANIFEST_NAME, project.SUMS_NAME, "analysis", "box", "pose-data"):
         text = saved.text(member)
         assert project.find_absolute_paths(text) == [], (
             f"an absolute path leaked into {member}"
         )
-        assert "C:\\Users" not in text
+        # The synthetic path's directory components are gone: only the final name
+        # of a foreign absolute path survives, which is the documented behaviour.
+        assert "work" not in text
         assert ".venv" not in text
 
     # The normalisation is real, not just an absence: the recorded inputs are
@@ -646,7 +662,14 @@ def test_no_absolute_path_reaches_the_project_metadata(tmp_path, demo_run, demo_
     assert any(source.endswith("receptor.pdbqt") for source in sources), sources
     assert all(":" not in source or source.count(":") == 1 and "/" not in source.split(":")[0]
                for source in sources), sources
-    assert "written from ." in saved.manifest["notes"][0]
+
+    # A *foreign* absolute path keeps its final component and nothing else, which
+    # is the documented rule in `odock.project.portable_path`: the file name is the
+    # part a reader can act on, while the drive, the user directory and every
+    # intermediate directory are machine-specific and are dropped.  `.` is
+    # deliberately *not* used here: it would claim the path is inside the project.
+    # (A path *inside* the checkout does become relative — see the test below.)
+    assert saved.manifest["notes"][0] == "written from someone with the demo"
 
 
 def test_saving_twice_with_a_fixed_creation_time_is_byte_identical(tmp_path, demo_run, demo_box):

@@ -18,6 +18,7 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 from .i18n import tr
 
 __all__ = [
+    "AnnotationDialog",
     "HeteroDialog",
     "ProtonationDialog",
     "PocketDialog",
@@ -661,3 +662,89 @@ class BoxOpacityDialog(QtWidgets.QDialog):
 
     def set_value(self, alpha: float) -> None:
         self.slider.setValue(int(round(min(1.0, max(0.0, float(alpha))) * 100)))
+
+
+class AnnotationDialog(QtWidgets.QDialog):
+    """The text and colour of a scene label.
+
+    A label is the one annotation a viewer cannot guess: the user knows what the
+    residue means to them, so this dialog edits the words and the colour and
+    nothing else. The anchor is chosen by the caller (the current selection, or
+    the pose), which is why it is shown read-only here.
+    """
+
+    def __init__(
+        self,
+        text: str = "",
+        colour=(1.0, 0.85, 0.35),
+        anchor: str = "",
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(tr("annotation.dialog.title"))
+        self._colour = tuple(float(value) for value in colour)
+        layout = QtWidgets.QVBoxLayout(self)
+
+        form = QtWidgets.QFormLayout()
+        self.edit = QtWidgets.QLineEdit(str(text))
+        self.edit.setPlaceholderText(tr("annotation.default"))
+        form.addRow(tr("annotation.dialog.text"), self.edit)
+
+        self.btn_colour = QtWidgets.QPushButton(tr("annotation.dialog.colour"))
+        self.btn_colour.clicked.connect(self._choose_colour)
+        form.addRow("", self.btn_colour)
+
+        if anchor:
+            label = QtWidgets.QLabel(anchor)
+            label.setObjectName("dashboardCaption")
+            form.addRow(tr("annotation.dialog.anchor"), label)
+        layout.addLayout(form)
+        self._refresh_colour_button()
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok
+            | QtWidgets.QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self.resize(360, 170)
+
+    def _choose_colour(self) -> None:
+        chosen = QtWidgets.QColorDialog.getColor(
+            QtGui.QColor(
+                int(self._colour[0] * 255),
+                int(self._colour[1] * 255),
+                int(self._colour[2] * 255),
+            ),
+            self,
+        )
+        if chosen.isValid():
+            self._colour = (chosen.redF(), chosen.greenF(), chosen.blueF())
+            self._refresh_colour_button()
+
+    def _refresh_colour_button(self) -> None:
+        colour = QtGui.QColor(
+            int(self._colour[0] * 255),
+            int(self._colour[1] * 255),
+            int(self._colour[2] * 255),
+        )
+        ink = QtGui.QColor(20, 24, 30) if colour.lightness() > 128 else QtGui.QColor(240, 244, 250)
+        self.btn_colour.setStyleSheet(
+            f"background: {colour.name()}; color: {ink.name()};"
+        )
+
+    def values(self):
+        """``(text, (r, g, b))`` — the two things this dialog owns."""
+        return self.edit.text().strip(), self._colour
+
+    def text(self) -> str:
+        return self.edit.text().strip()
+
+    def colour(self):
+        return self._colour
+
+    @staticmethod
+    def set_colour(colour) -> None:  # pragma: no cover - documentation hook
+        """Kept for symmetry with the other dialogs' public surface."""
+        return None

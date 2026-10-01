@@ -70,6 +70,75 @@ SMALL_BOX = BoxSpec(center=(0.0, 0.0, 0.0), size=(20.0, 20.0, 20.0), spacing=0.5
 
 
 # ---------------------------------------------------------------------------
+# The AD4 component's charge context
+# ---------------------------------------------------------------------------
+
+
+def test_the_ad4_report_says_when_it_could_not_check_the_charges():
+    """A consumer must not present an electrostatics-dependent number without saying
+    what the charges behind it can support.
+
+    The AD4 kernel's electrostatic term comes from the PDBQT's charges, so a report
+    that was never given the ligand cannot claim the check was made — and the AD4
+    number itself is not adjusted either way.
+    """
+    unknown = consensus.charge_context(None)
+    assert unknown.ligand_known is False
+    assert unknown.needs_attention is True
+    assert unknown.correction_applied is False
+    assert "could not be checked" in unknown.notes[0]
+    assert "PROTONATION" in unknown.notes[0]
+    assert unknown.as_dict()["needs_attention"] is True
+    # A ligand with a charged group it cannot represent: flagged, with the reason.
+    neutral = consensus.charge_context("N=C(N)c1ccccc1")
+    assert neutral.ligand_known is True
+    assert neutral.correction_possible is True
+    assert neutral.correction_applied is False
+    assert neutral.needs_attention is True
+    assert "would carry +1" in neutral.state
+    assert "AD4 number is the kernel's and is unchanged" in " ".join(neutral.notes)
+    # The same ligand with a correction applied: the caveat is discharged.
+    corrected = consensus.charge_context(
+        "N=C(N)c1ccccc1", correction_applied=True
+    )
+    assert corrected.needs_attention is False
+    # A charged ligand whose chemistry matches: nothing to report.
+    charged = consensus.charge_context("NC(=[NH2+])c1ccccc1")
+    assert charged.correction_possible is False
+    assert charged.needs_attention is False
+    assert "can represent this molecule's formal charges" in charged.notes[0]
+    # A molecule with no ionisable group is not a problem either.
+    assert consensus.charge_context("c1ccccc1").needs_attention is False
+    # A charge set that does not line up with the molecule is ignored, not mis-indexed.
+    mismatched = consensus.charge_context(
+        "N=C(N)c1ccccc1", charges=np.zeros(3)
+    )
+    assert mismatched.ligand_known is True
+    assert "would carry +1" in mismatched.state, "the molecule's own charges are used"
+    # An unparsable ligand is named rather than silently passing.
+    broken = consensus.charge_context("not a molecule")
+    assert broken.ligand_known is False and broken.needs_attention is True
+    assert "could not be parsed" in broken.notes[0]
+
+
+def test_the_charge_context_is_reachable_from_a_consensus_run():
+    """``consensus_score`` carries it, so a report cannot quietly omit it."""
+    result = consensus_score(
+        [SINGLE_LIGAND], SMALL_RECEPTOR, SMALL_BOX, scorings=("ad4",),
+        ligand="N=C(N)c1ccccc1", ligand_charges=np.array([-0.30, 0.40, -0.32, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1]),
+    )
+    assert result.charge.ligand_known is True
+    assert result.charge.needs_attention is True, "the charges cannot represent the amidine"
+    assert result.as_dict()["charges"]["needs_attention"] is True
+    # Without the ligand the flag says the check was not made, and still warns.
+    blind = consensus_score([SINGLE_LIGAND], SMALL_RECEPTOR, SMALL_BOX, scorings=("ad4",))
+    assert blind.charge.ligand_known is False
+    assert blind.as_dict()["charges"]["ligand_known"] is False
+    # The scores themselves are untouched by any of this.
+    assert result.poses[0].scores.keys() == blind.poses[0].scores.keys()
+
+
+# ---------------------------------------------------------------------------
 # Rank primitives
 # ---------------------------------------------------------------------------
 

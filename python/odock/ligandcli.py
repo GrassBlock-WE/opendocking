@@ -698,25 +698,52 @@ def _add_lbvs(subs) -> None:
         help="benchmark a ligand-based screen (EF1%%, EF5%%, AUC, BEDROC + intervals)",
         description=(
             "Score actives plus decoys with the 2-D fingerprint search, the 3-D "
-            "pharmacophore fit and a rigid shape/electrostatic overlay, and report "
-            "EF1%, EF5%, AUC and BEDROC(20) with bootstrap intervals — beside a "
-            "random ranking and a property-only ranking, so 'no signal' and 'trivial "
+            "pharmacophore fit and a shape/electrostatic overlay, and report EF1%, "
+            "EF5%, AUC and BEDROC(20) with bootstrap intervals — beside a random "
+            "ranking and a property-only ranking, so 'no signal' and 'trivial "
             "signal' can be read next to the methods.  Every method is scored "
             "leave-one-out: the actives are their own queries otherwise, and every "
-            "metric is then a perfect 1.000 for free."
+            "metric is then a perfect 1.000 for free.  --shape picks between the two "
+            "overlay engines; both are reported when both method names are asked for, "
+            "so the delta is visible on the same actives and decoys."
         ),
     )
     lb.add_argument("-a", "--actives", action="append", required=True, metavar="FILE")
     lb.add_argument("-d", "--decoys", action="append", required=True, metavar="FILE",
                     help="the decoy files (`odock decoys -o` writes one)")
     lb.add_argument("--methods", default="fingerprint,pharmacophore,shape",
-                    help="comma-separated: fingerprint, pharmacophore, shape, shape_only")
+                    help="comma-separated: fingerprint, pharmacophore, shape, "
+                         "shape_only, overlay, overlay_only, crude, crude_only, "
+                         "overlay_esp, crude_esp, crude_shape")
+    lb.add_argument(
+        "--shape", dest="shape_engine", default="overlay", choices=["crude", "overlay"],
+        help="the engine the 'shape' method uses: 'overlay' (default) is the "
+             "Gaussian shape + electrostatic overlay with an optimised pose; 'crude' "
+             "is the older single-pose grid overlay.  On the bundled decoy bands the "
+             "crude engine measured the higher AUC — run both with "
+             "--methods overlay,crude to see it on your own data",
+    )
     lb.add_argument("--conformers", type=int, default=2, help="conformers per molecule")
     lb.add_argument("--bootstrap", type=int, default=200, help="bootstrap resamples")
     lb.add_argument("--seed", type=int, default=20240101)
+    lb.add_argument(
+        "--shape-sigma", type=float, default=0.5,
+        help="Gaussian width of the shape density used by the 'overlay' engine (Å)",
+    )
+    lb.add_argument(
+        "--shape-weight", type=float, default=0.5,
+        help="weight of the shape term in the overlay score; the rest is the "
+             "electrostatic Carbo index (clamped at 0)",
+    )
     lb.add_argument("--prefilter", type=float, default=None, metavar="FRACTION",
-                    help="also report what a fingerprint pre-filter at this fraction "
-                         "keeps (active recall and the docking workload saved)")
+                    help="also report what a pre-filter at this fraction keeps "
+                         "(active recall and the docking workload saved)")
+    lb.add_argument(
+        "--prefilter-method", default="fingerprint", choices=["fingerprint", "usr"],
+        help="the pre-filter: 'fingerprint' (2-D, free) or 'usr' (3-D shape "
+             "descriptors; needs conformers, and its active recall is measured and "
+             "reported, because it is not free)",
+    )
     lb.add_argument("--json-out", help="write the whole report as JSON")
     lb.set_defaults(func=cmd_lbvs)
 
@@ -810,6 +837,7 @@ def cmd_lbvs(args) -> int:
         names=active_names,
         decoy_names=decoy_names,
         methods=methods,
+        shape_engine=str(args.shape_engine),
         conformers=int(args.conformers),
         bootstrap=int(args.bootstrap),
         seed=int(args.seed),
@@ -820,6 +848,14 @@ def cmd_lbvs(args) -> int:
     for result in report.results:
         for note in result.notes:
             print(f"  {result.method}: {note}")
+        if result.ranking.details:
+            terms = result.ranking.terms()
+            print(
+                f"  {result.method}: mean shape {terms['mean_shape']:.3f}, mean ESP "
+                f"{terms['mean_esp']:+.3f} over {terms['n']} molecule(s) — the terms "
+                "are reported separately because the combined score hides which one "
+                "did the ranking"
+            )
 
     payload = report.as_dict()
     if args.prefilter is not None:
@@ -830,16 +866,34 @@ def cmd_lbvs(args) -> int:
             list(actives) + list(decoy_mols),
             actives,
             keep=float(args.prefilter),
+            method=str(args.prefilter_method),
+            conformers=int(args.conformers),
+            seed=int(args.seed),
         )
         print()
         print(
-            f"pre-filter at {float(args.prefilter):.0%}: keeps {summary['n_kept']} of "
-            f"{summary['n_library']} molecule(s) and {summary['actives_kept']} of "
-            f"{summary['n_actives']} active(s) ({summary['active_recall']:.0%} recall); "
-            f"estimated docking {summary['estimated_seconds_full']:.0f} s -> "
+            f"pre-filter at {float(args.prefilter):.0%} ({summary['method']}): keeps "
+            f"{summary['n_kept']} of {summary['n_library']} molecule(s) and "
+            f"{summary['actives_kept']} of {summary['n_actives']} active(s) "
+            f"({summary['active_recall']:.0%} recall); estimated docking "
+            f"{summary['estimated_seconds_full']:.0f} s -> "
             f"{summary['estimated_seconds_kept']:.0f} s "
             f"({summary['workload_saved_fraction']:.0%} saved)"
         )
+        if "overlay_seconds_kept" in summary:
+            print(
+                f"  overlay cost: {summary['overlay_seconds_kept']:.2f} s measured on "
+                f"the kept molecule(s) against "
+                f"{summary['overlay_seconds_full_estimate']:.1f} s extrapolated to the "
+                f"whole library ({summary['overlay_saved_fraction']:.0%} saved); "
+                f"{summary['conformers_per_molecule']:.2f} conformer(s) per molecule, "
+                f"descriptors {summary['descriptor_seconds']:.2f} s"
+            )
+            print(
+                f"  with self-match allowed the same filter keeps "
+                f"{summary['self_match_actives_kept']} of {summary['n_actives']} "
+                "active(s) for free — that is the leak, not the recall"
+            )
         if summary["actives_lost"]:
             print(f"  actives lost: {', '.join(summary['actives_lost'])}")
         for note in summary["notes"]:
@@ -852,6 +906,502 @@ def cmd_lbvs(args) -> int:
             "odock lbvs: pass --json-out to keep the full rankings; the table above is "
             "the summary"
         )
+    return 0
+
+
+def _add_triage(subs) -> None:
+    """``odock triage``: the liability view of a hit list."""
+    tr = subs.add_parser(
+        "triage",
+        help="triage a hit list: structural alerts, drug-likeness, grouped by series",
+        description=(
+            "What is wrong with these molecules?  Runs the published alert "
+            "catalogues (PAINS A/B/C, Brenk, NIH, ZINC) and a documented SMARTS "
+            "liability set, reports WHERE each alert sits (scaffold, substituent or "
+            "mixed), adds the property panel with the Lipinski, Veber, Egan and "
+            "Ghose rules, and groups the whole table by the scaffold series the tool "
+            "already computes.  Alerts are literature-derived patterns, not "
+            "predictions: absence of an alert is not safety, and none of it "
+            "substitutes for an assay."
+        ),
+    )
+    tr.add_argument(
+        "-i", "--input", action="append", required=True, metavar="FILE",
+        help="library file (.sdf/.smi/.mol2/.pdb/.pdbqt); repeat to combine several",
+    )
+    tr.add_argument(
+        "--affinities",
+        help="a screening results.jsonl/results.csv: adds the docked or measured "
+             "value to each row and sorts nothing by it (triage is not a ranking)",
+    )
+    tr.add_argument(
+        "--catalogues", default="PAINS,BRENK,NIH,ZINC",
+        help="comma-separated catalogues: PAINS, PAINS_A, PAINS_B, PAINS_C, BRENK, "
+             "NIH, ZINC (or 'none' for the SMARTS alerts alone)",
+    )
+    tr.add_argument("--no-smarts", action="store_true", help="skip the embedded SMARTS alerts")
+    tr.add_argument(
+        "--clean-only", action="store_true", help="print only the molecules with no alert"
+    )
+    tr.add_argument(
+        "--flagged-only", action="store_true", help="print only the molecules with an alert"
+    )
+    tr.add_argument("--top", type=int, default=0, help="show at most N molecules (0 = all)")
+    tr.add_argument("-o", "--out", help="write the per-molecule table as CSV or XLSX")
+    tr.add_argument("--json-out", help="write the whole triage report as JSON")
+    tr.set_defaults(func=cmd_triage)
+
+
+def cmd_triage(args) -> int:
+    """Run the triage and print the series view, the rates and the table."""
+    import csv
+    from pathlib import Path
+
+    from .cli import _chemistry_guard, _eprint, _lazy, _load_affinities, _read_library, _write_json
+
+    triage = _lazy("odock.triage", "hit triage")
+    mols, names = _read_library(list(args.input))
+    affinities = _load_affinities(args.affinities) if args.affinities else {}
+
+    wanted = [part.strip() for part in str(args.catalogues).split(",") if part.strip()]
+    catalogues = [] if wanted and wanted[0].lower() in ("none", "-") else wanted
+    report = _chemistry_guard(
+        triage.triage_library,
+        mols,
+        names=names,
+        affinities=affinities,
+        catalogues=catalogues,
+        smarts=not args.no_smarts,
+    )
+
+    print(
+        f"triage: {report.n_molecules} molecule(s), {report.n_flagged} with at least one "
+        f"alert, {report.n_clean} clean"
+    )
+    print()
+    print(
+        "alert rates (a catalogue that flags a large fraction is telling you about "
+        "the catalogue):"
+    )
+    print(report.rates_table())
+    print()
+    print(f"series: {len(report.groups)} group(s) by Murcko scaffold")
+    print(report.series_table())
+
+    rows = report.molecules
+    if args.clean_only:
+        rows = [molecule for molecule in rows if molecule.clean]
+    if args.flagged_only:
+        rows = [molecule for molecule in rows if not molecule.clean]
+    if args.top and int(args.top) > 0:
+        rows = rows[: int(args.top)]
+    print()
+    print(f"molecules ({len(rows)} shown):")
+    subset = triage.TriageReport(
+        molecules=rows,
+        groups=report.groups,
+        rates=report.rates,
+        catalogues=report.catalogues,
+        seconds=report.seconds,
+        notes=report.notes,
+    )
+    print(subset.table())
+    print()
+    for note in report.notes:
+        print(f"  note: {note}")
+
+    if args.out:
+        target = Path(args.out)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        header = [
+            "name", "affinity", "clean", "scaffold", "n_alerts", "alerts", "alert_locations",
+            "failed_rules", "MW", "LogP", "TPSA", "HBD", "HBA", "RotB", "QED", "SA_score",
+        ]
+        rows_out = [_triage_row(molecule) for molecule in rows]
+        if target.suffix.lower() in (".xlsx", ".xlsm"):
+            try:
+                from openpyxl import Workbook
+            except Exception:  # pragma: no cover - openpyxl is a test dependency
+                _eprint("odock triage: openpyxl is unavailable; writing CSV instead")
+                target = target.with_suffix(".csv")
+            else:
+                workbook = Workbook()
+                sheet = workbook.active
+                sheet.title = "triage"
+                sheet.append(header)
+                for row in rows_out:
+                    sheet.append(row)
+                workbook.save(target)
+                rows_out = None
+        if rows_out is not None:
+            with target.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(header)
+                writer.writerows(rows_out)
+        _eprint(f"wrote {target}")
+    if args.json_out:
+        payload = report.as_dict()
+        payload["shown"] = len(rows)
+        _write_json(args.json_out, payload)
+    return 0
+
+
+def _triage_row(molecule) -> list:
+    """One CSV/XLSX row for a triaged molecule."""
+    values = (molecule.properties.values if molecule.properties else {}) or {}
+    return [
+        molecule.name,
+        "" if molecule.affinity is None else round(float(molecule.affinity), 4),
+        "1" if molecule.clean else "0",
+        molecule.scaffold,
+        len(molecule.alerts),
+        "; ".join(alert.label() for alert in molecule.alerts),
+        "; ".join(f"{alert.origin}:{alert.location}" for alert in molecule.alerts),
+        "; ".join(molecule.failed_rules),
+        _num_or_blank(values.get("MW")),
+        _num_or_blank(values.get("LogP")),
+        _num_or_blank(values.get("TPSA")),
+        _num_or_blank(values.get("HBD")),
+        _num_or_blank(values.get("HBA")),
+        _num_or_blank(values.get("RotB")),
+        _num_or_blank(values.get("QED")),
+        _num_or_blank(values.get("SA_score")),
+    ]
+
+
+def _num_or_blank(value):
+    if value is None:
+        return ""
+    try:
+        return round(float(value), 4)
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        return ""
+
+
+def _add_conformers(subs) -> None:
+    """``odock conformers``: report the ensemble quality behind a 3-D score."""
+    cf = subs.add_parser(
+        "conformers",
+        help="measure a library's conformer ensembles (RMSD, energy, torsion coverage)",
+        description=(
+            "Every 3-D ligand-based score in this tool — the pharmacophore fit, the "
+            "shape/electrostatic overlay, the 3-D similarity search — rests on a "
+            "conformer ensemble, and this command reports what that ensemble is: how "
+            "many conformers survived the RMSD pruning and the energy window, how far "
+            "apart they are, what fraction of the rotamer space they visit, and how "
+            "long the embedding took.  A molecule that keeps one conformer scores "
+            "1.000 against itself and says nothing about its flexibility; the report "
+            "says which molecules those are."
+        ),
+    )
+    cf.add_argument(
+        "-i", "--input", action="append", required=True, metavar="FILE",
+        help="library file (.sdf/.smi/.mol2/.pdb/.pdbqt); repeat to combine several",
+    )
+    cf.add_argument(
+        "--n-conformers", type=int, default=None,
+        help="embedding attempts per molecule; omit for the rotor-scaled default "
+             "(8 per rotatable bond, at least 16, at most 128), or give an explicit "
+             "count — which is honoured exactly, so a published protocol is "
+             "reproducible",
+    )
+    cf.add_argument("--seed", type=int, default=20240101, help="ETKDGv3 embedding seed")
+    cf.add_argument(
+        "--rmsd-prune", type=float, default=0.5,
+        help="heavy-atom RMSD above which two conformers are kept as different (Å)",
+    )
+    cf.add_argument(
+        "--energy-window", type=float, default=10.0,
+        help="keep conformers within this many kcal/mol of the best (MMFF94 or UFF)",
+    )
+    cf.add_argument(
+        "--fixed-attempts", action="store_true",
+        help="with the default attempt count, use the old fixed 16 attempts per "
+             "molecule instead of scaling with the rotatable-bond count",
+    )
+    cf.add_argument(
+        "--keep-input", action="store_true",
+        help="report the input coordinates as they are instead of re-embedding; a "
+             "docked pose or a crystal structure must not be silently replaced",
+    )
+    cf.add_argument("--top", type=int, default=0, help="show at most N molecules (0 = all)")
+    cf.add_argument("--json-out", help="write the per-molecule measurements as JSON")
+    cf.set_defaults(func=cmd_conformers)
+
+
+def cmd_conformers(args) -> int:
+    """Embed a library and print the ensemble measurements, per molecule."""
+    from .cli import _chemistry_guard, _eprint, _lazy, _read_library, _write_json
+
+    conformers = _lazy("odock.conformers", "conformer generation")
+    mols, names = _read_library(list(args.input))
+    with_coordinates = sum(1 for mol in mols if mol.GetNumConformers() > 0)
+    if args.keep_input and with_coordinates < len(mols):
+        _eprint(
+            f"odock conformers: --keep-input, but only {with_coordinates} of "
+            f"{len(mols)} molecule(s) carry 3-D coordinates; the rest are embedded "
+            "because a SMILES has no pose to keep"
+        )
+    ensembles = []
+    for mol, name in zip(mols, names):
+        ensembles.append(
+            _chemistry_guard(
+                conformers.build_ensemble,
+                mol,
+                n_conformers=None if args.n_conformers is None else int(args.n_conformers),
+                seed=int(args.seed),
+                rmsd_prune=float(args.rmsd_prune),
+                energy_window=float(args.energy_window),
+                prune=True,
+                minimize=True,
+                name=name,
+                scale_with_rotors=not args.fixed_attempts,
+                use_input_conformers=bool(args.keep_input),
+            )
+        )
+    quality = conformers.ensemble_quality(ensembles)
+    print(
+        f"conformers: {quality['n_embedded']} of {quality['n_molecules']} molecule(s) "
+        f"embedded ({quality['embed_rate']:.0%}), "
+        f"{quality['conformers_mean']:.2f} conformer(s) kept on average "
+        f"(median {quality['conformers_median']:.0f}, min {quality['conformers_min']}) "
+        f"from {quality['attempts_per_molecule']:.1f} attempt(s) per molecule, "
+        f"{quality['seconds_per_molecule']:.3f} s per molecule"
+    )
+    print(
+        "  accounting: attempts -> embedded -> (-energy, -RMSD) -> kept: "
+        f"{quality['attempts_total']} -> {quality['embedded_total']} -> "
+        f"(-{quality['losses']['energy_window']}, -{quality['losses']['rmsd_prune']}) "
+        f"-> {sum(item.n_conformers for item in ensembles)}"
+        f"   (dominant loss: {quality['dominant_loss']})"
+    )
+    print(
+        f"  mean torsion coverage {quality['torsion_coverage_mean']:.0%} of its "
+        f"{quality['coverage_ceiling_mean']:.0%} ceiling "
+        f"({quality['coverage_fraction_of_ceiling']:.0%} of what the conformer count "
+        "allows; k conformers can occupy at most k of a bond's six rotamer bins)"
+    )
+    print(
+        f"  mean RMSD spread {quality['rmsd_spread_mean']:.2f} Å, "
+        f"{quality['rotors_mean']:.1f} rotatable bond(s) per molecule, "
+        f"{quality['scaled_attempts']} molecule(s) on the rotor-scaled rule"
+    )
+    print()
+    rows = ensembles
+    if args.top and int(args.top) > 0:
+        rows = rows[: int(args.top)]
+    if rows:
+        print(
+            f"{'molecule':<28}{'rot':>3}{'att':>6}{'emb':>6}{'Ecut':>7}{'Rcut':>7}"
+            f"{'kept':>6}{'cov':>8}{'ceil':>8}{'s':>8}"
+        )
+    for ensemble in rows:
+        print(ensemble.accounting_line())
+        print(ensemble.table())
+    if args.top and int(args.top) > 0 and len(ensembles) > int(args.top):
+        print(f"... and {len(ensembles) - int(args.top)} more molecule(s)")
+    if quality["failed"]:
+        _eprint(
+            f"odock conformers: {len(quality['failed'])} molecule(s) could not be "
+            "embedded; every 3-D score for them is 0, not a low score"
+        )
+    print()
+    print(
+        "note: an ensemble is a sample of a modelled space at one seed, not the "
+        "space itself — and a rigid molecule's ensemble is one geometry, which the "
+        "torsion-coverage column shows as an empty one"
+    )
+    if args.json_out:
+        payload = dict(quality)
+        payload["input"] = [str(source) for source in args.input]
+        payload["n_conformers_requested"] = (
+            None if args.n_conformers is None else int(args.n_conformers)
+        )
+        payload["rotor_scaled"] = not args.fixed_attempts
+        payload["seed"] = int(args.seed)
+        payload["rmsd_prune"] = float(args.rmsd_prune)
+        payload["energy_window"] = float(args.energy_window)
+        payload["accounting"] = [item.accounting() for item in ensembles]
+        payload["ensembles"] = [item.as_dict() for item in ensembles]
+        _write_json(args.json_out, payload)
+    return 0
+
+
+def _add_pocket_score(subs) -> None:
+    """``odock pocket-score``: rank a library against the receptor's pocket."""
+    ps = subs.add_parser(
+        "pocket-score",
+        help="rank a library by shape and electrostatic complementarity with a pocket",
+        description=(
+            "Score each library molecule against the receptor itself rather than "
+            "against another ligand: the pocket's shape field and its electrostatic "
+            "potential are built once from the receptor and the docking box, and every "
+            "conformer is placed in the pocket by a rigid-body search and scored by "
+            "looking the field up at its atoms.  The score is shape complementarity "
+            "(a snug-contact kernel, a clash penalty, and a size term against a "
+            "reference ligand when one is given) plus the ligand-receptor Coulomb "
+            "interaction.  This is a fast screen, not a docking: the receptor does not "
+            "move and a complementarity is not a binding energy."
+        ),
+    )
+    ps.add_argument("-r", "--receptor", required=True,
+                    help="the receptor PDBQT (its own charges are used)")
+    ps.add_argument("-i", "--input", action="append", required=True, metavar="FILE",
+                    help="the library (.smi/.sdf/...); repeat to combine several")
+    ps.add_argument("-b", "--box", help="a box.json with center/size (demo/3ptb/box.json)")
+    ps.add_argument("--center", help="box centre as x,y,z (an alternative to --box)")
+    ps.add_argument("--size", help="box size as x,y,z (an alternative to --box)")
+    ps.add_argument("--spacing", type=float, default=None,
+                    help="pocket grid spacing in Å (default 0.8; 0.5 is finer and "
+                         "about 4x slower to build)")
+    ps.add_argument(
+        "--reference-ligand",
+        help="a pose to calibrate the size term on (the co-crystallised ligand): its "
+             "van der Waals volume becomes the size the pocket is known to accept. "
+             "Without it the size term is off and the score saturates",
+    )
+    ps.add_argument("--size-reference", type=float, default=None,
+                    help="the size reference in Å³, instead of --reference-ligand")
+    ps.add_argument("--conformers", type=int, default=None,
+                    help="embedding attempts per molecule (default: rotor-scaled)")
+    ps.add_argument("--poses", type=int, default=64,
+                    help="start rotations per conformer in the placement search")
+    ps.add_argument("--top", type=int, default=0, help="show at most N molecules")
+    ps.add_argument("--keep", type=float, default=None, metavar="FRACTION",
+                    help="also report what a pocket-score pre-filter at this fraction "
+                         "keeps, with the recall of the actives named by --actives")
+    ps.add_argument("--actives", action="append", metavar="NAME",
+                    help="a known binder's name, for the --keep recall (repeatable)")
+    ps.add_argument("--no-electrostatics", action="store_true",
+                    help="shape only (the ESP term on these charges can mislead: see "
+                         "docs/POCKET_SCORE.md)")
+    ps.add_argument("--seed", type=int, default=20240101)
+    ps.add_argument("--json-out", help="write the field, the ranking and the recall")
+    ps.set_defaults(func=cmd_pocket_score)
+
+
+def cmd_pocket_score(args) -> int:
+    """Build the pocket field, rank the library, and report what the cut costs."""
+    from .cli import _chemistry_guard, _eprint, _lazy, _read_library, _write_json
+
+    surface = _lazy("odock.pocket_score", "pocket scoring")
+    conformers = _lazy("odock.conformers", "conformer generation")
+    import json as _json
+    from pathlib import Path
+
+    from . import sasa as _sasa
+
+    if args.box:
+        payload = _json.loads(Path(args.box).read_text(encoding="utf-8"))
+        center = payload["center"]
+        size = payload["size"]
+        spacing = float(args.spacing or surface.DEFAULT_SPACING)
+    else:
+        if not args.center or not args.size:
+            raise SystemExit("error: give --box, or both --center and --size")
+        center = [float(part) for part in str(args.center).split(",")]
+        size = [float(part) for part in str(args.size).split(",")]
+        spacing = float(args.spacing or 0.8)
+
+    atoms = surface.read_pdbqt_atoms(args.receptor)
+    if not atoms:
+        raise SystemExit(f"error: no receptor atom in {args.receptor}")
+    pocket = _chemistry_guard(
+        surface.PocketField.build, atoms, center=center, size=size, spacing=spacing
+    )
+    print(
+        f"pocket: {pocket.n_voxels} voxel(s) at {pocket.spacing} A over "
+        f"{pocket.volume:.0f} A3 ({pocket.open_volume:.0f} A3 open to a ligand "
+        f"centre), built from {pocket.n_atoms} receptor atom(s) in {pocket.seconds:.2f} s"
+    )
+    for note in pocket.notes:
+        print(f"  note: {note}")
+
+    reference_volume = None
+    if args.reference_ligand:
+        reference_atoms = surface.read_pdbqt_atoms(args.reference_ligand)
+        reference_volume = surface.ligand_volume(
+            [_sasa.radius_of(atom.element) for atom in reference_atoms]
+        )
+    elif args.size_reference is not None:
+        reference_volume = float(args.size_reference)
+    if reference_volume:
+        pocket.set_size_reference(
+            reference_volume,
+            note=f"size reference: {reference_volume:.0f} A3, the ligand this pocket "
+                 "is known to bind",
+        )
+        print(f"  size reference {reference_volume:.0f} A3 "
+              f"({reference_volume / max(pocket.open_volume, 1e-9):.1%} of the open volume)")
+    else:
+        _eprint(
+            "odock pocket-score: no --reference-ligand and no --size-reference, so the "
+            "size term is off; the contact term then saturates at ~1.0 for every "
+            "molecule and the ranking carries almost no information"
+        )
+
+    mols, names = _read_library(list(args.input))
+    ranking = _chemistry_guard(
+        surface.rank_library, mols, pocket,
+        conformers=None if args.conformers is None else int(args.conformers),
+        names=names, samples=int(args.poses), electrostatic=not args.no_electrostatics,
+        seed=int(args.seed),
+    )
+    print()
+    print(ranking.table(limit=int(args.top or 0)))
+    print()
+    print(
+        f"ranked {len(ranking)} molecule(s) in {ranking.seconds:.2f} s "
+        f"({ranking.n_poses} pose(s) evaluated, "
+        f"{ranking.seconds / max(1, ranking.n_poses) * 1e6:.0f} us/pose)"
+    )
+    shape_only = [
+        name for name, _ in ranking.entries
+        if name in ranking.details and ranking.details[name].is_shape_only
+    ]
+    if shape_only:
+        _eprint(
+            f"odock pocket-score: WARNING: the electrostatic term was clamped to zero "
+            f"for {len(shape_only)} of {len(ranking)} molecule(s) "
+            f"(e.g. {', '.join(shape_only[:3])}), so for those the reported score is the "
+            "SHAPE term alone.  A formally charged group left neutral, or a Gasteiger "
+            "charge on a charged group, both make the interaction energy positive in an "
+            "oppositely charged pocket; re-run with --reference-ligand and check the "
+            "protonation state.  See docs/PROTONATION.md"
+        )
+    for note in ranking.notes:
+        print(f"  note: {note}")
+
+    payload = {
+        "pocket": pocket.as_dict(),
+        "ranking": ranking.as_dict(),
+        "reference_volume": reference_volume,
+    }
+    if args.keep is not None:
+        actives = list(args.actives or [])
+        summary = _chemistry_guard(
+            surface.prefilter, mols, pocket, actives, keep=float(args.keep),
+            conformers=None if args.conformers is None else int(args.conformers),
+            names=names, samples=int(args.poses),
+            electrostatic=not args.no_electrostatics, seed=int(args.seed),
+        )
+        print()
+        print(
+            f"pre-filter at {float(args.keep):.0%}: keeps {summary['n_kept']} of "
+            f"{summary['n_library']} molecule(s) and {summary['actives_kept']} of "
+            f"{summary['n_actives']} named binder(s) "
+            f"({summary['active_recall']:.0%} recall); estimated docking "
+            f"{summary['estimated_seconds_full']:.0f} s -> "
+            f"{summary['estimated_seconds_kept']:.0f} s "
+            f"({summary['workload_saved_fraction']:.0%} saved)"
+        )
+        if summary["actives_lost"]:
+            print(f"  binders lost: {', '.join(summary['actives_lost'])}")
+        for note in summary["notes"]:
+            print(f"  note: {note}")
+        payload["prefilter"] = summary
+    if args.json_out:
+        _write_json(args.json_out, payload)
     return 0
 
 
@@ -873,6 +1423,9 @@ def attach_ligand_chemistry(subparsers) -> None:
         ("rgroups", _add_rgroups),
         ("pharmacophore", _add_pharmacophore),
         ("decoys", _add_lbvs),
+        ("triage", _add_triage),
+        ("conformers", _add_conformers),
+        ("pocket-score", _add_pocket_score),
     ):
         if name in existing:
             continue

@@ -36,6 +36,8 @@ import sys
 import time
 from pathlib import Path
 
+import numpy as np
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "python"))
 
@@ -184,8 +186,19 @@ SITE_RESIDUES = {
     "trypsin": ("3PTB.pdb", "BEN", "2PTN.pdb", None),
 }
 
+#: Pocket-analysis settings per case, so this script reproduces the tables in
+#: ``docs/POCKETS.md`` exactly.  The trypsin control uses a tighter region and a
+#: smaller pocket cap because its site is smaller; the other two share theirs.
+POCKET_SETTINGS = {
+    "er-alpha": {"region": 14.0, "max_pockets": 12},
+    "hiv-protease": {"region": 14.0, "max_pockets": 12},
+    "trypsin": {"region": 12.0, "max_pockets": 10},
+}
 
-def report_pockets(cases, *, reference_index: int = 0, region_radius: float = 14.0) -> list:
+
+def report_pockets(
+    cases, *, reference_index: int = 0, region_override: float | None = None
+) -> list:
     """Result 5: which cavities exist in some conformations and not others.
 
     Both reference directions are measured where each structure has its own
@@ -207,17 +220,16 @@ def report_pockets(cases, *, reference_index: int = 0, region_radius: float = 14
         if frame_ligand is None:
             # A ligand-free structure cannot define the site itself: the box comes
             # from its near-identical sibling, which is the point of the control.
-            frame_ligand, ligand_file = ligand_name, ligand_file
+            frame_file, frame_ligand = ligand_file, ligand_name
             print(
-                f"   note: {frame_file} has no ligand; the box comes from "
-                f"{ligand_file} ({frame_ligand}), whose site differs by the "
-                "RMSD in section 1"
+                f"   note: the ligand-free structure is the reference; the box comes "
+                f"from {frame_file} ({frame_ligand}), whose site differs by the RMSD "
+                "in section 1"
             )
         conformations = ens.read_conformations(paths)
-        ligand = ens.ligand_coords(
-            conformations[paths.index(Path(ligand_file)) if Path(ligand_file) in paths else 0],
-            frame_ligand,
-        )
+        frame_path = DATA / frame_file
+        frame_index = paths.index(frame_path) if frame_path in paths else 0
+        ligand = ens.ligand_coords(conformations[frame_index], frame_ligand)
         from odock.prepare import box_from_points
 
         box = box_from_points(ligand, buffer=6.0)
@@ -226,8 +238,13 @@ def report_pockets(cases, *, reference_index: int = 0, region_radius: float = 14
             site_radius=8.0, max_site_residues=30,
         )
         comparison = pocket_ensemble.compute_comparison(
-            aligned, box=box, region_radius=region_radius, min_volume=50.0,
-            max_pockets=12,
+            aligned, box=box, min_volume=50.0,
+            region_radius=(
+                POCKET_SETTINGS[key]["region"]
+                if region_override is None
+                else float(region_override)
+            ),
+            max_pockets=int(POCKET_SETTINGS[key]["max_pockets"]),
         )
         entry = {
             "case": key,
@@ -259,6 +276,180 @@ def report_pockets(cases, *, reference_index: int = 0, region_radius: float = 14
             print(f"       trace: {track.openness_trace()}")
         print()
     return rows
+
+
+def report_generated(*, outdir: Path, combinations: int = 16, max_rotamers: int = 5,
+                     min_rmsd: float = 0.3, seed: int = 7) -> dict:
+    """Result 6: an ensemble generated in silico from one structure.
+
+    Generates from 3PTB (the only bundled structure with a co-crystallised ligand
+    *and* a validated experimental partner, 2PTN), reports the sampling table, the
+    site spread against the experimental pairs, the cost, and then runs the pocket
+    analysis on the generated set -- because the question that matters is not
+    "does it generate something" but "does the analysis reach the same verdicts".
+    """
+    from odock import generate as generator
+    from odock import pockets as pocket_ensemble
+
+    source = DATA / "3PTB.pdb"
+    if not source.exists():
+        print(f"!! missing {source}")
+        return {}
+    conformation = ens.read_conformations([source])[0]
+    box = box_from_points(ens.ligand_coords(conformation, "BEN"), buffer=6.0)
+    started = time.perf_counter()
+    generated = generator.generate_ensemble(
+        conformation, box=box, site_radius=6.0, max_rotamers=max_rotamers,
+        min_rmsd=min_rmsd, combinations=combinations, seed=seed, source=source,
+    )
+    build_seconds = time.perf_counter() - started
+    print("== generated ensemble (3PTB, the trypsin S1 site) ==")
+    print(generated.text(limit=20))
+
+    written = generated.write(outdir)
+    storage = sum(path.stat().st_size for path in written)
+    print()
+    print(
+        f"cost: {build_seconds:.2f} s to build {generated.n_conformations} "
+        f"conformation(s) ({build_seconds / max(1, generated.n_conformations):.3f} s "
+        f"each), {storage / 1024:.0f} KB on disk "
+        f"({storage / max(1, generated.n_conformations) / 1024:.0f} KB per member)"
+    )
+
+    # The analysis on the generated set, in the frame it already shares.
+    aligned = ens.align_conformations(
+        [ens.read_conformations([path])[0] for path in written],
+        reference=0, box=box, site_radius=8.0, max_site_residues=30, superpose=False,
+    )
+    comparison = pocket_ensemble.compute_comparison(
+        aligned, box=box, region_radius=12.0, min_volume=50.0, max_pockets=10,
+    )
+    print()
+    print("== the pocket analysis on the generated ensemble ==")
+    print(f"   {comparison.noise_line().splitlines()[0][:160]}...")
+    print(comparison.table(limit=8))
+    print(f"   cryptic candidates: {len(comparison.cryptic())}")
+    for track in comparison.ranked()[:4]:
+        print(
+            f"     track {track.index + 1}: found {track.n_found}/"
+            f"{track.n_conformations}, free volume {track.local_free_min:.0f}-"
+            f"{track.local_free_max:.0f} A^3, closure fraction "
+            f"{track.closure_fraction:.2f}, cryptic={track.cryptic}"
+        )
+
+    return {
+        "conformations": generated.n_conformations,
+        "residues": [entry.as_dict() for entry in generated.residues],
+        "spread": generated.spread,
+        "comparison": generated.comparison(),
+        "cost": {
+            "build_seconds": build_seconds,
+            "seconds_per_conformation": build_seconds / max(1, generated.n_conformations),
+            "bytes_total": storage,
+            "bytes_per_member": storage / max(1, generated.n_conformations),
+        },
+        "pockets": {
+            "n_tracks": len(comparison.tracks),
+            "n_cryptic": len(comparison.cryptic()),
+            "noise_volume": comparison.noise_volume,
+            "tracks": [track.as_dict() for track in comparison.tracks],
+        },
+    }
+
+
+def report_waters(*, library: Path, exhaustiveness: int = 2, num_poses: int = 2,
+                  seed: int = 42) -> dict:
+    """Result 7: the water network, the displaced waters, and the pose correlation.
+
+    First the network and the conserved/displaced classification on the one
+    experimental pair in the repository that differs in water content *and* ligand
+    content (3PTB carries benzamidine, 2PTN does not) -- the offline check the
+    mandate asks for.  Then the per-pose displacement count against affinity across
+    a small library docked into 3PTB, reported with n and a bootstrap interval, and
+    reported as unresolvable when n is too small to read.
+    """
+    from odock import waters as water_analysis
+
+    first, second = DATA / "3PTB.pdb", DATA / "2PTN.pdb"
+    if not first.exists() or not second.exists():
+        print(f"!! missing {first} or {second}")
+        return {}
+    conformations = ens.read_conformations([first, second], keep_water=True)
+    box = box_from_points(ens.ligand_coords(conformations[0], "BEN"), buffer=6.0)
+    ens.align_conformations(conformations, box=box, superpose=True)
+    analysis = water_analysis.compare_water_sites(conformations)
+    print("== water network and conserved sites (3PTB vs 2PTN) ==")
+    print(analysis.text(limit=14))
+
+    from odock.cli import _read_poses
+    from odock.prepare import prepare_receptor
+    from odock.screen import ScreenConfig, screen_ligands
+
+    outdir = ROOT / "out" / "water_screen"
+    outdir.mkdir(parents=True, exist_ok=True)
+    # The campaign docks into the holo structure with benzamidine stripped:
+    # leaving the co-crystallised ligand in would occupy the very site being
+    # docked into, and the waters are not needed for the pose count (it is a
+    # geometric check against the conserved sites measured above).
+    prepared = outdir / "receptor.pdbqt"
+    prepare_receptor(str(first), prepared, strip=["BEN"], keep_water=False)
+    config = ScreenConfig(
+        receptors=[str(prepared)], inputs=[str(library)], box=box, outdir=outdir,
+        exhaustiveness=int(exhaustiveness), num_poses=int(num_poses),
+        interactions=False, filters=False, progress=False, seed=int(seed), resume=False,
+    )
+    summary = screen_ligands(config)
+    rows = []
+    for record in summary.records:
+        if record.status != "ok" or not record.pose_file:
+            continue
+        pose_file = outdir / record.pose_file
+        if not pose_file.exists():
+            continue
+        poses = _read_poses(pose_file)
+        counted = water_analysis.pose_displacement(poses, analysis.conserved, radius=3.5)
+        if not counted:
+            continue
+        best = min(counted, key=lambda entry: entry["affinity"])
+        rows.append(
+            {
+                "ligand": record.name,
+                "n_poses": len(counted),
+                "affinity": float(record.affinity),
+                "displaced_any": max(entry["displaced"] for entry in counted),
+                "displaced_best": best["displaced"],
+                "mean_displaced": float(np.mean([entry["displaced"] for entry in counted])),
+            }
+        )
+    print()
+    print("== per-pose displacement of conserved waters vs affinity ==")
+    print(f"   {len(rows)} ligand(s) with poses")
+    for row in rows:
+        print(
+            f"   {row['ligand']:<28} affinity {row['affinity']:7.3f}  "
+            f"displaced (best pose) {row['displaced_best']}  "
+            f"max over poses {row['displaced_any']}  mean {row['mean_displaced']:.2f}"
+        )
+    correlation_best = water_analysis.correlate(
+        [row["displaced_best"] for row in rows], [row["affinity"] for row in rows]
+    )
+    correlation_mean = water_analysis.correlate(
+        [row["mean_displaced"] for row in rows], [row["affinity"] for row in rows]
+    )
+    print()
+    for name, result in (("best pose", correlation_best), ("mean over poses", correlation_mean)):
+        print(
+            f"   correlation ({name}): rho {result['rho']:+.3f} "
+            f"[{result['low']:+.3f}, {result['high']:+.3f}] n={result['n']} "
+            f"{result['note']}"
+        )
+    return {
+        "summary": analysis.summary(),
+        "displaced": [site.as_dict() for site in analysis.displaced],
+        "pose_rows": rows,
+        "correlation": correlation_best,
+        "correlation_mean": correlation_mean,
+    }
 
 
 def report_ranking(case: str, library, exhaustiveness: int, num_poses: int, seed: int):
@@ -330,12 +521,31 @@ def main() -> int:
         "--pockets-only", action="store_true",
         help="only the pocket (cryptic/transient) section",
     )
+    parser.add_argument(
+        "--generate-only", action="store_true",
+        help="only the generated-ensemble section",
+    )
+    parser.add_argument(
+        "--waters-only", action="store_true",
+        help="only the water network / displaced waters / pose-correlation section",
+    )
+    parser.add_argument(
+        "--combinations", type=int, default=16,
+        help="simultaneous rotamer changes in the generated ensemble",
+    )
+    parser.add_argument("--max-rotamers", type=int, default=5)
+    parser.add_argument(
+        "--generated-min-rmsd", type=float, default=0.3,
+        help="pruning threshold of the generated ensemble (Å)",
+    )
     parser.add_argument("--exhaustiveness", type=int, default=4)
     parser.add_argument("--num-poses", type=int, default=5)
+    parser.add_argument("--seed", type=int, default=7, help="seed for the generated ensemble")
     parser.add_argument("--case", default="er-alpha", choices=sorted(CASES))
     parser.add_argument(
-        "--region", type=float, default=14.0,
-        help="radius around the box centre the pocket analysis looks in (Å)",
+        "--region", type=float, default=None,
+        help="override the per-case region radius of the pocket analysis (Å); the "
+             "defaults reproduce the tables in docs/POCKETS.md",
     )
     parser.add_argument("--json-out", default="out/ensemble_validation.json")
     args = parser.parse_args()
@@ -347,7 +557,7 @@ def main() -> int:
     print("### 1. the conformations\n")
     report["alignment"] = report_alignment(CASES)
 
-    if not args.pockets_only:
+    if not args.pockets_only and not args.generate_only and not args.waters_only:
         title, files, residue = CASES[args.case]
         print(f"\n### 2/3. estradiol into {args.case}: {title}\n")
         report["one_ligand"] = {
@@ -365,13 +575,34 @@ def main() -> int:
             args.case, library, args.exhaustiveness, args.num_poses, seed=42
         )
 
-    print("\n### 5. cryptic and transient pockets\n")
-    pocket_rows = []
-    for reference_index in (0, 1):
-        pocket_rows.extend(
-            report_pockets(CASES, reference_index=reference_index, region_radius=args.region)
+    if not args.generate_only and not args.waters_only:
+        print("\n### 5. cryptic and transient pockets\n")
+        pocket_rows = []
+        for reference_index in (0, 1):
+            pocket_rows.extend(
+                report_pockets(
+                    CASES, reference_index=reference_index, region_override=args.region
+                )
+            )
+        report["pockets"] = pocket_rows
+
+    if not args.waters_only:
+        print("\n### 6. an ensemble generated from one structure\n")
+        report["generated"] = report_generated(
+            outdir=ROOT / "out" / "generated_3ptb",
+            combinations=args.combinations,
+            max_rotamers=args.max_rotamers,
+            min_rmsd=args.generated_min_rmsd,
+            seed=args.seed,
         )
-    report["pockets"] = pocket_rows
+
+    print("\n### 7. waters: the network, the displaced ones, and the pose correlation\n")
+    report["waters"] = report_waters(
+        library=ROOT / "demo" / "library.smi",
+        exhaustiveness=args.exhaustiveness,
+        num_poses=max(2, args.num_poses // 2),
+        seed=42,
+    )
 
     target = Path(args.json_out)
     target.parent.mkdir(parents=True, exist_ok=True)

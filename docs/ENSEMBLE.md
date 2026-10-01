@@ -363,7 +363,19 @@ its mind — against the detector's own measured noise floor.
 That is a document of its own, with the measured numbers on the ERα pair and the
 trypsin control: [`docs/POCKETS.md`](POCKETS.md).
 
-## 9. Reproducing every number
+## 9. Starting from one structure
+
+Every measurement above needs several conformations, and most users have one
+crystal structure. `odock ensemble generate` builds a **modelled** ensemble from
+it by sampling the binding-site side chains on a staggered χ grid, clash-filtering
+each candidate against the frozen protein, and reporting the site's spread next to
+the experimental pairs measured in section 1, so a user can see whether the
+generated ensemble is the right size to exercise this machinery — and what it
+cannot do (it never moves the backbone, so the 3ERT helix-12 case is out of
+reach). That is its own document:
+[`docs/GENERATED_ENSEMBLES.md`](GENERATED_ENSEMBLES.md).
+
+## 10. Reproducing every number
 
 ```bash
 python examples/ensemble_validation.py                       # the whole report

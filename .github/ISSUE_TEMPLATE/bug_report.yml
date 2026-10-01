@@ -46,6 +46,40 @@ body:
       required: true
 
   - type: textarea
+    id: doctor
+    attributes:
+      label: "`odock doctor --json`"
+      description: |
+        Run `odock doctor --json` and paste the whole thing. It carries the
+        interpreter and platform, the compiled-kernel version against the package
+        and checkout versions, the dependency and extra table, whether another
+        `odock` package or distribution shadows this one, whether the temp
+        directory is writable, whether an offscreen GL context can be created, and
+        a concrete fix for each finding. Add `--self-test` if your problem might
+        be environmental. It names absolute paths on purpose — that is how "which
+        installation?" gets answered — so paste it into this issue only, never
+        into a published file. `docs/DOCTOR.md` explains every check.
+      render: json
+      placeholder: |
+        {
+          "format": "odock-doctor",
+          "version": 1,
+          "ok": false,
+          "counts": {"ok": 12, "info": 1, "warning": 2, "error": 0},
+          "findings": [
+            {
+              "key": "extension",
+              "severity": "warning",
+              "title": "the versions disagree: the extension reports 0.1.0 but this checkout says 0.2.1",
+              "detail": "the number a user reads comes from the compiled extension",
+              "fix": "rebuild the extension: `maturin develop --release`"
+            }
+          ]
+        }
+    validations:
+      required: true
+
+  - type: textarea
     id: environment
     attributes:
       label: Environment
@@ -98,6 +132,8 @@ body:
       label: Before submitting
       options:
         - label: I ran the command again and it failed the same way (not a transient failure)
+          required: false
+        - label: I ran `odock doctor` and pasted its JSON above
           required: false
         - label: I checked `make test` (or `pytest tests -q -m "not slow"`) is green on this machine
           required: false

@@ -46,6 +46,7 @@ from odock.gui.surface import (
     scalar_field,
     select_atoms,
     surface_area,
+    surface_volume,
 )
 
 
@@ -344,6 +345,177 @@ def test_electrostatic_potential_screening_and_zero_charges():
         electrostatic_potential(point, atoms, charges=[1.0, 2.0])
     with pytest.raises(ValueError):
         electrostatic_potential(point, atoms, dielectric="magic")
+
+
+def test_the_potential_decomposition_sums_back_to_the_total():
+    """The split is algebra, not an approximation: the parts must add up.
+
+    Two residues, one negative and one positive, with points on both sides of
+    them: every group's value at the focus point, summed, has to equal the total
+    the same model gives — to floating-point precision.
+    """
+    atoms = [
+        atom("O", -3.0, 0.0, 0.0, charge=-0.8, res_name="ASP", res_id=189),
+        atom("C", -2.4, 0.4, 0.0, charge=0.4, res_name="ASP", res_id=189),
+        atom("N", 3.0, 0.0, 0.0, charge=0.9, res_name="LYS", res_id=41),
+    ]
+    points = np.array(
+        [[0.0, 0.0, 0.0], [1.0, 0.0, 0.5], [-1.0, 0.6, 0.0], [0.2, -1.2, 0.3]]
+    )
+    report = surface_module.electrostatic_decomposition(
+        points, atoms, group="residue", focus=(0.0, 0.0, 0.1)
+    )
+    labels = {group.label: group for group in report["groups"]}
+    assert set(labels) == {"A/ASP189", "A/LYS41"}
+    assert sum(group.at_focus for group in report["groups"]) == pytest.approx(
+        report["focus_total"], rel=1e-12
+    )
+    # The sign of each contribution is the physical statement: the negative
+    # residue pushes the focus point negative, the positive one positive. The
+    # ranking is by magnitude, and here the nearer positive charge wins it.
+    assert labels["A/ASP189"].at_focus < 0.0 < labels["A/LYS41"].at_focus
+    assert [group.label for group in report["groups"]] == ["A/LYS41", "A/ASP189"]
+    assert labels["A/ASP189"].charge == pytest.approx(-0.4)
+    # And the mean over the sampled points adds up in the same way.
+    assert sum(group.mean for group in report["groups"]) == pytest.approx(
+        report["total_mean"], rel=1e-12
+    )
+    assert report["charges"] == 3
+    assert report["total_charge"] == pytest.approx(0.5)
+    assert report["points"] == 4
+    assert "at_focus" in report["groups"][0].as_dict()
+
+
+def test_the_decomposition_can_group_by_atom_and_subsample():
+    atoms = [
+        atom("O", 0.0, 0.0, 0.0, charge=-0.5, name="OD1"),
+        atom("C", 1.2, 0.0, 0.0, charge=0.5, name="CG"),
+    ]
+    points = np.linspace(-2.0, 2.0, 21).reshape(-1, 1) * np.array([[1.0, 0.0, 0.0]])
+    report = surface_module.electrostatic_decomposition(
+        points, atoms, group="atom", max_points=5
+    )
+    assert report["points"] == 6                       # every 4th of 21
+    assert report["points_available"] == 21
+    assert report["stride"] == 4
+    assert {group.label for group in report["groups"]} == {"LIG1:OD1", "LIG1:CG"}
+    assert report["groups"][0].kind == "atom"
+    with pytest.raises(ValueError):
+        surface_module.electrostatic_decomposition(points, atoms, group="molecule")
+    with pytest.raises(ValueError):
+        surface_module.electrostatic_decomposition(points, atoms, charges=[1.0])
+    # An empty request is an empty answer, not an exception.
+    empty = surface_module.electrostatic_decomposition([], atoms)
+    assert empty["groups"] == [] and empty["points"] == 0
+
+
+def test_the_decomposition_reports_the_charge_column_it_used():
+    """A non-conserving charge column has to be visible, not silently trusted.
+
+    The per-atom charges a PDBQT carries are a *model*: the bundled demo's
+    hydrogen-suppressed Gasteiger column sums to tens of electrons, which is not
+    a protein's net charge. The decomposition reports the sum so a caller can
+    see that the map it is reading is relative.
+    """
+    atoms = [atom("C", 0.0, 0.0, 0.0, charge=0.3), atom("C", 1.4, 0.0, 0.0, charge=0.3)]
+    report = surface_module.electrostatic_decomposition(
+        [[0.7, 1.0, 0.0]], atoms
+    )
+    assert report["total_charge"] == pytest.approx(0.6)
+    assert report["charges"] == 2
+    assert report["atoms"] == 2
+
+
+def test_the_charge_caveat_names_an_unconserving_column():
+    """The ESP map is only as good as its charge column, and that is checkable.
+
+    Two of the ways the column lies need no chemistry at all: it can sum to a
+    charge the structure cannot have (the bundled demo receptor's
+    hydrogen-suppressed Gasteiger column sums to tens of electrons), or it can
+    be entirely zero.
+    """
+    atoms = [atom("C", 0.0, 0.0, 0.0, charge=-0.3) for _ in range(120)]
+    quality = surface_module.charge_quality(atoms)
+    assert quality["total"] == pytest.approx(-36.0)
+    assert quality["nonzero"] == 120
+    assert quality["warnings"] and "not a net charge" in quality["warnings"][0]
+    caveat = surface_module.charge_caveat(atoms)
+    assert caveat and "not a net charge" in caveat
+
+    # A small, plausible, charge-conserving set says nothing.
+    neutral = [atom("C", 0.0, 0.0, 0.0, charge=0.2), atom("O", 1.2, 0.0, 0.0, charge=-0.2)]
+    assert surface_module.charge_quality(neutral)["warnings"] == []
+    assert surface_module.charge_caveat(neutral) is None
+
+    # An all-zero column is the documented Gasteiger failure on a protein.
+    zeros = [atom("C", 0.0, 0.0, 0.0) for _ in range(10)]
+    assert "zero" in " ".join(surface_module.charge_quality(zeros)["warnings"])
+    assert "zero" in (surface_module.charge_caveat(zeros) or "")
+
+
+def test_the_charge_caveat_detects_a_group_that_lost_its_formal_charge():
+    """The reported defect: a formally cationic group whose atoms are negative.
+
+    Benzamidine's amidine should carry +1 e; the project's default Gasteiger
+    column gives its nitrogens -0.31 e each, because a sigma-electronegativity
+    model spreads the charge over the whole ion. The detector is
+    ``odock.protonation`` — imported, not re-implemented — and the caveat has to
+    name the group rather than let a wrong-signed potential map pass for an
+    answer.
+    """
+    Chem = pytest.importorskip("rdkit.Chem")
+    AllChem = pytest.importorskip("rdkit.Chem.AllChem")
+    mol = Chem.AddHs(Chem.MolFromSmiles("NC(=N)c1ccccc1"))
+    AllChem.EmbedMolecule(mol, randomSeed=42)
+    charges = np.asarray(
+        surface_module.charges_from_mol(mol, model="gasteiger"), dtype=float
+    )
+    atoms = [
+        atom(
+            atom_obj.GetSymbol(),
+            *[float(v) for v in mol.GetConformer().GetAtomPosition(atom_obj.GetIdx())],
+            charge=float(charges[atom_obj.GetIdx()]),
+        )
+        for atom_obj in mol.GetAtoms()
+    ]
+    caveat = surface_module.charge_caveat(atoms, mol=mol)
+    assert caveat, "the formal-charge mismatch was not detected"
+    assert "should carry +1 e" in caveat
+    # The charge set really does have negative amidine nitrogens: that is the
+    # mechanism, not an assertion about the wording.
+    nitrogens = [
+        float(charges[a.GetIdx()]) for a in mol.GetAtoms() if a.GetAtomicNum() == 7
+    ]
+    assert nitrogens and max(nitrogens) < 0.0
+    assert abs(sum(nitrogens)) < 1.0
+
+
+def test_a_surface_carries_its_charge_caveat_and_the_other_properties_do_not():
+    atoms = [atom("C", 0.0, 0.0, 0.0, charge=-0.3) for _ in range(40)]
+    electrostatic = build_surface(
+        atoms,
+        SurfaceSettings(mode="sas", spacing=0.6, property="electrostatic"),
+    )
+    assert electrostatic.charge_warning
+    assert "not a net charge" in electrostatic.charge_warning
+    assert electrostatic.stats["charge_warning"] == electrostatic.charge_warning
+    # A hydrophobicity map has no charge column to be wrong about.
+    hydrophobic = build_surface(
+        atoms, SurfaceSettings(mode="sas", spacing=0.6, property="hydrophobicity")
+    )
+    assert hydrophobic.charge_warning is None
+    assert hydrophobic.stats["charge_warning"] is None
+    # And a caveat the caller prepared is carried through verbatim.
+    prepared = build_surface(
+        atoms,
+        SurfaceSettings(
+            mode="sas",
+            spacing=0.6,
+            property="electrostatic",
+            charge_caveat="the amidine holds -0.62 e where it should hold +1",
+        ),
+    )
+    assert "amidine" in prepared.charge_warning
 
 
 def test_charges_come_from_the_atoms_and_from_rdkit():
@@ -679,6 +851,173 @@ def test_the_grid_stays_inside_the_budget_however_large_the_structure():
     # (the caller asked for that resolution) — but never leaves the clamps.
     explicit = resolve_spacing((0, 0, 0), (40, 40, 40), 0.35, max_points=1000)
     assert explicit == pytest.approx(0.35)
+
+
+# ---------------------------------------------------------------------------
+# topology, closure and volume
+# ---------------------------------------------------------------------------
+#
+# A closed surface is what makes a volume definable at all, and a volume is what
+# makes "how big is this pocket?" answerable. These tests build the reference
+# shapes by hand so the numbers come from geometry, not from this code: a unit
+# cube (volume 1, six corners per square), and the union of two spheres whose
+# overlap has a closed form.
+
+
+def _cube(size: float = 2.0):
+    """A hand-built cube: 8 corners, 12 triangles, wound inconsistently.
+
+    The winding is deliberately *mixed* — one face is reversed — because the
+    orientation step is what has to fix it, and a cube that arrives correct
+    would not test that.
+    """
+    half = size / 2.0
+    vertices = np.array(
+        [
+            [-half, -half, -half], [half, -half, -half], [half, half, -half],
+            [-half, half, -half], [-half, -half, half], [half, -half, half],
+            [half, half, half], [-half, half, half],
+        ],
+        dtype=float,
+    )
+    quads = [
+        (0, 3, 2, 1), (4, 5, 6, 7), (0, 1, 5, 4),
+        (3, 7, 6, 2), (0, 4, 7, 3), (1, 2, 6, 5),
+    ]
+    triangles = []
+    for index, (a, b, c, d) in enumerate(quads):
+        if index == 2:  # one face reversed on purpose
+            triangles.extend([(a, c, b), (a, d, c)])
+        else:
+            triangles.extend([(a, b, c), (a, c, d)])
+    return vertices, np.asarray(triangles, dtype=np.int64)
+
+
+def test_a_hand_built_cube_is_closed_and_its_volume_is_exact():
+    vertices, triangles = _cube(2.0)
+    assert surface_module.mesh_boundary_loops(vertices, triangles) == []
+    assert surface_area(vertices, triangles) == pytest.approx(24.0)
+    # The winding is mixed on purpose, so the raw sum is *not* the volume: the
+    # signed terms cancel, which is exactly why orienting comes first.
+    assert surface_volume(vertices, triangles) != pytest.approx(8.0)
+    fixed = surface_module.orient_mesh(vertices, triangles)
+    corners = vertices[fixed]
+    face_normals = np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0])
+    centres = corners.mean(axis=1)
+    assert np.all(np.einsum("ij,ij->i", face_normals, centres) > 0.0)
+    assert surface_volume(vertices, fixed) == pytest.approx(8.0)
+
+
+def test_a_cut_mesh_reports_its_rim_and_the_volume_is_refused():
+    """A cube missing one face: an open mesh has no inside, and the API says so."""
+    vertices, triangles = _cube(2.0)
+    keep = triangles[triangles[:, 0] < 4]        # drop the +z face
+    assert len(keep) == 10
+    loops = surface_module.mesh_boundary_loops(vertices, keep)
+    assert len(loops) == 1
+    assert len(loops[0]) == 4                     # the square hole
+    surface = Surface(
+        vertices=vertices,
+        normals=np.zeros((0, 3)),
+        colors=np.zeros((0, 3)),
+        values=np.zeros(0),
+        atom_index=np.zeros(0, dtype=np.int64),
+        triangles=keep,
+    )
+    assert surface.closed is False
+    assert surface.volume is None
+
+
+def test_capping_closes_the_rim_and_restores_the_volume():
+    vertices, triangles = _cube(2.0)
+    keep = triangles[triangles[:, 0] < 4]
+    capped_vertices, capped_triangles, added = surface_module.cap_open_mesh(
+        vertices, keep
+    )
+    assert added == 4
+    assert surface_module.mesh_boundary_loops(capped_vertices, capped_triangles) == []
+    oriented = surface_module.orient_mesh(
+        capped_vertices,
+        capped_triangles,
+        None,
+        reference=capped_vertices.mean(axis=0),
+    )
+    # The lid is the missing face, so the closed shape is the whole cube again.
+    assert surface_volume(capped_vertices, oriented) == pytest.approx(8.0, rel=1e-9)
+
+
+def test_a_built_surface_is_closed_and_its_volume_matches_the_sphere():
+    result = build_surface(
+        [atom("C", 0.0, 0.0, 0.0)], SurfaceSettings(mode="sas", spacing=0.5)
+    )
+    assert result.closed is True
+    assert result.cap_triangles == 0
+    exact = 4.0 / 3.0 * math.pi * (sasa.radius_of("C") + 1.4) ** 3
+    assert result.volume == pytest.approx(exact, rel=0.02)
+    assert result.stats["closed"] is True
+    assert result.stats["volume"] == pytest.approx(exact, rel=0.02)
+    assert "Å³ enclosed" in result.summary()
+    assert result.as_dict()["volume"] == pytest.approx(exact, rel=0.02)
+
+
+def test_two_contacting_spheres_enclosed_volume_matches_the_analytic_union():
+    """``V = 2·(4/3 pi R³) − 2·(pi h²(3R − h)/3)`` with ``h = R − d/2``.
+
+    The spherical-cap volume is a closed form, so the union of the two probe
+    spheres is known exactly — an independent check on both the winding and the
+    divergence theorem.
+    """
+    radius = sasa.radius_of("C") + 1.4
+    distance = 3.0
+    height = radius - distance / 2.0
+    cap = math.pi * height**2 * (3.0 * radius - height) / 3.0
+    exact = 2.0 * (4.0 / 3.0 * math.pi * radius**3) - 2.0 * cap
+    result = build_surface(
+        [atom("C", 0.0, 0.0, 0.0), atom("C", distance, 0.0, 0.0)],
+        SurfaceSettings(mode="sas", spacing=0.5),
+    )
+    assert result.closed is True
+    assert result.volume == pytest.approx(exact, rel=0.02)
+
+
+def test_the_closure_measurement_scales_to_a_receptor_shaped_cluster():
+    """Every build is watertight, including one from a subset of atoms.
+
+    The pocket-lining mode is *not* an open cut sheet: the zero level of the
+    field over a subset of atoms is the boundary of a union of balls, which is
+    closed. This is the measurement that lets the documentation say so.
+    """
+    atoms = _cluster(11)
+    whole = build_surface(atoms, SurfaceSettings(mode="sas", spacing=0.5))
+    lining = build_surface(
+        atoms,
+        SurfaceSettings(
+            mode="sas", spacing=0.5, centre=atoms[0].position, radius=4.0
+        ),
+    )
+    for result in (whole, lining):
+        assert result.stats["closed"] is True
+        assert result.volume is not None and result.volume > 0.0
+    assert lining.stats["atoms"] < whole.stats["atoms"]
+    assert lining.area < whole.area
+    assert lining.volume < whole.volume
+
+
+def test_the_default_spacing_is_the_one_the_convergence_table_chose():
+    """The documented default, pinned so a silent change is a test failure.
+
+    ``tools/surface_convergence.py`` measures the table in the module docstring;
+    this asserts the value that table argues for, so changing it means changing
+    the argument too.
+    """
+    assert surface_module.DEFAULT_SPACING == pytest.approx(0.65)
+    assert surface_module.MIN_SPACING <= surface_module.DEFAULT_SPACING <= surface_module.MAX_SPACING
+    # The default has to be usable: a small build at it stays quick.
+    result = build_surface(
+        _cluster(9), SurfaceSettings(mode="sas")
+    )
+    assert result.spacing == pytest.approx(0.65)
+    assert result.triangles_count > 0
 
 
 # ---------------------------------------------------------------------------

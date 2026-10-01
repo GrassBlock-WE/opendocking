@@ -3,12 +3,16 @@
 A docking run normally ends as a pile of files: a receptor PDBQT, a ligand
 PDBQT, a box JSON, a pose PDBQT, an Excel sheet, maybe an SVG diagram. None of
 them says which others it belongs with, which settings produced it, or whether
-anything has changed since. This page describes the two things that fix that:
+anything has changed since. This page describes what fixes that:
 
 * **a project file** (`*.odockproj`) — one verifiable container holding the whole
   run, which reopens anywhere;
 * **an HTML report** (`odock report-html`) — one self-contained document with the
-  figures inside it, plus JSON and plain-text siblings for a machine.
+  figures inside it, plus JSON and plain-text siblings for a machine;
+* **reproduction and comparison** — re-running a project and diffing runs;
+* **a notebook** (`odock project notebook`) — the run as a runnable analysis;
+* **studies** — several runs as one named, verifiable, comparable collection
+  ([`STUDIES.md`](STUDIES.md)).
 
 ```bash
 # Wrap a finished run.
@@ -315,6 +319,34 @@ the project file itself otherwise.  The rows are ordered by affinity, and the
 page states that a row is a summary of a project rather than the run, and that
 rows from different campaigns are only comparable when their docking hash
 matches.
+
+## A run as a notebook
+
+```bash
+odock project notebook run.odockproj -o run.ipynb
+```
+
+One `.ipynb` that replays the run: it opens the project file **next to itself**
+(the cell looks beside the notebook, then one and two levels up), verifies it,
+prints the ranking table, recomputes the interaction profile from the stored
+inputs, draws the report's figures inline (embedded as data, so it works
+offline), re-runs the docking through `project reproduce`, and ends with the run's
+own "what this does not establish" list.  A reader can change a threshold and
+re-run one cell.
+
+Two rules shape the document, and both are tested:
+
+* **no absolute path, no URL.**  The notebook names the project by its file name
+  and resolves it at run time; the whole document is scanned for drive paths,
+  home directories and `http(s)://` references.
+* **the claim is labelled.**  `tests/test_notebook.py` executes **every code cell
+  in order against a real project, in this interpreter**, stubbing only the
+  display helper — that is a real execution check, but it is *not* the claim "it
+  runs in a Jupyter kernel".  `odock project notebook --execute` does run it in a
+  kernel, through `nbclient`; when `nbclient` or an installed kernel is missing,
+  the command writes the notebook anyway and reports plainly that a kernel
+  execution **was not verified**.  `docs/STUDIES.md` says the same thing, so
+  "notebook export" never implies the stronger claim.
 
 ---
 

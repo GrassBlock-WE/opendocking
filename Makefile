@@ -29,7 +29,7 @@ export PYTHONIOENCODING := utf-8
 unexport QT_QPA_FONTDIR
 
 .DEFAULT_GOAL := help
-.PHONY: help venv install install-gui test test-ci test-slow test-all bench \
+.PHONY: help venv install install-gui test test-ci test-order test-order-quick test-slow test-all bench \
         bench-baseline demo lint fmt rust-test rust-gpu wheel sdist dist-check \
         leak-check clean
 
@@ -62,6 +62,12 @@ test: demo ## The CI test command: fast suite, refusing to skip the demo fixture
 
 test-ci: demo ## Exactly what CI runs, including the refusal to skip the Qt suite
 	$(PYTEST) tests -q -m "not slow" --require-demo --require-gui
+
+test-order: demo ## The suite in two orders, failing if the two disagree (the gate)
+	$(PYTHON) tools/check_test_order.py --markers "not slow" --extra=--require-demo
+
+test-order-quick: demo ## The order gate on a slice of files, for between edits
+	$(PYTHON) tools/check_test_order.py --sample 12 --markers "not slow"
 
 test-slow: demo ## The slow suite alone (crystallographic validation)
 	$(PYTEST) tests -q -m slow

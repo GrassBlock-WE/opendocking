@@ -472,10 +472,141 @@ def charges_from_mol(mol, model: str = "gasteiger") -> np.ndarray:
 
     Imported lazily so the viewer keeps working on an installation without
     RDKit: only a caller that has a molecule to charge reaches this.
+
+    **Read :func:`charge_caveat` before painting a surface with these.** A
+    Gasteiger column is a sigma-electronegativity model: it cannot hold a formal
+    charge, so a formally cationic amidine still comes out with a *negative*
+    nitrogen and a formally anionic carboxylate is only mildly negative. A map
+    coloured by such a column has the right shape and the wrong sign in the
+    places that matter most.
     """
     from ..chem.charges import assign_charges  # local: RDKit is optional
 
     return np.asarray(assign_charges(mol, model=model), dtype=float)
+
+
+def charge_quality(atoms, charges=None) -> Dict[str, object]:
+    """What a per-atom charge set can and cannot say, without RDKit.
+
+    Two checks that need nothing but the numbers:
+
+    * the **total**. A protein is not -48 electrons, and a charge model that
+      sums to tens of electrons per molecule is a *relative* picture. The
+      threshold is deliberately loose - more than one electron of net charge per
+      fifty atoms is already impossible for a neutral-except-for-a-few-residues
+      structure;
+    * the **range**, so a column that is entirely zero (the documented failure
+      mode of Gasteiger on an unsanitised protein) is visible as such.
+
+    What it *cannot* do is know whether a formally charged group is missing its
+    formal charge - that needs the chemistry, which is why
+    :func:`charge_caveat` takes the molecule when one is available.
+    """
+    table = (
+        charges_from_atoms(atoms)
+        if charges is None
+        else np.asarray(charges, dtype=float).reshape(-1)
+    )
+    count = len(table)
+    total = float(table.sum()) if count else 0.0
+    warnings: List[str] = []
+    if count and not np.any(table):
+        warnings.append("every charge is zero")
+    elif count and abs(total) > max(1.0, count / 50.0):
+        warnings.append(
+            f"the charges sum to {total:+.1f} e over {count} atoms, "
+            f"which is not a net charge this structure can have"
+        )
+    return {
+        "atoms": count,
+        "nonzero": int(np.count_nonzero(table)),
+        "total": total,
+        "minimum": float(table.min()) if count else 0.0,
+        "maximum": float(table.max()) if count else 0.0,
+        "absolute_mean": float(np.abs(table).mean()) if count else 0.0,
+        "warnings": warnings,
+    }
+
+
+def charge_caveat(
+    atoms,
+    charges=None,
+    mol=None,
+    receptor_atoms=(),
+    ligand_coords=None,
+    *,
+    ph: float = 7.4,
+) -> Optional[str]:
+    """One sentence a surface legend can carry, or ``None`` when all is well.
+
+    This is the honest half of an electrostatic map. An ESP picture is only as
+    good as the charge column behind it, and the two ways that column lies are
+    both detectable:
+
+    * it does not carry the **formal charge** of a group — a formally cationic
+      amidine whose nitrogens are *negative* because Gasteiger spreads the +1
+      over the whole ion. :func:`odock.protonation.detect_groups` names the
+      family, and the charge array says whether the atoms hold the charge;
+      :func:`odock.protonation.salt_bridge_warnings` adds the geometric
+      contradiction (a neutral amidine 2.9 Å from an aspartate).
+    * it does not **conserve** charge at all — the hydrogen-suppressed
+      Gasteiger column on the bundled demo receptor sums to tens of electrons.
+
+    Neither the detector nor the chemistry is re-implemented here: the
+    protonation module owns them and is imported lazily, so a caller without
+    RDKit still gets the conservation half. ``ligand_coords`` must be in the
+    order the *molecule* expects; the protonation API raises on a mismatch
+    rather than silently measuring a different geometry, which is why nothing
+    here reshapes it.
+    """
+    notes: List[str] = []
+    quality = charge_quality(atoms, charges)
+    notes.extend(quality["warnings"])
+    if mol is None:
+        return "; ".join(notes) if notes else None
+    try:
+        from .. import protonation  # local: RDKit is optional
+    except Exception:  # pragma: no cover - an installation without RDKit
+        return "; ".join(notes) if notes else None
+
+    table = (
+        charges_from_atoms(atoms)
+        if charges is None
+        else np.asarray(charges, dtype=float).reshape(-1)
+    )
+    try:
+        groups = protonation.detect_groups(mol)
+    except Exception:  # pragma: no cover - defensive
+        groups = []
+    for group in groups:
+        expected = int(getattr(group, "expected_charge", 0) or 0)
+        if expected == 0:
+            continue
+        indices = [int(index) for index in getattr(group, "atoms", ())]
+        if not indices or max(indices) >= table.size:
+            continue
+        held = float(table[indices].sum())
+        if abs(held) < 0.5 * abs(expected) or (held * expected) < 0:
+            notes.append(
+                f"{getattr(group, 'label', group)} is a {getattr(group, 'family', '')} "
+                f"that should carry {expected:+d} e but holds {held:+.2f} e "
+                f"in this charge set"
+            )
+    if receptor_atoms:
+        try:
+            for warning in protonation.salt_bridge_warnings(
+                mol,
+                list(receptor_atoms),
+                ligand_coords=ligand_coords,
+                charges=table,
+                ph=ph,
+            ):
+                notes.append(str(warning))
+        except Exception as exc:  # pragma: no cover - the API raises on purpose
+            notes.append(f"charge geometry could not be checked ({exc})")
+    # The same family can match several atoms; say it once.
+    unique = list(dict.fromkeys(text for text in notes if text))
+    return "; ".join(unique) if unique else None
 
 
 def electrostatic_potential(
@@ -558,9 +689,32 @@ def electrostatic_potential(
 # ---------------------------------------------------------------------------
 
 #: Defaults for the grid. The spacing is the resolution of the mesh; the point
-#: cap bounds what an automatic spacing may allocate (a 2 000-atom receptor then
-#: lands near 0.6 Å, which is finer than the fixed default and still fits).
-DEFAULT_SPACING = 0.8
+#: cap bounds what an automatic spacing may allocate.
+#:
+#: **The default spacing is chosen from a measurement, not from convenience.**
+#: ``tools/surface_convergence.py`` builds the bundled 1 994-atom receptor at
+#: every setting and reports the grid, the triangle count, the mesh area, its
+#: error against the analytic Shrake-Rupley integral (9 274.9 A2) and the wall
+#: time:
+#:
+#: =========  ===========  ==========  ========  =======  ========
+#: spacing A  grid points  triangles   area A2   error %  seconds
+#: =========  ===========  ==========  ========  =======  ========
+#: 1.20         105 092       52 152    8 473.2   -8.64     2.21
+#: 1.00         173 600       76 600    8 588.5   -7.40     3.49
+#: 0.80         315 248      121 592    8 705.5   -6.14     5.49
+#: 0.65         565 064      186 652    8 804.5   -5.07     9.21
+#: 0.50       1 188 260      319 624    8 902.0   -4.02    20.54
+#: 0.40       2 237 742      503 848    8 974.2   -3.24    24.37
+#: =========  ===========  ==========  ========  =======  ========
+#:
+#: The triangulation inscribes the true surface, so the area is always low and
+#: closes slowly — the crevices between atoms are where it loses most. 0.65 A is
+#: the knee of that table: the largest accuracy step short of the 0.5 A setting,
+#: which costs 2.2x the time and 1.7x the triangles for one more point of error.
+#: 0.8 A stays available as the quick-look setting, and ``spacing = 0`` asks the
+#: builder to choose from the point budget instead (0.63 A for this receptor).
+DEFAULT_SPACING = 0.65
 MIN_SPACING = 0.32
 MAX_SPACING = 1.6
 DEFAULT_MAX_POINTS = 700_000
@@ -571,6 +725,12 @@ DEFAULT_DIRECTIONS = 42
 class SurfaceSettings:
     """Everything that decides what a surface looks like."""
 
+    #: A one-sentence caveat about the charge column, written by whoever knows
+    #: the chemistry (see :func:`charge_caveat`). It is carried into
+    #: ``Surface.charge_warning`` and into the stats, so the legend and the log
+    #: can say "this map may be wrong-signed" instead of leaving a user to trust
+    #: a picture that looks like an answer.
+    charge_caveat: Optional[str] = None
     #: ``"sas"`` (probe-centre, Shrake-Rupley) or ``"ses"`` (molecular).
     mode: str = "sas"
     #: Grid spacing in Å; ``0`` (or less) picks one from the atom extent.
@@ -602,6 +762,18 @@ class SurfaceSettings:
     #: Point cap and probe-sphere sampling count.
     max_points: int = DEFAULT_MAX_POINTS
     directions: int = DEFAULT_DIRECTIONS
+    #: Close the rims of an open mesh with flat lids.
+    #:
+    #: **A surface built from a subset of atoms does not need this**: the zero
+    #: level of the field over the selected atoms is the boundary of a union of
+    #: balls, which is already closed (`tools/pocket_closure.py` measures zero
+    #: boundary edges for the full receptor and for pocket-lining builds alike).
+    #: It is needed when the mesh is *cut* — by a clipping plane, or by keeping
+    #: only the triangles near a site — because a cut leaves a hole, a hole has
+    #: no inside, and without an inside there is no volume to report. The lids
+    #: are not molecular surface: they are drawn in a neutral grey, counted
+    #: separately in ``Surface.stats`` and excluded from the property legend.
+    close_rim: bool = False
 
     def normalized(self) -> "SurfaceSettings":
         mode = str(self.mode).strip().lower()
@@ -1114,6 +1286,180 @@ def surface_area(vertices: np.ndarray, triangles: np.ndarray) -> float:
     return float(0.5 * np.linalg.norm(cross, axis=1).sum())
 
 
+def orient_mesh(
+    vertices: np.ndarray,
+    triangles: np.ndarray,
+    normals: Optional[np.ndarray] = None,
+    reference: Optional[Sequence[float]] = None,
+) -> np.ndarray:
+    """Re-wind every triangle so the surface has one consistent outside.
+
+    Marching tetrahedra emits each triangle from its own case, so the winding is
+    locally arbitrary: fine for drawing (the shader lights back faces too), fatal
+    for a volume, because the divergence theorem sums signed terms and
+    inconsistent winding cancels them. The outward direction comes from the
+    per-vertex normals the builder already computed from the field gradient, or
+    — for a lid, which has no field — from the mesh centroid.
+    """
+    points = np.asarray(vertices, dtype=float).reshape(-1, 3)
+    faces = np.asarray(triangles, dtype=np.int64).reshape(-1, 3)
+    if faces.size == 0:
+        return faces
+    corners = points[faces]
+    face_normals = np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0])
+    if normals is not None:
+        outward = np.asarray(normals, dtype=float).reshape(-1, 3)[faces].sum(axis=1)
+    else:
+        centre = (
+            np.asarray(reference, dtype=float).reshape(3)
+            if reference is not None
+            else points.mean(axis=0)
+        )
+        outward = corners.mean(axis=1) - centre[None, :]
+    flip = np.einsum("ij,ij->i", face_normals, outward) < 0.0
+    if flip.any():
+        faces = faces.copy()
+        faces[flip] = faces[flip][:, ::-1]
+    return faces
+
+
+def surface_volume(vertices: np.ndarray, triangles: np.ndarray) -> float:
+    """The volume a **closed** mesh encloses, in Å³, by the divergence theorem.
+
+    ``V = |Σ v0 · (v1 × v2)| / 6`` over every triangle. It is only meaningful
+    for a closed surface, which is why :meth:`Surface.volume` refuses to report
+    it otherwise — an open mesh would silently return the volume of a shape that
+    has no inside, and a number nobody can check is worse than no number.
+    """
+    if len(triangles) == 0 or len(vertices) == 0:
+        return 0.0
+    corners = np.asarray(vertices, dtype=float)[np.asarray(triangles, dtype=np.int64)]
+    triple = np.einsum("ij,ij->i", corners[:, 0], np.cross(corners[:, 1], corners[:, 2]))
+    return abs(float(triple.sum()) / 6.0)
+
+
+#: Vertices closer than this are the same point when the mesh topology is
+#: needed. The marching-tetrahedra output is deliberately unwelded (each triangle
+#: carries its own copies so every vertex can have its own property), which is
+#: fine for drawing and useless for finding a boundary.
+WELD_TOLERANCE = 1e-4
+
+
+def weld_mesh(vertices: np.ndarray, triangles: np.ndarray):
+    """``(welded vertices, triangles, inverse)`` — coincident points merged.
+
+    ``inverse[i]`` is the welded index of original vertex ``i``, so a per-vertex
+    property can still be averaged back onto the welded mesh.
+    """
+    points = np.asarray(vertices, dtype=float).reshape(-1, 3)
+    faces = np.asarray(triangles, dtype=np.int64).reshape(-1, 3)
+    if points.size == 0:
+        return points, faces, np.zeros(0, dtype=np.int64)
+    keys = np.round(points / WELD_TOLERANCE).astype(np.int64)
+    unique, inverse = np.unique(keys, axis=0, return_inverse=True)
+    welded = unique.astype(float) * WELD_TOLERANCE
+    return welded, inverse[faces], inverse.reshape(-1)
+
+
+def mesh_boundary_loops(vertices: np.ndarray, triangles: np.ndarray) -> List[np.ndarray]:
+    """The open rims of a mesh, as lists of welded vertex indices.
+
+    An edge that belongs to exactly one triangle is on the boundary; in a
+    manifold mesh every boundary vertex has exactly two such edges, so the
+    boundary is a set of closed loops. The walk is defensive about a
+    non-manifold input: it never visits a vertex twice and it stops rather than
+    looping forever.
+    """
+    welded, faces, _inverse = weld_mesh(vertices, triangles)
+    if faces.size == 0:
+        return []
+    edges = np.concatenate(
+        [faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]], axis=0
+    )
+    edges = np.sort(edges, axis=1)
+    unique, counts = np.unique(edges, axis=0, return_counts=True)
+    boundary = unique[counts == 1]
+    if boundary.shape[0] == 0:
+        return []
+
+    neighbours: Dict[int, List[int]] = {}
+    for first, second in boundary.tolist():
+        neighbours.setdefault(first, []).append(second)
+        neighbours.setdefault(second, []).append(first)
+
+    loops: List[np.ndarray] = []
+    unvisited = set(neighbours)
+    while unvisited:
+        start = min(unvisited)
+        loop = [start]
+        unvisited.discard(start)
+        previous = None
+        current = start
+        while True:
+            candidates = [
+                node for node in neighbours.get(current, ()) if node != previous and node in unvisited
+            ]
+            if not candidates:
+                # Close the loop if the start is a neighbour, otherwise stop.
+                if start in neighbours.get(current, ()) and len(loop) > 2:
+                    break
+                break
+            nxt = min(candidates)
+            loop.append(nxt)
+            unvisited.discard(nxt)
+            previous, current = current, nxt
+        if len(loop) >= 3:
+            loops.append(np.asarray(loop, dtype=np.int64))
+    return loops
+
+
+def cap_open_mesh(
+    vertices: np.ndarray, triangles: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray, int]:
+    """Close every rim with a flat fan, returning ``(vertices, triangles, added)``.
+
+    Each boundary loop is capped by a triangle fan around its centroid. The cap
+    is *not* a molecular surface — it is a lid over the hole a selection or a
+    clip plane cut — so it is added as its own geometry with its own colour and
+    its area is reported separately (see :attr:`Surface.cap_area`). What it
+    buys is a **closed** mesh, and therefore a volume.
+    """
+    points = np.asarray(vertices, dtype=float).reshape(-1, 3)
+    faces = np.asarray(triangles, dtype=np.int64).reshape(-1, 3)
+    loops = mesh_boundary_loops(points, faces)
+    if not loops:
+        return points, faces, 0
+    welded, _faces, inverse = weld_mesh(points, faces)
+    # One drawn vertex per welded position: the fan is built in the mesh the
+    # caller gets back, so the caps must reference *drawn* indices.
+    representative: Dict[int, int] = {}
+    for drawn, welded_index in enumerate(inverse.tolist()):
+        representative.setdefault(int(welded_index), drawn)
+    extra_points: List[np.ndarray] = []
+    extra_faces: List[np.ndarray] = []
+    offset = len(points)
+    added = 0
+    for loop in loops:
+        centre = welded[loop].mean(axis=0)
+        extra_points.append(centre)
+        centre_index = offset + len(extra_points) - 1
+        size = len(loop)
+        for index in range(size):
+            first = representative.get(int(loop[index]))
+            second = representative.get(int(loop[(index + 1) % size]))
+            if first is None or second is None:  # pragma: no cover - defensive
+                continue
+            extra_faces.append(np.array([centre_index, first, second], dtype=np.int64))
+            added += 1
+    if not extra_faces:
+        return points, faces, 0
+    return (
+        np.concatenate([points, np.asarray(extra_points)], axis=0),
+        np.concatenate([faces, np.asarray(extra_faces, dtype=np.int64)], axis=0),
+        added,
+    )
+
+
 # ---------------------------------------------------------------------------
 # the SES by grayscale erosion
 # ---------------------------------------------------------------------------
@@ -1170,6 +1516,240 @@ def _erode_field(
                         sample += np.float32(weight) * slab
         np.maximum(eroded, sample, out=eroded)
     return eroded.astype(np.float64)
+
+
+# ---------------------------------------------------------------------------
+# the potential, decomposed
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class PotentialGroup:
+    """One residue's (or one atom's) share of the potential on a surface.
+
+    The potential at a point is a *sum* over atoms, so it can be split exactly —
+    no approximation is involved in asking which residue makes a pocket
+    electropositive. ``mean`` is the group's contribution averaged over the
+    sampled surface points and ``extreme`` its largest contribution at any one
+    of them, which is what makes a single buried carboxylate visible in a sea of
+    backbone carbonyls.
+    """
+
+    label: str
+    kind: str
+    atoms: int
+    charge: float
+    mean: float
+    extreme: float
+    share: float
+    #: The group's contribution at one chosen point (the site centre), and its
+    #: share of the total potential there. This is the discriminating number: a
+    #: mean over a whole pocket surface dilutes every residue equally, while the
+    #: value *at the site* is dominated by whatever is closest to it — which is
+    #: what "which residue makes this pocket negative?" actually asks.
+    at_focus: Optional[float] = None
+
+    def as_dict(self) -> Dict[str, object]:
+        return {
+            "label": self.label,
+            "kind": self.kind,
+            "atoms": int(self.atoms),
+            "charge": round(float(self.charge), 4),
+            "mean": round(float(self.mean), 3),
+            "extreme": round(float(self.extreme), 3),
+            "share": round(float(self.share), 4),
+            "at_focus": None if self.at_focus is None else round(float(self.at_focus), 3),
+        }
+
+
+def electrostatic_decomposition(
+    points,
+    atoms,
+    charges=None,
+    *,
+    group: str = "residue",
+    dielectric: str = "distance",
+    epsilon: float = 4.0,
+    screening: float = 0.0,
+    minimum_distance: float = 1.0,
+    max_points: int = 2000,
+    top: Optional[int] = None,
+    focus: Optional[Sequence[float]] = None,
+) -> Dict[str, object]:
+    """Which residues make *this* surface electropositive or negative.
+
+    The colour map says a pocket is negative; this says **why**. Every atom's
+    contribution to the Coulomb potential is computed separately and summed per
+    residue (or per atom) over a deterministic subsample of the surface points.
+
+    ``max_points`` bounds the work: the mean over a few thousand surface
+    vertices is the same number as the mean over a few hundred thousand to
+    within the resolution of any legend, and it keeps the call fast enough to
+    run from a menu. The subsample takes every ``n``-th point, so it is
+    reproducible rather than random.
+
+    This is still the same Coulomb model as :func:`electrostatic_potential` —
+    point charges, a stated dielectric, no Poisson-Boltzmann solution and no
+    ionic atmosphere beyond the optional Debye term. What it adds is an exact
+    algebraic split of that model, which is a statement about the model and not
+    about the real solvent.
+    """
+    pts = np.asarray(points, dtype=float).reshape(-1, 3)
+    atoms = list(atoms)
+    if pts.size == 0 or not atoms:
+        return {
+            "points": 0,
+            "points_available": int(pts.shape[0]),
+            "total_mean": 0.0,
+            "groups": [],
+            "dielectric": str(dielectric),
+            "epsilon": float(epsilon),
+        }
+    stride = max(1, int(pts.shape[0] // max(1, int(max_points))))
+    sample = pts[::stride]
+    table = (
+        charges_from_atoms(atoms)
+        if charges is None
+        else np.asarray(charges, dtype=float).reshape(-1)
+    )
+    if table.size != len(atoms):
+        raise ValueError(f"charges has {table.size} entries for {len(atoms)} atoms")
+
+    key = str(group).strip().lower()
+    if key not in ("residue", "atom"):
+        raise ValueError(f"group must be 'residue' or 'atom', got {group!r}")
+
+    # Group the atoms, keeping their order of first appearance so the output is
+    # stable and a residue's atoms stay together.
+    order: List[str] = []
+    members: Dict[str, List[int]] = {}
+    for index, atom in enumerate(atoms):
+        if key == "residue":
+            label = (
+                f"{str(getattr(atom, 'chain', '') or '')}/"
+                f"{str(getattr(atom, 'res_name', '') or '')}"
+                f"{int(getattr(atom, 'res_id', 0) or 0)}"
+            )
+        else:
+            label = (
+                f"{str(getattr(atom, 'res_name', '') or '')}"
+                f"{int(getattr(atom, 'res_id', 0) or 0)}:"
+                f"{str(getattr(atom, 'name', '') or '')}"
+            )
+        if label not in members:
+            members[label] = []
+            order.append(label)
+        members[label].append(index)
+
+    total = electrostatic_potential(
+        sample,
+        atoms,
+        charges=table,
+        dielectric=dielectric,
+        epsilon=epsilon,
+        screening=screening,
+        minimum_distance=minimum_distance,
+    )
+    groups: List[PotentialGroup] = []
+    for label in order:
+        indices = members[label]
+        subset = [atoms[index] for index in indices]
+        contribution = electrostatic_potential(
+            sample,
+            subset,
+            charges=table[indices],
+            dielectric=dielectric,
+            epsilon=epsilon,
+            screening=screening,
+            minimum_distance=minimum_distance,
+        )
+        mean = float(contribution.mean()) if contribution.size else 0.0
+        strongest = (
+            float(contribution[np.argmax(np.abs(contribution))])
+            if contribution.size
+            else 0.0
+        )
+        groups.append(
+            PotentialGroup(
+                label=label,
+                kind=key,
+                atoms=len(indices),
+                charge=float(table[indices].sum()),
+                mean=mean,
+                extreme=strongest,
+                share=0.0,
+            )
+        )
+
+    mean_total = float(total.mean()) if total.size else 0.0
+    denominator = abs(mean_total) if abs(mean_total) > 1e-12 else 1.0
+    # The value at the focus point, if the caller gave one: the same split, read
+    # where the ligand sits rather than averaged over the whole surface.
+    focus_values: Dict[str, float] = {}
+    focus_total = None
+    if focus is not None:
+        point = np.asarray(focus, dtype=float).reshape(1, 3)
+        focus_total = float(
+            electrostatic_potential(
+                point,
+                atoms,
+                charges=table,
+                dielectric=dielectric,
+                epsilon=epsilon,
+                screening=screening,
+                minimum_distance=minimum_distance,
+            )[0]
+        )
+        for label in order:
+            indices = members[label]
+            focus_values[label] = float(
+                electrostatic_potential(
+                    point,
+                    [atoms[index] for index in indices],
+                    charges=table[indices],
+                    dielectric=dielectric,
+                    epsilon=epsilon,
+                    screening=screening,
+                    minimum_distance=minimum_distance,
+                )[0]
+            )
+
+    groups = [
+        PotentialGroup(
+            label=item.label,
+            kind=item.kind,
+            atoms=item.atoms,
+            charge=item.charge,
+            mean=item.mean,
+            extreme=item.extreme,
+            share=item.mean / denominator,
+            at_focus=focus_values.get(item.label),
+        )
+        for item in groups
+    ]
+    if focus_total is not None:
+        groups.sort(key=lambda item: (-abs(item.at_focus or 0.0), item.label))
+    else:
+        groups.sort(key=lambda item: (-abs(item.mean), item.label))
+    if top is not None:
+        groups = groups[: max(0, int(top))]
+    return {
+        "points": int(sample.shape[0]),
+        "points_available": int(pts.shape[0]),
+        "stride": int(stride),
+        "total_mean": mean_total,
+        "total_min": float(total.min()) if total.size else 0.0,
+        "total_max": float(total.max()) if total.size else 0.0,
+        "focus": None if focus is None else [float(v) for v in np.asarray(focus).reshape(3)],
+        "focus_total": focus_total,
+        "dielectric": str(dielectric),
+        "epsilon": float(epsilon),
+        "screening": float(screening),
+        "total_charge": float(table.sum()),
+        "charges": int(np.count_nonzero(table)),
+        "atoms": len(atoms),
+        "groups": groups,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1247,6 +1827,19 @@ class Surface:
     #: picture of nothing (and a PDBQT round trip, which carries no bond
     #: orders, is exactly where an atom order silently changes).
     selected: Optional[List[int]] = None
+    #: Whether the mesh is watertight, and — only then — the volume it encloses
+    #: in Å³ (see :func:`surface_volume` and :meth:`volume`).
+    closed: bool = False
+    enclosed_volume: float = 0.0
+    #: The charge-column caveat this surface was built with, or ``None``. A
+    #: potential map that is wrong-signed looks exactly like one that is right,
+    #: so the caveat travels with the surface rather than being printed once.
+    charge_warning: Optional[str] = None
+    #: Triangles and vertices that are rim lids rather than molecular surface.
+    #: They are excluded from ``area`` and from the property legend, so a capped
+    #: figure still reports the surface it is a figure *of*.
+    cap_triangles: int = 0
+    cap_vertices: int = 0
 
     def source_atom(self, vertex: int, atoms: Optional[Sequence] = None):
         """The atom a vertex belongs to, in the caller's own list.
@@ -1265,6 +1858,24 @@ class Surface:
         return atoms[source] if 0 <= source < len(atoms) else None
 
     # -- derived -----------------------------------------------------------
+
+    @property
+    def volume(self) -> Optional[float]:
+        """The enclosed volume in Å³, or ``None`` when the mesh is open.
+
+        A number nobody can check is worse than no number: an open mesh has no
+        inside, so this refuses to answer for one instead of returning the
+        volume of some imagined shape.
+        """
+        return float(self.enclosed_volume) if self.closed else None
+
+    @property
+    def cap_area(self) -> float:
+        """The area of the rim lids alone, in Å² (0 without ``close_rim``)."""
+        if not self.cap_triangles:
+            return 0.0
+        start = self.triangles_count - int(self.cap_triangles)
+        return surface_area(self.vertices, self.triangles[start:])
 
     @property
     def area(self) -> float:
@@ -1320,9 +1931,14 @@ class Surface:
 
     def summary(self) -> str:
         """One line for the log: the numbers a user can check."""
+        volume = ""
+        if self.closed:
+            volume = f", {self.enclosed_volume:.0f} Å³ enclosed"
+            if self.cap_triangles:
+                volume += f" ({self.cap_triangles} lid triangles, {self.cap_area:.0f} Å²)"
         return (
             f"{self.mode.upper()} {self.vertices_count} vertices, "
-            f"{self.triangles_count} triangles, {self.area:.0f} Å², "
+            f"{self.triangles_count} triangles, {self.area:.0f} Å²{volume}, "
             f"grid {self.stats.get('spacing', self.spacing):.2f} Å, "
             f"{float(self.stats.get('seconds', 0.0)):.2f} s"
         )
@@ -1338,6 +1954,10 @@ class Surface:
             "vertices": self.vertices_count,
             "triangles": self.triangles_count,
             "area": round(self.area, 2),
+            "closed": bool(self.closed),
+            "volume": None if self.volume is None else round(self.volume, 2),
+            "cap_triangles": int(self.cap_triangles),
+            "cap_area": round(self.cap_area, 2),
             "stats": dict(self.stats),
         }
 
@@ -1465,6 +2085,11 @@ def build_surface(
     vertices, triangles = marching_tetrahedra(
         surface_field, axes_origin(axes), spacing
     )
+    # Rim lids, for a mesh that was cut rather than built from a subset (see
+    # SurfaceSettings.close_rim): a hole has no inside, so a volume needs one.
+    cap_triangles = 0
+    if options.close_rim:
+        vertices, triangles, cap_triangles = cap_open_mesh(vertices, triangles)
     _progress(progress, "mesh", 0.82)
     if vertices.shape[0] == 0:
         return Surface(
@@ -1498,6 +2123,26 @@ def build_surface(
     normals = _vertex_normals(
         vertices, surface_field, axes_origin(axes), spacing, used, radii, index
     )
+    # One consistent outside. Without it the divergence theorem sums signed
+    # terms with mixed signs and the volume cancels to nonsense, and an exported
+    # mesh (the OBJ, a viewer that culls back faces) has no inside either.
+    if cap_triangles:
+        surface_faces = triangles[: len(triangles) - cap_triangles]
+        cap_faces = triangles[len(triangles) - cap_triangles :]
+        lid_centre = (
+            vertices[: len(vertices) - cap_triangles].mean(axis=0)
+            if len(vertices) > cap_triangles
+            else np.zeros(3)
+        )
+        triangles = np.concatenate(
+            [
+                orient_mesh(vertices, surface_faces, normals),
+                orient_mesh(vertices, cap_faces, None, reference=lid_centre),
+            ],
+            axis=0,
+        )
+    else:
+        triangles = orient_mesh(vertices, triangles, normals)
     _progress(progress, "colour", 0.90)
 
     values = _vertex_property(vertices, used, index, options)
@@ -1538,6 +2183,13 @@ def build_surface(
             values, palette="electrostatic", value_range=value_range
         )
 
+    if cap_triangles:
+        # A lid is not molecular surface: it is drawn as a neutral grey so the
+        # figure does not claim a property it does not have, and its area is
+        # reported separately.
+        colours = np.asarray(colours, dtype=float).copy()
+        colours[len(colours) - cap_triangles :] = (0.42, 0.42, 0.46)
+
     highlighted = None
     residue_labels: List[str] = []
     if options.highlighted_residues:
@@ -1557,6 +2209,18 @@ def build_surface(
         )
 
     elapsed = time.perf_counter() - started
+    closed = not mesh_boundary_loops(vertices, triangles)
+    lid_faces = triangles[len(triangles) - cap_triangles :] if cap_triangles else triangles[:0]
+    # The caveat the caller prepared, plus whatever the charge column says on
+    # its own. An electrostatic map carries it; the other properties have no
+    # charge column to be wrong about.
+    warning = options.charge_caveat
+    if options.property == "electrostatic":
+        own = charge_quality(used, charges_from_atoms(used))["warnings"]
+        combined = [text for text in ([warning] if warning else []) + list(own) if text]
+        warning = "; ".join(dict.fromkeys(combined)) if combined else None
+    else:
+        warning = None
     stats: Dict[str, object] = {
         "atoms": len(used),
         "atoms_total": len(atoms),
@@ -1565,12 +2229,19 @@ def build_surface(
         "grid_points": int(points),
         "vertices": int(vertices.shape[0]),
         "triangles": int(triangles.shape[0]),
-        "area": round(surface_area(vertices, triangles), 2),
+        "area": round(surface_area(vertices, triangles) - surface_area(vertices, lid_faces), 2),
+        "closed": bool(closed),
+        "volume": (
+            round(surface_volume(vertices, triangles), 2) if closed else None
+        ),
+        "cap_triangles": int(cap_triangles),
+        "cap_area": round(surface_area(vertices, lid_faces), 2),
         "sas_area": None if sas_area is None else round(sas_area, 2),
         "probe": float(options.probe),
         "directions": int(options.directions) if options.mode == "ses" else 0,
         "seconds": round(elapsed, 4),
         "highlighted_vertices": int(highlighted.sum()) if highlighted is not None else 0,
+        "charge_warning": warning,
     }
     _progress(progress, "colour", 1.0)
     return Surface(
@@ -1590,6 +2261,11 @@ def build_surface(
         residue_labels=residue_labels,
         highlighted=highlighted,
         selected=list(chosen),
+        closed=bool(closed),
+        enclosed_volume=float(surface_volume(vertices, triangles)) if closed else 0.0,
+        cap_triangles=int(cap_triangles),
+        cap_vertices=int(cap_triangles),
+        charge_warning=warning,
     )
 
 
