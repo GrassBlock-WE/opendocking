@@ -447,6 +447,16 @@ class PreparationReport:
     thickness: float = 0.0
     #: RDKit atom indices in the order the kernel assigns movable atoms.
     atom_order: List[int] = field(default_factory=list)
+    #: True when the ligand's bond orders came from the input itself (an SDF,
+    #: MOL2, MOL, SMILES or ``smiles=`` template) rather than being inferred from
+    #: geometry.  A structure read from a bare PDB or PDBQT carries no bond
+    #: orders, so the ring/amide/aromatic chemistry is then a guess.
+    #:
+    #: This is the machine-readable form of the warning that already accompanies
+    #: the untrusted case, and it is what
+    #: :func:`odock.metrics.ligand_strain` uses to decide whether a force-field
+    #: strain measured on this molecule can be trusted.
+    chemistry_trusted: bool = False
     warnings: List[str] = field(default_factory=list)
 
     def summary(self) -> str:
@@ -554,6 +564,12 @@ def prepare_ligand(
             "were placed with a bond-length and ring-membership rule. Pass "
             "smiles=... for exact chemistry."
         )
+    # Machine-readable form of the same fact, for callers that have to decide
+    # whether a number derived from this molecule can be trusted (the ligand
+    # strain is the one that matters): a molecule whose bond orders were guessed
+    # has no aromatic rings and no carbonyls, and a force field relaxation of it
+    # relaxes a different molecule.
+    report.chemistry_trusted = bool(chemistry_trusted)
 
     # A ligand must be three-dimensional before it can be docked. A 2-D
     # structure (the usual output of a drawing tool or a vendor catalogue) would
@@ -607,6 +623,17 @@ def prepare_ligand(
     report.n_metal_atoms = sum(
         1 for a in mol.GetAtoms() if a.GetSymbol() in ("Mg", "Mn", "Zn", "Ca", "Fe")
     )
+
+    # RDKit's `AddHs` leaves the new hydrogens with no PDB residue information, so
+    # a ligand prepared from a PDB would be written with its heavy atoms in
+    # `BEN` and its polar hydrogens in `LIG`.  That is not cosmetic: a reader
+    # that groups atoms by residue -- RDKit's own proximity bonding, for one --
+    # then refuses to bond across the boundary, every X-H bond is lost, and the
+    # structure can no longer be typed by MMFF94.  The receptor path already
+    # inherits the parent residue; the ligand path now does the same.
+    # `inherit_name=False` keeps the writers' unique `H<serial>` naming for the
+    # hydrogens: a ligand's two N-H hydrogens must not both be called `N1`.
+    mol = _inherit_residue_info(mol, inherit_name=False)
 
     tree = _pdbqt.build_ligand_tree(mol)
     text, order = _pdbqt.write_ligand_pdbqt(
@@ -901,13 +928,29 @@ def polar_hydrogen_sites(mol) -> List[int]:
     return targets
 
 
-def _inherit_residue_info(mol):
+def _inherit_residue_info(mol, *, inherit_name: bool = True):
     """Copy the parent residue metadata onto freshly added hydrogens.
 
     RDKit's `AddHs` creates bare atoms with no PDB residue information, which
     would show up in the PDBQT as `LIG A 1`. Inheriting the parent's residue
     name, number and chain keeps the output chemically readable (and keeps the
     hydrogens next to their heavy atom in any downstream visualisation).
+
+    This is not cosmetic.  A reader that groups atoms by residue -- RDKit's own
+    proximity bonding, for instance -- does not bond across a change of residue
+    name, so a ligand whose hydrogens sit in a different residue from its heavy
+    atoms loses every X-H bond on a round trip and can no longer be typed by
+    MMFF94.
+
+    Parameters
+    ----------
+    inherit_name
+        ``True`` (the default, and what the receptor path has always done) names
+        each new hydrogen after its parent, so an amide hydrogen is called ``N``.
+        ``False`` leaves the name empty, and the PDBQT writers then fall back to
+        their own unique ``H<serial>`` convention -- which is what a ligand
+        needs, because two hydrogens on one nitrogen would otherwise both be
+        called ``N1``.
     """
     Chem, _ = _require_rdkit()
     from rdkit.Chem import rdmolops
@@ -923,13 +966,13 @@ def _inherit_residue_info(mol):
         info = parents[0].GetPDBResidueInfo()
         if info is None:
             continue
-        todo.append((atom.GetIdx(), info.GetName(), info))
-    for idx, parent_name, info in todo:
+        todo.append((atom.GetIdx(), info.GetName() if inherit_name else "", info))
+    for idx, name, info in todo:
         atom = em.GetAtomWithIdx(idx)
         info_cls = getattr(Chem, "AtomPDBResidueInfo", None) or getattr(rdmolops, "AtomPDBResidueInfo", None)
         if info_cls is None:
             break
-        atom.SetMonomerInfo(info_cls(parent_name, serialNumber=idx + 1))
+        atom.SetMonomerInfo(info_cls(name, serialNumber=idx + 1))
         new_info = atom.GetPDBResidueInfo()
         new_info.SetResidueName(info.GetResidueName())
         new_info.SetResidueNumber(info.GetResidueNumber())

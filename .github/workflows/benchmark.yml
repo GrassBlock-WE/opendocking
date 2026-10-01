@@ -1,0 +1,128 @@
+# Accuracy benchmark — the gate that needs a quiet machine.
+#
+# This runs the slow suite (the crystallographic re-dockings and the three-seed
+# accuracy benchmark) and compares the result with benchmark/baseline.json.  It is
+# scheduled rather than per-push on purpose: a Monte-Carlo campaign is a timing
+# measurement, and a loaded CI runner makes any wall-clock or spread-sensitive
+# number meaningless.
+#
+# Running it by hand: Actions -> Benchmark -> Run workflow (workflow_dispatch),
+# or locally `make bench`.
+name: Benchmark
+
+on:
+  schedule:
+    # 03:17 UTC every Monday: off-peak, off the hour.
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      update_baseline:
+        description: "Re-record benchmark/baseline.json from this run and upload it (does not commit)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_TARGET_DIR: target
+  QT_QPA_PLATFORM: offscreen
+  PYTHONIOENCODING: utf-8
+
+jobs:
+  benchmark:
+    name: Re-docking accuracy vs baseline
+    runs-on: ubuntu-latest
+    # The three-seed campaign takes tens of minutes; the default six-hour limit
+    # is far more than this needs, so cap it and fail loudly instead of hanging.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # The benchmark docks with the Rust kernel; without this cache every run
+      # pays for a cold release build, which is most of the wall time.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Create the virtual environment
+        shell: bash
+        run: |
+          python -m venv .venv
+          if [ -d .venv/Scripts ]; then
+            echo "$PWD/.venv/Scripts" >> "$GITHUB_PATH"
+          else
+            echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+          fi
+          echo "VIRTUAL_ENV=$PWD/.venv" >> "$GITHUB_ENV"
+
+      - name: Install the tooling
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "maturin>=1.5,<2.0" rdkit numpy openpyxl pytest
+
+      - name: maturin develop --release
+        shell: bash
+        run: maturin develop --release
+
+      - name: The slow suite (crystallographic validation)
+        run: python -m pytest tests -q -m slow
+
+      # `--check-baseline` exits non-zero when a metric drifts past the tolerance
+      # recorded in benchmark/baseline.json (0.15 Å on the top-pose RMSD, one rank
+      # on the rank of the correct pose, 0.2 on the score/RMSD correlation).
+      - name: python -m odock.benchmark --check-baseline
+        run: |
+          python -m odock.benchmark \
+            --json benchmark-results.json \
+            --csv benchmark-results.csv \
+            --check-baseline
+
+      # Only when asked for: record the baseline this run produced, so a
+      # maintainer can download it, review the numbers and commit it.
+      - name: Re-record the baseline
+        if: ${{ inputs.update_baseline }}
+        run: |
+          python -m odock.benchmark \
+            --json benchmark-updated.json \
+            --csv benchmark-updated.csv \
+            --write-baseline
+
+      - name: Upload the benchmark artefacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-${{ github.run_id }}
+          path: |
+            benchmark-results.json
+            benchmark-results.csv
+            benchmark-updated.json
+            benchmark-updated.csv
+            benchmark/baseline.json
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Benchmark"
+            echo
+            if [ -f benchmark-results.csv ]; then
+              echo '```'
+              cat benchmark-results.csv
+              echo '```'
+            else
+              echo "no benchmark-results.csv was produced - the run failed before it wrote one"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

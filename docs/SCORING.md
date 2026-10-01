@@ -841,19 +841,19 @@ benzamidine: the single aryl–amidine rotor has two endpoints with more than on
 heavy neighbour, so `N_tors = 1.0`):
 
 ```text
-inter            = -6.576 kcal/mol
+inter            = -8.458 kcal/mol
 intra            = -0.043
 unbound          = -0.043
-base             = -6.576 + (-0.043) - (-0.043) = -6.576
+base             = -8.458 + (-0.043) - (-0.043) = -8.458
 N_tors           = 1.0
 divisor          = 1 + 0.05846 * 1.0 = 1.05846
-affinity (total) = -6.576 / 1.05846 = -6.2129  ->  prints as -6.213
+affinity (total) = -8.458 / 1.05846 = -7.9909  ->  prints as -7.991
 ```
 
-and indeed the file records `INTER + INTRA: -6.619`, `INTER: -6.576`,
-`INTRA: -0.043`, `UNBOUND: -0.043`, `CONF_INDEPENDENT: 0.363` and
-`VINA RESULT: -6.213`. The last two numbers are the *reported* affinity and the
-shift produced by the divisor: `-6.213 - (-6.576) = 0.363`.
+and indeed the file records `INTER + INTRA: -8.501`, `INTER: -8.458`,
+`INTRA: -0.043`, `UNBOUND: -0.043`, `CONF_INDEPENDENT: 0.467` and
+`VINA RESULT: -7.991`. The last two numbers are the *reported* affinity and the
+shift produced by the divisor: `-7.991 - (-8.458) = 0.467`.
 
 ---
 
@@ -1109,48 +1109,41 @@ target                 PDB 3PTB (bovine trypsin + benzamidine)
 force field            vina
 independent MC runs    16               (--exhaustiveness 16)
 seed                   42
-top-pose RMSD          1.133 Å          (heavy atoms, no superposition)
-affinity (mode 1)      -6.213 kcal/mol
-affinity (crystal pose) -5.806 kcal/mol
-grid                   150 920 points, 3 MB
-wall time              3.0 s
+top-pose RMSD          1.124 Å          (heavy atoms, no superposition)
+affinity (mode 1)      -7.991 kcal/mol
+top-pose RMSD (fitted) 0.354 Å          (after optimal superposition)
 verdict                PASS (threshold 2.0 Å)
 ```
 
-The pose file of that run records the full decomposition and the seven modes
-inside the 3 kcal/mol window:
+The pose file of that run records the full decomposition and the top four modes:
 
 ```text
 mode |   affinity | dist from best mode
      | (kcal/mol) | rmsd l.b.| rmsd u.b.
 -----+------------+----------+----------
-   1       -6.213      0.000      0.000
-   2       -6.191      0.060      1.602
-   3       -5.035      2.410      3.547
-   4       -4.935      2.777      3.567
-   5       -4.887      1.379      2.449
-   6       -4.403      2.487      3.329
-   7       -4.228      3.402      4.435
+   1    -7.991      0.000      0.000
+   2    -7.797      0.202      1.608
+   3    -7.307      2.614      3.602
+   4    -7.007      2.276      3.267
 
 mode 1 REMARK block:
-  VINA RESULT:       -6.213      0.000      0.000
-  INTER + INTRA:       -6.619
-  INTER:               -6.576
+  VINA RESULT:       -7.991      0.000      0.000
+  INTER + INTRA:       -8.501
+  INTER:               -8.458
   INTRA:               -0.043
-  CONF_INDEPENDENT:     0.363
+  CONF_INDEPENDENT:     0.467
   UNBOUND:             -0.043
 ```
 
 The affinity decomposes exactly as the formula above predicts:
-`INTER + INTRA - UNBOUND = -6.576 + (-0.043) - (-0.043) = -6.576`, the torsional
-divisor gives `-6.576 / (1 + 0.05846 * 1) = -6.213`, and the reported
-`CONF_INDEPENDENT` is `-6.213 - (-6.576) = 0.363`. A 1.133 Å RMSD with no
-superposition means the search found the crystallographic binding mode: the
-ligand is essentially a rigid body with one rotor, so the residual is a small
-in-plane rotation of the amidine group rather than a wrong pose — indeed the top
-pose scores 0.407 kcal/mol *better* than the crystal geometry (−6.213 against
-−5.806 at the experimental position, `odock score`), a difference of the order
-the empirical force field resolves between two nearly identical poses.
+`INTER + INTRA - UNBOUND = -8.458 + (-0.043) - (-0.043) = -8.458`, the torsional
+divisor gives `-8.458 / (1 + 0.05846 * 1) = -7.991`, and the reported
+`CONF_INDEPENDENT` is `-7.991 - (-8.458) = 0.467`. A 1.124 Å RMSD with no
+superposition means the search found the crystallographic binding mode and only
+the (rigid) benzamidine orientation inside it is slightly rotated — the ligand is
+essentially a rigid body with one rotor, so the residual is a small in-plane
+rotation rather than a wrong pose. After optimal superposition the same pose is
+0.354 Å from the crystal structure.
 
 The validation is also the practical check on the whole chain: preparation,
 typing, the kinematic tree, the grid, the search protocol, refinement and

@@ -22,7 +22,7 @@ import os
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Optional, Union
+from typing import List, Optional, Union
 
 __all__ = [
     "DEFAULT_TIMEOUT",
@@ -220,10 +220,44 @@ def fetch_ligand_sdf(
     """
     identifier = validate_ligand_id(ligand_id)
     path = Path(out) if out is not None else Path(f"{identifier}.sdf")
-    text = _download(
-        RCSB_LIGAND_URL.format(ligand_id=identifier),
-        f"ligand {identifier}",
-        timeout,
-    )
+    text = _download_ligand(identifier, timeout)
     _write(path, text)
     return text
+
+
+def ligand_urls(ligand_id: str) -> List[str]:
+    """The RCSB URLs to try for `ligand_id`, most specific first.
+
+    ``files.rcsb.org/ligands/download`` serves the *ideal* and *model* coordinate
+    variants of a component (``BTN_ideal.sdf``, ``BTN_model.sdf``); the bare
+    ``BTN.sdf`` path that the service used to serve now answers 404.  A caller
+    who names a variant gets exactly that file; a caller who gives only the
+    component ID gets the ideal coordinates first and the bare path as a
+    fallback, so ``fetch_ligand_sdf("BTN")`` does what it says rather than
+    failing with a 404 the user cannot act on.
+    """
+    identifier = validate_ligand_id(ligand_id)
+    base, _, variant = identifier.partition("_")
+    if variant:
+        # The component ID is upper-case on the server, the file variant is not:
+        # ``BTN_ideal.sdf``, never ``BTN_IDEAL.sdf``.
+        return [
+            RCSB_LIGAND_URL.format(ligand_id=f"{base}_{variant.lower()}")
+        ]
+    return [
+        RCSB_LIGAND_URL.format(ligand_id=f"{base}_ideal"),
+        RCSB_LIGAND_URL.format(ligand_id=f"{base}_model"),
+        RCSB_LIGAND_URL.format(ligand_id=base),
+    ]
+
+
+def _download_ligand(identifier: str, timeout: float) -> str:
+    """Download a chemical component, trying each documented URL variant."""
+    urls = ligand_urls(identifier)
+    last_error: Optional[Exception] = None
+    for url in urls:
+        try:
+            return _download(url, f"ligand {identifier}", timeout)
+        except RuntimeError as exc:
+            last_error = exc
+    raise RuntimeError(f"ligand {identifier} could not be downloaded: {last_error}")

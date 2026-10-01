@@ -26,6 +26,7 @@ the parent's rigid cluster, which is what makes the nesting unambiguous.
 from __future__ import annotations
 
 import math
+import warnings
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
@@ -226,28 +227,59 @@ def strip_nonpolar_hydrogens(mol):
 # ---------------------------------------------------------------------------
 
 
-def gasteiger_charges(mol) -> List[float]:
+def gasteiger_charges(mol, *, warn: bool = True) -> List[float]:
     """Gasteiger-Marsili partial charges, one per atom.
 
     Returns zeros when RDKit cannot assign charges (e.g. an unsanitizable
     protein), because charges only affect the AD4 force field.
+
+    A charge that is not finite -- RDKit's charge model does not converge for a
+    few protein atoms and reports ``nan`` or ``inf`` for them -- is written as
+    ``0.0`` and reported, because the alternatives are both worse: an ``inf``
+    charge silently turns every AD4 electrostatic pair that touches the atom
+    into a ``NaN`` total, and a silent substitution hides the lost term.  The
+    warning is emitted once per molecule and names the number of atoms and the
+    first few by residue and atom name.  Pass ``warn=False`` for a bulk call that
+    reports it itself.
     """
     require_rdkit()
     charges = [0.0] * mol.GetNumAtoms()
+    bad: List[str] = []
     try:
         work = Chem.Mol(mol)
         AllChem.ComputeGasteigerCharges(work)
         for atom in work.GetAtoms():
-            if atom.HasProp("_GasteigerCharge"):
-                value = atom.GetProp("_GasteigerCharge")
-                try:
-                    c = float(value)
-                except ValueError:
-                    c = 0.0
-                charges[atom.GetIdx()] = 0.0 if math.isnan(c) else c
+            if not atom.HasProp("_GasteigerCharge"):
+                continue
+            try:
+                c = float(atom.GetProp("_GasteigerCharge"))
+            except ValueError:
+                c = 0.0
+            if not math.isfinite(c):
+                bad.append(_atom_label(atom))
+                c = 0.0
+            charges[atom.GetIdx()] = c
     except Exception:
         pass
+    if bad and warn:
+        warnings.warn(
+            f"{len(bad)} Gasteiger charge(s) were not finite and were written as "
+            f"0.000 ({', '.join(bad[:4])}"
+            + (", ..." if len(bad) > 4 else "")
+            + "); the AD4 electrostatic term involving them is lost, so treat an "
+            "AD4 score on this receptor as approximate",
+            UserWarning,
+            stacklevel=3,
+        )
     return charges
+
+
+def _atom_label(atom) -> str:
+    """``"LEU67:N"`` for an RDKit atom with PDB information, else its index."""
+    info = atom.GetPDBResidueInfo()
+    if info is None:
+        return f"atom {atom.GetIdx() + 1}"
+    return f"{info.GetResidueName().strip()}{info.GetResidueNumber()}:{info.GetName().strip()}"
 
 
 # ---------------------------------------------------------------------------

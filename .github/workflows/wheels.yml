@@ -1,0 +1,146 @@
+# Wheels and sdists for a release tag.
+#
+# `maturin build --release` on each platform, then one job that installs the
+# built wheel in a *fresh* environment and runs the smoke command, because a
+# wheel that builds but cannot import is the failure this workflow exists to
+# catch.  The artefacts are the ones `maturin publish` would upload: the workflow
+# deliberately stops at "build and verify" and leaves publishing to a human (the
+# project has no PyPI token in CI, and adding one is a decision for the release
+# manager, not for a workflow file).
+#
+# A tag push (`v0.1.0`) starts this; `workflow_dispatch` builds the same artefacts
+# from any branch for a dry run.
+name: Wheels
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x86_64
+          - os: windows-latest
+            platform: windows-x86_64
+          # macOS is built but not smoke-tested below: the test job needs rdkit,
+          # and the arm64 runner is the slowest of the three.  The wheel is still
+          # produced and uploaded.
+          - os: macos-14
+            platform: macos-arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install maturin
+        run: python -m pip install --upgrade "maturin>=1.5,<2.0"
+
+      # The leak rules are checked first: an artefact that ships an internal
+      # document is the failure this workflow exists to prevent, and a deny-list
+      # that had stopped matching would report nothing at all.
+      - name: Check the leak rules (tools/inspect_dist.py --self-test)
+        run: python tools/inspect_dist.py --self-test
+
+      - name: maturin build --release (wheel)
+        run: maturin build --release --out dist
+
+      # The sdist is the half that carries docs/ and the test suite; it is built
+      # here so the two can be checked together.
+      - name: maturin sdist (source distribution)
+        run: maturin sdist --out dist
+
+      # Both directions, and a gate rather than a report: every promised entry
+      # must be present, and nothing internal (`odck.md`, `DELIVERY.md`, a root
+      # `odock/` snapshot, bytecode, a stray structure) may be.
+      - name: Inspect what was built
+        run: python tools/inspect_dist.py dist
+
+      - name: Upload the distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+
+  smoke:
+    name: Install the wheel and run it
+    needs: build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x86_64
+          - os: windows-latest
+            platform: windows-x86_64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist-${{ matrix.platform }}
+          path: dist
+
+      # A fresh environment: no source tree on sys.path, no editable install.
+      # If the wheel is missing a module, this is where it shows.
+      - name: Install the wheel into a clean environment
+        shell: bash
+        run: |
+          python -m venv wheel-test
+          if [ -d wheel-test/Scripts ]; then
+            echo "$PWD/wheel-test/Scripts" >> "$GITHUB_PATH"
+          else
+            echo "$PWD/wheel-test/bin" >> "$GITHUB_PATH"
+          fi
+      - name: pip install the wheel
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install dist/*.whl
+          python -m pip install pytest
+      - name: Check the import, the entry point and the version
+        run: |
+          python -c "import odock; print('odock', odock.__version__, 'kernel', odock.kernel_version())"
+          odock --version
+          odock info
+      - name: Check that the packaged metadata is complete
+        shell: bash
+        run: |
+          python - <<'PY'
+          import importlib.metadata as md
+          meta = md.metadata("opendocking")
+          for key in ("Name", "Version", "Summary", "License", "Home-page", "Requires-Python"):
+              print(f"{key}: {meta.get(key)!r}")
+          files = md.files("opendocking")
+          package = [str(f) for f in files if str(f).startswith("odock/")]
+          assert any(f.endswith("_odock.pyd") or f.endswith("_odock.so") for f in package), package
+          assert any(f.endswith("cli.py") for f in package), "odock/cli.py is not in the wheel"
+          print(f"{len(package)} files under odock/ in the wheel")
+          PY

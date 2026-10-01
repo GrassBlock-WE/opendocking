@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Library pre-filters for virtual screening: Lipinski, Veber and PAINS.
 
-the project brief module B.4 asks for three pre-filters before an expensive docking
+The project requirements ask for three pre-filters before an expensive docking
 campaign.  All three are pure graph/descriptor chemistry, so a library can be
 filtered *before* any 3-D conformer is generated:
 
@@ -68,7 +68,7 @@ __all__ = [
 ]
 
 # ---------------------------------------------------------------------------
-# Thresholds (the project brief module B.4)
+# Thresholds (the drug-likeness rules the project specifies)
 # ---------------------------------------------------------------------------
 
 LIPINSKI_MAX_MW = 500.0

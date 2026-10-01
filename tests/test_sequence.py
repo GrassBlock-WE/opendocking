@@ -20,11 +20,13 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 QtWidgets = pytest.importorskip("PyQt6.QtWidgets")
 QtCore = pytest.importorskip("PyQt6.QtCore")
+QtGui = pytest.importorskip("PyQt6.QtGui")
 QTest = pytest.importorskip("PyQt6.QtTest").QTest
 
 from odock.gui.sequence import (  # noqa: E402
     AMINO_ACIDS,
     STANDARD_AMINO_ACIDS,
+    RulerPalette,
     SequenceTrack,
     class_color,
     one_letter,
@@ -772,6 +774,8 @@ def test_no_panel_is_locked_to_a_size(window):
         window.workspace_dock,
         window.inspector_dock,
         window.bottom_dock,
+        window.dashboard_dock,
+        window.comparison_dock,
         window.selection_dock,
     ):
         # Nothing hands out a minimum the user cannot live with, and nothing is
@@ -787,6 +791,31 @@ def test_no_panel_is_locked_to_a_size(window):
     inspector_area = window.inspector_dock.widget()
     assert isinstance(inspector_area, QtWidgets.QScrollArea)
     assert inspector_area.widget() is window.inspector
+
+    # The run monitor and the pose comparison are *content*, and content width
+    # follows the font metrics: a fallback font made the measurement table
+    # 638 px wide and pushed the whole window's minimum to 1134 px. Both panels
+    # live in scroll areas instead, so they compress and scroll rather than
+    # dictating the floor — which is exactly what the next assertions pin.
+    dashboard_pages = [
+        window.dashboard_tabs.widget(tab)
+        for tab in range(window.dashboard_tabs.count())
+    ]
+    assert dashboard_pages and all(
+        isinstance(page, QtWidgets.QScrollArea) for page in dashboard_pages
+    )
+    assert isinstance(window.comparison_dock.widget(), QtWidgets.QScrollArea)
+    assert window.dashboard_dock.widget() is window.dashboard_tabs
+    for dock in (window.dashboard_dock, window.comparison_dock):
+        assert dock.minimumWidth() <= 200, dock.windowTitle()
+        assert dock.minimumHeight() <= 200, dock.windowTitle()
+    for panel in (window.run_dashboard, window.measure_history):
+        dock_min = window.dashboard_dock.minimumWidth()
+        content = panel.minimumSizeHint().width()
+        assert dock_min < content, (
+            f"{panel.objectName()} dictates the dock minimum: {dock_min} "
+            f"against a content minimum of {content}"
+        )
     assert window.minimumSizeHint().width() <= 1000
     # Both dividers are wide enough to grab and neither child can be collapsed.
     for splitter in (window.central_splitter, window.pose_splitter):
@@ -937,10 +966,6 @@ def test_the_first_pose_load_frames_the_pocket_once(qapp):
     """Poses frame the site when they arrive, and on request — never per pose."""
     from odock.gui import i18n
     from odock.gui.app import DockingWorkbench, _configure_surface_format
-
-    for name in ("receptor.pdbqt", "ligand.pdbqt", "poses.pdbqt"):
-        if not (DEMO / name).exists():  # pragma: no cover - data guard
-            pytest.skip(f"missing demo structure {DEMO / name}")
 
     i18n.set_language("en")
     _configure_surface_format()
@@ -1257,10 +1282,6 @@ def test_loading_a_ligand_keeps_the_receptor_in_view(qapp):
     from odock.gui import i18n
     from odock.gui.app import DockingWorkbench, _configure_surface_format
 
-    for name in ("receptor.pdbqt", "ligand.pdbqt"):
-        if not (DEMO / name).exists():  # pragma: no cover - data guard
-            pytest.skip(f"missing demo structure {DEMO / name}")
-
     i18n.set_language("en")
     _configure_surface_format()
     window = DockingWorkbench()
@@ -1364,3 +1385,179 @@ def test_the_play_poses_menu_item_actually_plays(window):
     assert window.viewport._anim_timer is not None, "triggering it again keeps playing"
     window.viewport.stop_animation()
     assert window.viewport._anim_timer is None, "and the player can still be stopped"
+
+
+# ---------------------------------------------------------------------------
+# the ruler palette and the pose-contact marks
+# ---------------------------------------------------------------------------
+
+
+def test_the_ruler_takes_the_palette_of_the_active_theme(window):
+    """The ruler paints its own background, so the theme has to reach it.
+
+    It is a plain ``QWidget`` with a ``QPainter``: a style sheet cannot recolour
+    the strip it fills, and a near-black ruler under a light window reads as a
+    rendering bug.
+    """
+    from odock.gui import dashboard
+    from odock.gui.sequence import DARK_RULER, LIGHT_RULER
+
+    assert window.color_theme is dashboard.DARK
+    assert window.sequence.palette is DARK_RULER
+
+    window.set_theme("light")
+    assert window.sequence.palette is LIGHT_RULER
+    assert LIGHT_RULER.background != DARK_RULER.background
+    # Both palettes are complete: nothing paints with a missing colour.
+    for palette in (DARK_RULER, LIGHT_RULER):
+        for field in RulerPalette.__dataclass_fields__:
+            value = getattr(palette, field)
+            assert isinstance(value, str) and value.startswith("#"), (field, value)
+
+    window.set_theme("dark")
+    assert window.sequence.palette is DARK_RULER
+
+    # The painter runs on both palettes without raising.
+    for palette in (DARK_RULER, LIGHT_RULER):
+        window.sequence.set_palette(palette)
+        pixmap = QtGui.QPixmap(window.sequence.size())
+        window.sequence.render(pixmap)
+    window.sequence.set_palette(DARK_RULER)
+    assert window.sequence.set_palette(None) is None
+    assert window.sequence.palette is DARK_RULER
+
+
+def test_contact_marks_name_the_residues_a_pose_touches(window):
+    """Loading a pose marks its contacts on the ruler, from the coordinates."""
+    ruler = window.sequence
+    marked = ruler.marked_keys("contact")
+    assert marked, "the imported ligand touches residues"
+    # Every mark is a residue the ruler actually draws, and BEN (the ligand)
+    # is not one of them: the marks belong to the receptor sequence.
+    keys = set(ruler.block_keys())
+    assert set(marked) <= keys
+    assert all(key[2] not in ("BEN", "HOH") for key in marked)
+    assert 1 <= len(marked) < 60, "a ligand contacts a pocket, not the whole protein"
+
+    # The mark is a function of the coordinates alone, so recomputing it gives
+    # exactly the same residues.
+    ruler.clear_contact_marks()
+    assert ruler.contact_marks() == {}
+    window._mark_pose_contacts()
+    assert ruler.marked_keys("contact") == marked
+
+    # Browsing poses recomputes them for the pose on screen.
+    window.load_poses((DEMO / "poses.pdbqt").read_text(encoding="utf-8"))
+    qapp = QtWidgets.QApplication.instance()
+    qapp.processEvents()
+    for index in range(len(window.pose_models)):
+        window.pose_slider.setValue(index)
+        qapp.processEvents()
+        current = ruler.marked_keys("contact")
+        assert current, f"pose {index + 1} touches nothing?"
+        assert set(current) <= keys
+
+    # Clearing the annotations clears the marks as well.
+    window._clear_interactions()
+    qapp.processEvents()
+    assert ruler.contact_marks() == {}
+
+
+def test_the_ruler_marks_survive_a_reload_of_the_same_structure():
+    """Marks are residue keys, so a reload puts them back on the same residues.
+
+    Switching pose reloads the ligand through ``set_structure``; if the marks
+    were cell indices they would slide onto whatever residue now sits at that
+    index.
+    """
+    ruler = track(n=12)
+    wanted = [("A", 3, "ALA"), ("A", 9, "ALA")]
+    ruler.set_contact_marks({"contact": wanted})
+    assert ruler.marked_keys("contact") == wanted
+
+    ruler.set_structure(make_atoms([("ALA", 1)] * 12))
+    assert ruler.marked_keys("contact") == wanted
+
+    # A residue that no longer exists simply disappears from the marks.
+    ruler.set_structure(make_atoms([("ALA", 1)] * 4))
+    assert ruler.marked_keys("contact") == [("A", 3, "ALA")]
+
+    ruler.set_structure(make_atoms([("ALA", 1)] * 4, start=10))
+    assert ruler.marked_keys("contact") == []
+
+
+def test_contact_marks_accept_only_known_layers_and_survive_painting():
+    from odock.gui.sequence import CONTACT_MARKS, MARK_ORDER
+
+    ruler = track(n=12)
+    ruler.set_contact_marks(
+        {
+            "contact": [("A", 2, "ALA")],
+            "shared": [("A", 2, "ALA"), ("A", 5, "ALA")],
+            "unique": [("A", 5, "ALA")],
+            "nonsense": [("A", 1, "ALA")],
+        }
+    )
+    assert set(ruler.contact_marks()) == {"contact", "shared", "unique"}
+    assert ruler.marked_keys("nonsense") == []
+    assert ruler.marked_keys("shared") == [("A", 2, "ALA"), ("A", 5, "ALA")]
+
+    # Two layers on one cell stack in a fixed order, so both stay visible.
+    stacked_block = next(b for b in ruler._blocks if b.key == ("A", 2, "ALA"))
+    stacked = [name for name in MARK_ORDER if name in ruler._marks_of(stacked_block)]
+    assert stacked == ["contact", "shared"]
+    assert set(CONTACT_MARKS) == set(MARK_ORDER)
+
+    pixmap = QtGui.QPixmap(ruler.size())
+    ruler.render(pixmap)
+    # The bands really are painted: the marked cell differs from an unmarked one.
+    image = pixmap.toImage()
+    marked = ruler.cell_rect(stacked_block.index)
+    plain = ruler.cell_rect(next(b for b in ruler._blocks if b.key == ("A", 1, "ALA")).index)
+    marked_px = image.pixelColor(marked.center().x(), marked.bottom() - 2)
+    plain_px = image.pixelColor(plain.center().x(), plain.bottom() - 2)
+    assert marked_px != plain_px
+
+    ruler.clear_contact_marks()
+    assert ruler.contact_marks() == {}
+    ruler.clear_contact_marks()  # idempotent
+    for name in MARK_ORDER:
+        assert ruler.marked_keys(name) == []
+
+
+def test_a_comparison_marks_the_shared_and_the_unique_residues(window):
+    """Ctrl-clicking two poses splits the ruler into agreed / disagreed."""
+    from odock.gui import dashboard
+
+    window.load_poses((DEMO / "poses.pdbqt").read_text(encoding="utf-8"))
+    qapp = QtWidgets.QApplication.instance()
+    qapp.processEvents()
+    window.table.clearSelection()
+    window.table.selectRow(0)
+    window.table.item(1, 0).setSelected(True)
+    qapp.processEvents()
+
+    comparison = window.comparison.comparison()
+    assert comparison is not None, "two selected rows must produce a comparison"
+    ruler = window.sequence
+    shared = ruler.marked_keys("shared")
+    unique = ruler.marked_keys("unique")
+    assert "contact" not in ruler.contact_marks(), "the split replaces the plain mark"
+    assert set(shared) == {key for key, _a, _b in comparison.diff.shared}
+    assert set(unique) == {
+        contact.key
+        for contact in list(comparison.diff.only_a) + list(comparison.diff.only_b)
+    }
+    assert not (set(shared) & set(unique)), "a residue cannot be both"
+
+    # Comparing the same pose with itself agrees about everything it touches.
+    same = dashboard.compare_poses(
+        window.pose_models[0].atoms,
+        window.pose_models[0].atoms,
+        window.scene.receptor,
+    )
+    window._mark_comparison_contacts(same)
+    assert ruler.marked_keys("unique") == []
+    assert ruler.marked_keys("shared") == sorted(
+        ruler.marked_keys("shared"), key=lambda key: ruler.block_keys().index(key)
+    )

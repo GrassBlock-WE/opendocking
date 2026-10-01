@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Ligand chemistry (module B of the project brief) and the library pre-filters.
+"""Ligand chemistry and the library pre-filters.
 
-Covers the published interface of the ligand chemistry and filtering layer:
+Covers the frozen interface:
 
 * ``odock.chem.ligand`` — ``read_ligands`` (every supported format, batch
   aware), ``embed_3d``, ``minimize``, ``rotatable_bonds`` / ``rotation_reason``

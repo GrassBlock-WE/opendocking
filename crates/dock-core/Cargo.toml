@@ -8,6 +8,12 @@ authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
 readme.workspace = true
+description = "High-performance docking kernel: kinematics, scoring, search and affinity grids"
+
+# The acknowledged clippy findings live in the workspace manifest, so the CI gate
+# (`cargo clippy --workspace --all-targets -- -D warnings`) fails on anything new.
+[lints]
+workspace = true
 
 [dependencies]
 glam = "0.29"

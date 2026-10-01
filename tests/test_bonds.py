@@ -69,8 +69,6 @@ def _protein_groups(atoms):
 
 @pytest.fixture(scope="module")
 def ligand():
-    if not LIGAND_PDBQT.exists():  # pragma: no cover - data guard
-        pytest.skip(f"missing demo ligand {LIGAND_PDBQT}")
     return _atoms(LIGAND_PDBQT)
 
 
@@ -82,8 +80,6 @@ def receptor():
 @pytest.fixture(scope="module")
 def shipped_receptor():
     """The receptor PDBQT the workbench actually loads (polar hydrogens kept)."""
-    if not RECEPTOR_PDBQT.exists():  # pragma: no cover - data guard
-        pytest.skip(f"missing demo receptor {RECEPTOR_PDBQT}")
     return _atoms(RECEPTOR_PDBQT)
 
 

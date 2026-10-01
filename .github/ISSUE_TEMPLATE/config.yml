@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: How do I ...?
+    url: https://github.com/GrassBlock-WE/opendocking/blob/main/docs/USER_GUIDE.md
+    about: The user guide covers the CLI, the Python API, the tuning knobs and troubleshooting.
+  - name: Screening a library
+    url: https://github.com/GrassBlock-WE/opendocking/blob/main/docs/SCREENING.md
+    about: The screening tutorial — resumable campaigns, filtering, ranking and consensus.
+  - name: I want to contribute
+    url: https://github.com/GrassBlock-WE/opendocking/blob/main/CONTRIBUTING.md
+    about: Build instructions, the test commands CI runs, and how to report a bug well.

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Flexible-receptor PDBQT: split side chains out of the rigid framework.
 
-`the project brief` module A.4 asks for the AutoDock flexible-residue representation: the
+The project requirements ask for the AutoDock flexible-residue representation: the
 backbone stays in the rigid receptor and each selected side chain is emitted
 between ``BEGIN_RES``/``END_RES`` as a nested ``BRANCH`` torsion tree, so that
 AutoDock and AutoDock Vina can treat those chi angles as search dimensions.

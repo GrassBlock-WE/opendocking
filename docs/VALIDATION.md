@@ -4,7 +4,7 @@ Every number in this file was measured on this source tree. Each section names
 the command that reproduces it, so nothing here has to be taken on trust.
 
 ```bash
-# Rust kernel: 116 tests plus the integration suite.
+# Rust kernel: the unit tests plus the real-ligand integration suite.
 cargo test --workspace
 
 # The same tests with the optional wgpu backend compiled in.
@@ -15,6 +15,9 @@ python -m pytest tests -q
 
 # The crystallographic acceptance test, end to end.
 python tests/validate_3ptb.py --exhaustiveness 16 --seed 42
+
+# The five-system re-docking benchmark, three seeds per system.
+python -m odock.benchmark
 
 # Drive the real workbench through a full user session.
 python tests/simulate_workbench.py
@@ -28,7 +31,14 @@ python tests/simulate_workbench.py
 |---|---|---|
 | Rust kernel | `cargo test --workspace` | **116 passed** (+ 5 integration tests in `crates/dock-core/tests/real_ligand.rs`, + 1 doc test) |
 | Rust, GPU backend | `cargo test -p dock-core --features gpu` | **116 passed** |
-| Python | `.venv/Scripts/python.exe -m pytest tests -q` | **605 passed, 1 skipped** (85 s) |
+| Python | `.venv/Scripts/python.exe -m pytest tests -q` | **1053 passed, 1 skipped** (259 s) |
+| Workbench session | `python tests/simulate_workbench.py` | **48 steps, 48 passed, 0 failed** |
+| Benchmark | `python -m odock.benchmark` | 5 systems × 3 seeds, see [§4](#4-the-re-docking-benchmark) |
+
+The Python and benchmark rows were re-measured on this revision. The Rust rows
+are unchanged from the 0.1.0 cut: no file under `crates/` has been modified since
+(`docs/BENCHMARK.md` records the machine and the kernel version alongside the
+benchmark numbers).
 
 The single skipped Python test writes the style contact sheets
 (`tests/test_gui_viewport.py`); set `ODOCK_STYLE_SHOTS=1` to run it. The GUI
@@ -54,9 +64,53 @@ What the suites actually check, beyond "the code runs":
   never *required* for a correct result.
 * **Cancellation** — pause, resume and abort are exercised under concurrency;
   an aborted run returns the best pose it has found and releases its memory.
-* **Determinism** — the same seed reproduces a pose list bit for bit.
+* **Determinism** — the same seed reproduces a pose list bit for bit; the
+  benchmark repeats a 26-minute, 15-docking run field for field (§4).
 * **PDBQT round trips** — including the nested topology language and the exact
   column placement of the AD4 atom type.
+* **The science layer** — ligand-efficiency metrics against hand-checkable
+  arithmetic, ligand strain against a force-field minimum, interaction
+  fingerprints and water bridges against hand-placed geometry, and the consensus
+  rank aggregation against worked three-pose examples.
+* **The documentation itself** (`tests/test_docs.py`) — every local link
+  resolves, the published docs name no private file, and the shipped sources
+  cite no internal brief. Both failure modes have happened here: the README once
+  pointed at a gitignored hand-over document, and a staging pass once cleaned the
+  citations in a *copy* of the sources while the working tree kept them.
+
+### The release content scan, and why the working tree shows hits
+
+`tools/inspect_dist.py` and the release content scan check both directions: every
+promised file is present in an artefact, and nothing internal is. The scan is a
+**byte** scan for strings that must never ship — private document names, absolute
+developer paths, the vendored comparison binary.
+
+Point it at the **staged published set**, not at the working tree, and expect a
+handful of hits **inside the exclusion machinery**: `.gitignore`, the maturin
+`include`/`exclude` list in `pyproject.toml`, the inspect tool's own deny-list and
+its self-test, and the CI workflow that runs the tool. Those files have to spell
+the names they keep out — that is their job — so a working tree *cannot* be
+byte-clean by construction, and a hit in one of them is **not** a defect to fix
+by weakening the machinery. What matters is that a scan of the published set
+finds those strings nowhere else: no hit in `docs/`, `python/`, `tests/`, the
+README or `CONTRIBUTING.md`.
+
+Real leaks were caught this way, and are worth remembering as examples:
+
+* `benchmark/baseline.json` recorded the absolute checkout path of the machine
+  that produced it. The baseline is documentation — "run this to reproduce" — and
+  a path that exists on one laptop is worse than useless. It is now recorded as
+  `python -m odock.benchmark --seeds 42,7,2024 ...`, normalised at the boundary
+  (`benchmark.portable_command`) so a baseline re-cut from an older run cannot
+  inherit a path either.
+* `.gitignore` used to ignore the whole `demo/` directory (with a hand-written
+  exception for the screening library), which silently dropped 18 files the
+  release is supposed to contain. The rule now ignores exactly the vendored
+  AutoDock Vina binary: the demo data ships, the third-party executable does not.
+
+The check that *guards* these rules is `out/verify/release_check.py`: it applies
+the tree's own `.gitignore` in memory and fails when a file of a release content
+family would not be published.
 
 ---
 
@@ -75,17 +129,17 @@ python tests/validate_3ptb.py --exhaustiveness 16 --seed 42
 ```
 
 ```text
-target                 PDB 3PTB (bovine trypsin + benzamidine)
-force field            vina
-independent MC runs    16               (--exhaustiveness 16)
-seed                   42
-top-pose RMSD          1.133 Å          (heavy atoms, no superposition)
-affinity (mode 1)      -6.213 kcal/mol
+target                  PDB 3PTB (bovine trypsin + benzamidine)
+force field             vina
+independent MC runs     16               (--exhaustiveness 16)
+seed                    42
+top-pose RMSD           1.133 A          (heavy atoms, no superposition)
+affinity (mode 1)       -6.213 kcal/mol
 affinity (crystal pose) -5.806 kcal/mol
-poses in the 3 kcal/mol window  7
-grid                   150 920 points, 3 MB
-wall time              3.0 s
-verdict                PASS (threshold 2.0 Å)
+poses reported          7
+grid                    150 920 points, 3 MB
+wall time               2.1 s
+verdict                 PASS (threshold 2.0 A)
 ```
 
 The pose file of that run records the full decomposition:
@@ -137,14 +191,14 @@ programs.
 ## 3. A flexible, drug-like ligand: PDB 1M17
 
 The bundled demo (regenerated by `python examples/make_demo.py`, and quoted in
-[`demo/README.md`](../demo/README.md)) docks erlotinib into the EGFR kinase
-domain — 30 heavy atoms, 11 rotatable bonds, a partly water-mediated binding
-mode, and the crystallographic waters stripped by default.
+`demo/README.md`) docks erlotinib into the EGFR kinase domain — 29 heavy atoms,
+11 rotatable bonds, a partly water-mediated binding mode, and the
+crystallographic waters stripped by default.
 
 | system | ligand | heavy atoms | N_tors | top-pose RMSD | best RMSD within 1 kcal/mol |
 |---|---|---|---|---|---|
-| 3PTB (trypsin) | benzamidine | 13 | 1 | **1.13 Å** | 1.13 Å |
-| 1M17 (EGFR) | erlotinib | 30 | 11 | 4.69 Å | **1.43 Å** |
+| 3PTB (trypsin) | benzamidine | 9 | 1 | **1.13 Å** | 1.13 Å |
+| 1M17 (EGFR) | erlotinib | 29 | 11 | 4.69 Å | **1.43 Å** |
 
 RMSD is the heavy-atom RMSD against the experimental pose with no
 superposition. The last column is the usual top-N measure: the best RMSD among
@@ -152,13 +206,67 @@ all poses within 1 kcal/mol of the top score.
 
 Read the second row honestly: the search **finds** the experimental binding
 mode — it is the pose at 1.43 Å — but the empirical force field ranks four
-near-degenerate poses above it (they differ by 0.11 kcal/mol). That is a
-property of the Vina energy function for a molecule with 11 rotatable bonds, not
-of the search: the rigid case above is reproduced to 1.1 Å by the same engine.
+near-degenerate poses above it. That is a property of the Vina energy function
+for a molecule with 11 rotatable bonds, not of the search: the rigid case above
+is reproduced to 1.1 Å by the same engine. §4 measures how much that ranking
+moves when the seed changes.
 
 ---
 
-## 4. Blind pocket detection
+## 4. The re-docking benchmark
+
+`python -m odock.benchmark` re-docks five bundled crystal complexes with three
+seeds each and reports accuracy, the rank of the correct pose, the
+score-versus-RMSD correlation and the three force fields' agreement **with their
+spread** — because a single number hides the 3.2 Å of seed-to-seed movement on
+the flexible system. [`BENCHMARK.md`](BENCHMARK.md) has the full table and, more
+importantly, the list of what five systems do *not* establish.
+
+```bash
+python -m odock.benchmark                     # 26 minutes on 16 cores
+python -m odock.benchmark --check-baseline    # fail on a scoring regression
+```
+
+| system | ligand | heavy | rotors | top RMSD | seed spread | best ≤1 kcal | rank | rho (n) | agreement range | weakest pair |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 3PTB | BEN | 9 | 1 | **1.13 Å** | 0.00 | 1.13 Å | 1 | +0.78 (15) | +0.82…+0.91 | vina~ad4 |
+| 1STP | BTN | 16 | 5 | **1.03 Å** | 0.01 | 1.03 Å | 1 | — | — | — |
+| 3ERT | OHT | 29 | 8 | **1.51 Å** | 0.43 | 1.35 Å | 1 | +0.64 (8) | +0.81…+0.88 | vinardo~ad4 |
+| 1M17 | AQ4 | 29 | 11 | **1.51 Å** | **3.17** | 1.28 Å | 1 | +0.51 (9) | +0.52…+0.69 | vina~ad4 |
+| 1HVR | XK2 | 46 | 8 | 10.07 Å | 0.00 | **0.79 Å** | 2 | −1.00 (2) | −0.33…+1.00 | vinardo~ad4 |
+
+Every seed of every system finds a pose within 2 Å of the crystal. Three things
+in that table matter more than the averages, and all three are arguments against
+reading one number:
+
+* **1M17's top-pose RMSD moves 3.17 Å between seeds** (4.69 / 1.51 / 1.70 Å)
+  while `best ≤1 kcal` stays at 1.28–1.44 Å in every seed. The search finds the
+  experimental mode every time; the *ranking* of near-degenerate poses is what
+  moves.
+* **1HVR's top pose is 10.1 Å from the crystal in every seed**, and the crystal
+  mode is at **rank 2, 0.79–1.10 Å, inside 1 kcal/mol**. A benchmark reporting
+  only `top RMSD` would score this as a failure; the answer is in the output.
+* **AD4 is the outlier**: the weakest force-field pair involves AD4 on every
+  measurable system (vina~ad4 twice, vinardo~ad4 twice). An ablation — zeroing
+  every receptor charge, which removes AD4's electrostatics and its
+  charge-dependent desolvation — changes its correlation with Vina by 0.02 while
+  moving its own ranking on 4 of 9 poses, and AD4 spans 3.19 kcal/mol where Vina
+  spans 0.23 over the same poses. That is a scale difference in the
+  parameterisation, not a defect; see
+  [`BENCHMARK.md`](BENCHMARK.md#why-ad4-disagrees-with-vina-measured-not-asserted).
+
+**Regression gate.** `benchmark/baseline.json` records the measured values, the
+exact command, the environment and the tolerances, and `--check-baseline` fails
+when a system is worse by more than 0.15 Å on a top-pose RMSD, one rank, or 0.2
+on a correlation. The tolerance is *repeat-run* noise — measured as exactly zero
+on this machine, because a re-run of the same command is bit-for-bit identical
+(verified: the 15-docking run repeated on the settled revision differs in **0
+fields**) — and deliberately *not* the seed spread, which is an order of
+magnitude larger and would produce a gate that never fires.
+
+---
+
+## 5. Blind pocket detection
 
 `odock pocket` needs no knowledge of the ligand. Run on the receptor prepared by
 the validation above (`odock pocket -r 3ptb_receptor.pdbqt`, the default 1.0 Å
@@ -179,7 +287,7 @@ detector is meant to shortlist cavities for inspection, and it does.
 
 ---
 
-## 5. Driving the real workbench
+## 6. Driving the real workbench
 
 `tests/simulate_workbench.py` starts the actual `QMainWindow`, drives it with Qt
 mouse and keyboard events through a complete user session — importing
@@ -203,7 +311,6 @@ steps    : 48
 passed   : 48
 failed   : 0
 skipped  : 0
-exit code: 0
 ```
 
 The script exits non-zero if any step fails, so it doubles as the GUI smoke test
@@ -212,7 +319,7 @@ this covers the workflow.
 
 ---
 
-## 6. What is *not* validated
+## 7. What is *not* validated
 
 Known limitations, stated so that they cannot be mistaken for oversights:
 
@@ -224,12 +331,13 @@ Known limitations, stated so that they cannot be mistaken for oversights:
    currently folds a flexible file back to a rigid receptor and emits an
    explicit parse note. Treating a side chain as rigid is a controlled,
    clearly-reported approximation.
-2. **Charges.** The Kollman model is the published united-atom scheme
-   (Gasteiger with hydrogen merging), not the Kollman/AMBER residue charge
-   tables, which are not available offline. For a hydrogen-free crystal protein
-   Gasteiger charges do not converge; the module then returns a conserved
-   all-zero set and says so. The AD4 electrostatic term therefore needs an
-   externally supplied charge set to be quantitatively meaningful.
+2. **Charges.** The Gasteiger model is what the writer uses, and it does **not**
+   converge for a fraction of a crystallographic protein's atoms: on the bundled
+   3PTB receptor 128 charges came back non-finite and were written as `0.000`,
+   which the writer now reports through a warning. Those atoms contribute
+   nothing to the AD4 electrostatic term, so an AD4 score on such a receptor is
+   quantitative only to the extent that the charge set is; supply an external
+   charge set when it matters.
 3. **The 150 Da ligand threshold.** Following the specification, a small ligand
    such as benzamidine (112 Da) is not classified as a co-crystallised ligand
    automatically. The workbench's strip action also accepts an explicit residue
@@ -247,12 +355,22 @@ Known limitations, stated so that they cannot be mistaken for oversights:
    literal nearest-neighbour definition, but then misses 3PTB's real S1 site.
 7. **Macrocycle handling** is basic: Vina's linear-attraction ("glue") term is
    implemented, but closure sampling is not specially optimised.
-8. **No AutoDockTools (ADT / MGLTools) code was read, borrowed or copied.**
-   Everything PDBQT-related is written from the format specification plus RDKit.
+8. **The force-field strain of a PDBQT-perceived molecule is unreliable.** A
+   PDBQT carries no bond orders, so RDKit sees a benzene ring as cyclohexane; for
+   benzamidine that turns a true MMFF94 strain of ~2.5 kcal/mol into 68.6, and a
+   ligand prepared from a bare PDB (without a `smiles=` template) is in the same
+   position. `odock.metrics` marks such a result `reliable=False` and
+   `require_reliable=True` makes it an error; the kernel strain, whose two
+   endpoints come from one potential, is the number the report prints.
+9. **Five benchmark systems are not CASF.** They are all rigid-receptor,
+   single-ligand, drug-like complexes prepared with a CCD SMILES template;
+   accuracy on them is a regression signal, not a capability claim.
+10. **No AutoDockTools (ADT / MGLTools) code was read, borrowed or copied.**
+    Everything PDBQT-related is written from the format specification plus RDKit.
 
 ---
 
-## 7. Attribution
+## 8. Attribution
 
 The algorithms and file formats follow their published descriptions and the
 freely licensed reference implementations. See the attribution section of

@@ -21,11 +21,6 @@ if str(ROOT / "python") not in sys.path:
     sys.path.insert(0, str(ROOT / "python"))
 
 import odock  # noqa: E402
-from odock.cli import _use_utf8_streams  # noqa: E402
-
-#: Reconfigure the console streams to UTF-8 before anything prints Å or Å³; a
-#: non-UTF-8 code page (GBK, cp1252) would otherwise raise `UnicodeEncodeError`.
-_use_utf8_streams()
 
 #: Residue names that are solvent and never a ligand.
 WATER_RESNAMES = {"HOH", "WAT", "DOD"}

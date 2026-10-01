@@ -499,7 +499,33 @@ def test_fetch_ligand_sdf_uses_the_component_endpoint(monkeypatch, tmp_path):
     text = fetch.fetch_ligand_sdf("ben", out)
     assert text.startswith("BEN")
     assert out.read_text(encoding="utf-8") == text
-    assert calls[0]["url"] == "https://files.rcsb.org/ligands/download/BEN.sdf"
+    # The ideal coordinates are what the server serves; the bare ``BEN.sdf``
+    # path is kept as a fallback and answers 404 on today's RCSB.
+    assert calls[0]["url"] == "https://files.rcsb.org/ligands/download/BEN_ideal.sdf"
+
+
+def test_fetch_ligand_sdf_falls_back_to_the_bare_endpoint(monkeypatch, tmp_path):
+    """A 404 on the ideal file must not lose the component."""
+    import urllib.error
+
+    calls: list = []
+    payload = b"BEN\n     RDKit          3D\n"
+
+    def urlopen(url, timeout=None):
+        full = getattr(url, "full_url", str(url))
+        calls.append(full)
+        if full.endswith(("_ideal.sdf", "_model.sdf")):
+            raise urllib.error.HTTPError(full, 404, "Not Found", {}, None)
+        return _FakeResponse(payload)
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    text = fetch.fetch_ligand_sdf("BEN", tmp_path / "BEN.sdf")
+    assert text.startswith("BEN")
+    assert calls == [
+        "https://files.rcsb.org/ligands/download/BEN_ideal.sdf",
+        "https://files.rcsb.org/ligands/download/BEN_model.sdf",
+        "https://files.rcsb.org/ligands/download/BEN.sdf",
+    ]
 
 
 def test_fetch_ligand_sdf_defaults_to_the_identifier_filename(monkeypatch, tmp_path):
@@ -558,7 +584,7 @@ def test_cli_fetch_ligand_writes_an_sdf(monkeypatch, tmp_path, capsys):
     out = tmp_path / "ben.sdf"
     code, _, _ = run_cli(["fetch", "BEN", "--ligand", "-o", str(out)], capsys)
     assert code == 0
-    assert calls[0]["url"].endswith("/ligands/download/BEN.sdf")
+    assert calls[0]["url"].endswith("/ligands/download/BEN_ideal.sdf")
     assert out.read_text(encoding="utf-8") == "BEN\n"
 
 

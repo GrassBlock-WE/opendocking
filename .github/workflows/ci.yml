@@ -1,0 +1,215 @@
+# OpenDocking CI — the green build that means something.
+#
+# About formatting: `cargo fmt --all --check` is deliberately **not** a step
+# here.  The kernel keeps hand-aligned numeric tables (the AD4 parameter table in
+# crates/dock-core/src/atom.rs is the clearest example) that rustfmt reflows into
+# an unreadable block; the tree currently differs from rustfmt in 77 hunks across
+# 15 files, so the check could only ever fail.  Formatting is documented in
+# CONTRIBUTING.md and left to the author of each change; the formatting of *new*
+# code is still reviewed.  This is the honest version of "a check that always
+# passes is worse than no check": it is not run at all, and this is why.
+#
+# Two environment facts the Python suite depends on, pinned here on purpose:
+#
+#   * QT_QPA_PLATFORM=offscreen -- the 3-D workbench tests run head-less.
+#   * QT_QPA_FONTDIR must be **unset** -- tests/test_sequence.py asserts the
+#     window's minimumSizeHint fits in 1000 px; with QT_QPA_FONTDIR set, Qt picks
+#     a different font and that floor changes, so the same commit passes on one
+#     machine and fails on another.  An empty value is not the same as an unset
+#     variable, hence the explicit `unset` below.
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Keep every build inside the workspace, exactly as .cargo/config.toml does.
+  CARGO_TARGET_DIR: target
+  QT_QPA_PLATFORM: offscreen
+  # The CLI prints Ångström signs; a cp1252/cp936 console turns an informational
+  # line into a UnicodeEncodeError.
+  PYTHONIOENCODING: utf-8
+
+jobs:
+  rust:
+    name: Rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      # The registry index and the compiled dependencies dominate a cold build.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: cargo test --workspace
+        run: cargo test --workspace
+
+      # A real gate: `-D warnings`, no `continue-on-error`.  The clippy findings
+      # that already exist (33 with --all-targets on rustc 1.98's clippy, 15 of
+      # them in the library) are acknowledged *by name* in
+      # `[workspace.lints.clippy]` in Cargo.toml, each with its count and the
+      # reason it is not a drive-by fix.  Anything else — a new warning, or a new
+      # occurrence of a different lint — fails this step.
+      - name: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # The GPU backend is an optional feature and a head-less runner has no
+      # Vulkan/Metal/D3D12 adapter.  The point of this step is the *fallback*:
+      # the feature must compile and the tests must take the CPU path and say so,
+      # rather than skipping themselves into a green check.
+      - name: cargo test -p dock-core --features gpu (expects the CPU fallback)
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test -p dock-core --features gpu -- --nocapture 2>&1 | tee gpu-tests.log
+          # One of these two branches is taken by gpu_forward_kinematics_matches_the_cpu:
+          # a real adapter prints the deviation, a head-less machine prints the
+          # fallback.  Neither means the test body was skipped.
+          if ! grep -qE "exercising the CPU fallback|GPU/CPU" gpu-tests.log; then
+            echo "::error::the GPU tests neither used an adapter nor exercised the CPU fallback - they were skipped, not passed"
+            exit 1
+          fi
+
+      # The grep above is only useful if the log survives the failure.
+      - name: Upload the GPU test log when it failed
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-tests-${{ matrix.os }}
+          path: gpu-tests.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+  python:
+    name: Python ${{ matrix.python }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        # 3.9 is the floor declared in pyproject.toml; 3.12 is the newest the
+        # rdkit wheels cover comfortably.  If 3.9 ever fails on the rdkit
+        # dependency rather than on our code, raise the floor in pyproject.toml
+        # instead of deleting the leg.
+        python: ["3.9", "3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      # `maturin develop` needs a virtual environment; put it on PATH so every
+      # later step (python, pip, pytest, maturin) resolves to it.
+      - name: Create the virtual environment
+        shell: bash
+        run: |
+          python -m venv .venv
+          if [ -d .venv/Scripts ]; then
+            echo "$PWD/.venv/Scripts" >> "$GITHUB_PATH"
+          else
+            echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+          fi
+          echo "VIRTUAL_ENV=$PWD/.venv" >> "$GITHUB_ENV"
+
+      # The Qt/GL libraries the head-less workbench needs, and a font set, only on
+      # Linux: the actions/ubuntu image is minimal.  Installing fonts does not
+      # change the condition the layout test asserts on -- that condition is
+      # QT_QPA_FONTDIR being *unset*, which is pinned below.
+      - name: Install the Linux Qt/GL libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 libgl1 libglib2.0-0 libxkbcommon-x11-0 libdbus-1-3 \
+            libfontconfig1 libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 \
+            libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 \
+            fonts-dejavu-core
+
+      - name: Install maturin
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "maturin>=1.5,<2.0"
+
+      # One build, and the extras come from pyproject.toml so the test and lint
+      # toolchain cannot drift from the one a contributor installs.  `[dev]` is
+      # pytest/rdkit/openpyxl/ruff/pre-commit, `[gui]` is PyQt6 + ModernGL: the
+      # workbench tests importorskip both, so without the extra they would vanish
+      # from the run instead of failing (--require-gui catches that).
+      - name: maturin develop --release --extras=dev,gui
+        shell: bash
+        run: maturin develop --release --extras=dev,gui
+
+      # demo/ is generated and .gitignore keeps it out of the repository, so a
+      # fresh checkout has none of it and the accuracy tests would *skip*.  A
+      # skipped accuracy test is not a passing one: regenerate the fixtures
+      # (offline, from tests/data) and then refuse to skip them.
+      - name: Regenerate the bundled demo (offline, from tests/data)
+        run: python examples/make_demo.py --fast
+
+      # QT_QPA_PLATFORM and QT_QPA_FONTDIR are set in the workflow-level `env`,
+      # except for QT_QPA_FONTDIR, which cannot be expressed there: an empty
+      # value is not the same as an unset one, and tests/test_sequence.py asserts
+      # the workbench's minimumSizeHint against a floor that only holds with it
+      # unset.  If that assertion fails here with a number slightly above 1000, it
+      # is this runner's font metrics and the fix is to re-calibrate the test
+      # deliberately -- do NOT set QT_QPA_FONTDIR to make it pass, because that
+      # hides a genuine layout regression behind a font choice.
+      - name: pytest tests -q -m "not slow" --require-demo --require-gui
+        shell: bash
+        run: |
+          unset QT_QPA_FONTDIR
+          python -m pytest tests -q -m "not slow" --require-demo --require-gui
+
+      - name: Report the head-less Qt environment
+        shell: bash
+        run: |
+          unset QT_QPA_FONTDIR
+          python - <<'PY'
+          import os
+          print("QT_QPA_PLATFORM =", os.environ.get("QT_QPA_PLATFORM"))
+          print("QT_QPA_FONTDIR =", os.environ.get("QT_QPA_FONTDIR", "<unset>"))
+          try:
+              import PyQt6.QtWidgets, moderngl  # noqa: F401
+              print("PyQt6 and ModernGL: importable")
+          except Exception as exc:  # pragma: no cover - runner dependent
+              print("PyQt6/ModernGL:", exc)
+          PY
+
+  # One required check for branch protection: the matrices above may differ
+  # between operating systems and Python versions, but this job is the one to
+  # require.
+  ci:
+    name: CI
+    if: always()
+    needs: [rust, python]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail if any job failed
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1
+      - run: echo "all CI jobs passed"

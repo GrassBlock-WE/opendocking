@@ -1,0 +1,69 @@
+name: Feature request
+description: Suggest a capability, a measurement or a workflow.
+title: "[feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        OpenDocking is a docking toolchain, so the most useful feature requests say
+        what scientific question the feature answers and how you would check it was
+        answered correctly.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do, and where does the current tooling stop?
+      placeholder: |
+        I screen 50 000 compounds and I need to know which hits are worth ordering,
+        but a single affinity does not tell me whether the ranking survives a change
+        of force field ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like
+      description: A command line, an API call or a behaviour. A sketch is fine.
+      render: shell
+      placeholder: |
+        odock screen ... --consensus --consensus-top 200
+    validations:
+      required: true
+
+  - type: textarea
+    id: verification
+    attributes:
+      label: How we would know it works
+      description: |
+        A number to measure, a structure to test on, or a reference result. This is
+        what makes a feature request actionable.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - the Rust kernel (docking, scoring, search)
+        - the Python API or the CLI
+        - preparation, filtering, the chemistry layer
+        - screening / batch campaigns
+        - the 3-D workbench (GUI)
+        - packaging, installation or CI
+        - the documentation
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: alternatives
+    attributes:
+      label: Alternatives
+      options:
+        - label: I checked the documentation (README, docs/USER_GUIDE.md, docs/SCREENING.md) and the FAQ
+          required: false
+        - label: I can work around it today with the existing API or CLI
+          required: false

@@ -656,6 +656,108 @@ def test_cli_dock_help_documents_the_search_algorithms(capsys):
         assert algorithm in help_text
 
 
+# ---------------------------------------------------------------------------
+# `odock screen`: the batch form of `odock dock`
+# ---------------------------------------------------------------------------
+
+
+def test_cli_screen_is_listed_and_documents_its_screening_flags(capsys):
+    from odock.cli import main
+
+    with pytest.raises(SystemExit) as excinfo:
+        main(["--help"])
+    assert excinfo.value.code == 0
+    top_level = capsys.readouterr().out
+    assert "screen" in top_level
+    assert "resumable" in top_level  # the one-line summary in the command list
+
+    with pytest.raises(SystemExit) as excinfo:
+        main(["screen", "--help"])
+    assert excinfo.value.code == 0
+    help_text = capsys.readouterr().out
+    for flag in ("--receptor", "--input", "--jobs", "--timeout", "--top", "--dry-run",
+                 "--no-resume", "--csv", "--checkpoint-every", "--limit",
+                 "--allow-box-mismatch", "--no-interactions", "--consensus",
+                 "--consensus-top", "--consensus-method"):
+        assert flag in help_text, flag
+    # argparse wraps the description, so compare with the line breaks collapsed.
+    assert "resumes where it stopped" in " ".join(help_text.split())
+
+
+def test_cli_screen_requires_its_inputs(capsys):
+    """A missing --receptor/-i/-o is argparse's job; it must not reach the pipeline."""
+    from odock.cli import main
+
+    for argv in (
+        ["screen"],
+        ["screen", "-r", "rec.pdbqt"],
+        ["screen", "-r", "rec.pdbqt", "-i", "lib.smi"],
+    ):
+        with pytest.raises(SystemExit) as excinfo:
+            main(argv)
+        assert excinfo.value.code == 2
+        assert "required" in capsys.readouterr().err
+
+
+def test_cli_screen_explains_a_missing_box(tmp_path, capsys):
+    from odock.cli import main
+
+    library = tmp_path / "library.smi"
+    library.write_text("CCO ethanol\n", encoding="utf-8")
+    receptor = tmp_path / "receptor.pdbqt"
+    receptor.write_text("ATOM      1  CA  ALA A   1       0.000   0.000   0.000\n", encoding="utf-8")
+
+    with pytest.raises(SystemExit, match="no search box"):
+        main(
+            [
+                "screen",
+                "-r", str(receptor),
+                "-i", str(library),
+                "-o", str(tmp_path / "out"),
+            ]
+        )
+
+
+def test_cli_screen_reports_a_box_file_without_centre_or_size(tmp_path, capsys):
+    from odock.cli import main
+
+    library = tmp_path / "library.smi"
+    library.write_text("CCO ethanol\n", encoding="utf-8")
+    receptor = tmp_path / "receptor.pdbqt"
+    receptor.write_text("ATOM      1  CA  ALA A   1       0.000   0.000   0.000\n", encoding="utf-8")
+    box = tmp_path / "box.json"
+    box.write_text('{"spacing": 0.375}', encoding="utf-8")
+
+    with pytest.raises(SystemExit, match="not a box file"):
+        main(
+            [
+                "screen",
+                "-r", str(receptor),
+                "-i", str(library),
+                "-o", str(tmp_path / "out"),
+                "--box", str(box),
+            ]
+        )
+
+
+def test_cli_screen_reports_missing_files_before_docking(tmp_path, capsys):
+    """A missing library is a message and exit 2, not a traceback."""
+    from odock.cli import main
+
+    code = main(
+        [
+            "screen",
+            "-r", str(tmp_path / "missing-receptor.pdbqt"),
+            "-i", str(tmp_path / "missing-library.smi"),
+            "-o", str(tmp_path / "out"),
+            "--center", "0", "0", "0",
+            "--size", "20", "20", "20",
+        ]
+    )
+    assert code == 2
+    assert "no such file" in capsys.readouterr().err
+
+
 def test_every_subcommand_documents_itself(capsys):
     from odock.cli import _subcommands, build_parser, main
 

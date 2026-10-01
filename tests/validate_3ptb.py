@@ -25,14 +25,7 @@ if str(ROOT / "python") not in sys.path:
     sys.path.insert(0, str(ROOT / "python"))
 
 import odock  # noqa: E402
-from odock.cli import _use_utf8_streams  # noqa: E402
 from rdkit import Chem  # noqa: E402
-
-#: This script prints Å and Å³. A Windows console whose code page is not UTF-8
-#: (a Chinese or Western European locale, for instance) would otherwise abort
-#: with `UnicodeEncodeError`, so the streams are reconfigured exactly as the
-#: `odock` command line does it.
-_use_utf8_streams()
 
 #: Residues that are part of the receptor rather than the ligand.
 LIGAND_RESNAMES = {"BEN", "LIG", "STI", "UNL"}
@@ -77,7 +70,7 @@ def split_complex(pdb_path: Path):
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("pdb", nargs="?", default=str(ROOT / "tests" / "data" / "3PTB.pdb"))
+    ap.add_argument("pdb", nargs="?", default=str(ROOT / "reference" / "3PTB.pdb"))
     ap.add_argument("--exhaustiveness", type=int, default=16)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--buffer", type=float, default=8.0)

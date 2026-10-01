@@ -11,6 +11,7 @@ does can also be scripted::
     odock pocket -r receptor.pdbqt --json-out pockets.json
     odock filter -i library.sdf -i more.smi
     odock dock -r receptor.pdbqt -l ligand.pdbqt --box box.json -o poses.pdbqt -v
+    odock screen -r receptor.pdbqt -i library.sdf --box box.json -o results --top 50
     odock score -r receptor.pdbqt -l poses.pdbqt
     odock cluster -p poses.pdbqt --cutoff 2.0
     odock interactions -r receptor.pdbqt -l ligand.pdbqt
@@ -22,7 +23,8 @@ does can also be scripted::
 
 The analysis subcommands (``pocket``, ``filter``, ``cluster``, ``interactions``,
 ``diagram``, ``report``) import the module that implements them only when they
-run, so a partially installed package still gives a working ``odock``.
+run, so a partially installed package still gives a working ``odock``.  The same
+holds for ``screen``, which is what makes ``odock dock`` work without RDKit.
 """
 
 from __future__ import annotations
@@ -252,6 +254,151 @@ def _atom_label(mol, index: int) -> str:
 # ---------------------------------------------------------------------------
 # Subcommands
 # ---------------------------------------------------------------------------
+
+
+def cmd_screen(args) -> int:
+    """Dock a whole library, with resumable results and a ranked summary.
+
+    Screening is a long-running, interruptible job, so this command is built
+    around two promises: no completed work is ever lost, and no single bad
+    molecule ends the campaign.  Everything the command does is available as
+    :func:`odock.screen.screen_ligands`.
+    """
+    screen = _lazy("odock.screen", "library screening")
+
+    if not args.receptor:
+        raise SystemExit("error: pass at least one --receptor FILE")
+    if not args.input:
+        raise SystemExit("error: pass at least one -i/--input FILE")
+
+    box = _screen_box(args)
+    _eprint(f"box: {box}")
+
+    payload = _screen_config(args, screen, box)
+    try:
+        summary = screen.screen_ligands(payload)
+    except screen.ScreenError as exc:
+        _eprint(f"odock screen: error: {exc}")
+        return int(exc.code)
+
+    if args.json_out:
+        target = Path(args.json_out)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            json.dumps(summary.as_dict(full=False), indent=2, default=str) + "\n",
+            encoding="utf-8",
+        )
+        _eprint(f"wrote {args.json_out}")
+
+    if summary.dry_run:
+        if not args.quiet:
+            print(summary.text())
+        return 0
+
+    expected = len(summary.members) * len(summary.config.receptors)
+    line = (
+        f"{summary.n_ok()} of {expected} docking(s) succeeded, "
+        f"{summary.n_failed()} failed, {summary.n_timeout()} timed out "
+        f"({summary.elapsed:.1f} s this run"
+        + (f", {summary.completed_this_run} molecule(s) docked" if summary.completed_this_run else "")
+        + ")"
+    )
+    if not args.quiet:
+        print(summary.text())
+        print()
+        print(line)
+        best = [r for r in summary.records if r.status == "ok" and r.affinity is not None]
+        if best:
+            top = min(best, key=lambda r: float(r.affinity))
+            print(f"best: {top.name} at {top.affinity:.3f} kcal/mol ({top.receptor})")
+    else:
+        # A quiet run still says how it ended: a cluster log needs the counts.
+        _eprint(f"odock screen: {line}")
+    if summary.n_ok() == 0 and not summary.interrupted:
+        _eprint(
+            "odock screen: error: no molecule docked successfully; the first failure "
+            f"was: {summary.failures[0].error if summary.failures else 'unknown'}"
+        )
+        return int(summary.exit_code)
+    if summary.interrupted:
+        # 130 is the conventional "terminated by SIGINT" status; the completed
+        # work is on disk and the same command resumes it.
+        return 130
+    return int(summary.exit_code)
+
+
+def _screen_config(args, screen, box):
+    """Build a :class:`odock.screen.ScreenConfig` from the parsed arguments."""
+    return screen.ScreenConfig(
+        receptors=list(args.receptor),
+        inputs=list(args.input),
+        box=box,
+        outdir=args.out,
+        scoring=args.scoring,
+        exhaustiveness=args.exhaustiveness,
+        num_poses=args.num_poses,
+        min_rmsd=args.min_rmsd,
+        energy_range=args.energy_range,
+        search=args.search,
+        islands=args.islands,
+        population=args.population,
+        generations=args.generations,
+        use_grid=not args.no_grid,
+        refine=not args.no_refine,
+        seed=args.seed,
+        jobs=args.jobs,
+        timeout=args.timeout,
+        checkpoint_every=args.checkpoint_every,
+        filters=not args.no_filter,
+        optimize=not args.no_optimize,
+        limit=args.limit,
+        top=args.top,
+        fmt="csv" if args.csv else "jsonl",
+        resume=not args.no_resume,
+        interactions=not args.no_interactions,
+        write_poses=not args.no_poses,
+        progress=not args.quiet,
+        dry_run=args.dry_run,
+        allow_box_mismatch=args.allow_box_mismatch,
+        consensus=args.consensus,
+        consensus_top=args.consensus_top,
+        consensus_method=args.consensus_method,
+    )
+
+
+def _screen_box(args):
+    """The search box for ``odock screen``.
+
+    The box is one site screened against every receptor, so deriving it from a
+    ligand (``--box-from-ligand``) is not offered: a library of thousands has no
+    single ligand to derive it from.  ``--box``, or ``--center``/``--size``.
+    """
+    import json as _json
+
+    if args.box:
+        data = _json.loads(Path(args.box).read_text(encoding="utf-8"))
+        if "center" not in data or "size" not in data:
+            raise SystemExit(f"error: {args.box} is not a box file (no center/size)")
+        if args.center or args.size:
+            _eprint(
+                f"note: --box {args.box} wins over --center/--size; the explicit "
+                "coordinates are ignored"
+            )
+        return BoxSpec(
+            center=tuple(float(x) for x in data["center"]),
+            size=tuple(float(x) for x in data["size"]),
+            spacing=float(args.spacing if args.spacing is not None else data.get("spacing", 0.375)),
+        )
+    if args.center and args.size:
+        return BoxSpec(
+            center=tuple(float(x) for x in args.center),
+            size=tuple(float(x) for x in args.size),
+            spacing=float(args.spacing if args.spacing is not None else 0.375),
+        )
+    raise SystemExit(
+        "error: no search box: pass --box FILE (one active site for every receptor), "
+        "or --center X Y Z --size X Y Z"
+    )
 
 
 def cmd_info(args) -> int:
@@ -1189,6 +1336,115 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("--generations", type=int, default=20)
     d.add_argument("-q", "--quiet", action="store_true", help="do not print the table")
     d.set_defaults(func=cmd_dock)
+
+    # -- screen -------------------------------------------------------------
+    sc = sub.add_parser(
+        "screen",
+        help="dock a whole library against one or more receptors (resumable)",
+        description=(
+            "Dock every molecule of a library against one or more receptors.  The "
+            "results are written as they complete, so an interrupted campaign "
+            "resumes where it stopped, and a single bad molecule is a row in the "
+            "results rather than the end of the run."
+        ),    )
+    sc.add_argument(
+        "-r", "--receptor", action="append", required=True, metavar="FILE",
+        help="receptor PDBQT; repeat to screen a panel of receptors",
+    )
+    sc.add_argument(
+        "-i", "--input", action="append", required=True, metavar="FILE",
+        help="library file (.sdf/.smi/.mol2/.pdb/.pdbqt); repeat to combine several",
+    )
+    sc.add_argument("-o", "--out", required=True, help="output directory")
+    sc.add_argument("--box", help="box JSON written by `odock box`")
+    sc.add_argument("--center", nargs=3, type=float, metavar=("X", "Y", "Z"))
+    sc.add_argument("--size", nargs=3, type=float, metavar=("X", "Y", "Z"))
+    sc.add_argument(
+        "--spacing", type=float, default=None,
+        help="grid spacing in Å (default: the spacing stored in --box, else 0.375)",
+    )
+    sc.add_argument(
+        "-s", "--scoring", default="vina", choices=["vina", "vinardo", "ad4"],
+        help="force field",
+    )
+    sc.add_argument("-e", "--exhaustiveness", type=int, default=8, help="search effort")
+    sc.add_argument("-n", "--num-poses", type=int, default=9, help="poses kept per molecule")
+    sc.add_argument("--min-rmsd", type=float, default=1.0, help="pose deduplication cutoff (Å)")
+    sc.add_argument("--energy-range", type=float, default=3.0, help="reporting window (kcal/mol)")
+    sc.add_argument("--no-grid", action="store_true", help="use the exact scorer in the search")
+    sc.add_argument("--no-refine", action="store_true", help="skip the exact refinement")
+    sc.add_argument(
+        "--search", choices=["monte_carlo", "lga", "lga_solis"], default=None,
+        help="search protocol (default: monte_carlo)",
+    )
+    sc.add_argument("--islands", type=int, default=4, help="GA islands")
+    sc.add_argument("--population", type=int, default=32, help="GA population per island")
+    sc.add_argument("--generations", type=int, default=20, help="GA generations")
+    sc.add_argument(
+        "--seed", type=int, default=0,
+        help="seed for the whole campaign (0 draws one and prints it); every molecule "
+             "gets a seed derived from it, so a run is exactly reproducible",
+    )
+    sc.add_argument(
+        "--jobs", type=int, default=0,
+        help="molecules docked concurrently (0 = one per core)",
+    )
+    sc.add_argument(
+        "--timeout", type=float, default=None,
+        help="per-molecule wall-clock limit in seconds; a molecule that exceeds it is "
+             "recorded as a timeout and the run continues",
+    )
+    sc.add_argument(
+        "--checkpoint-every", type=int, default=20,
+        help="flush+fsync the results file every N molecules (every record is flushed; "
+             "this is the durable checkpoint interval)",
+    )
+    sc.add_argument("--no-filter", action="store_true", help="dock even the non-drug-like molecules")
+    sc.add_argument("--no-optimize", action="store_true", help="skip the ligand pre-optimisation")
+    sc.add_argument(
+        "--limit", type=int, default=None, metavar="N",
+        help="dock only the first N molecules (a quick trial of a big library)",
+    )
+    sc.add_argument(
+        "--top", type=int, default=0, metavar="N",
+        help="write the N best molecules as a multi-model PDBQT shortlist",
+    )
+    fmt = sc.add_mutually_exclusive_group()
+    fmt.add_argument("--csv", action="store_true", help="write the results as CSV")
+    fmt.add_argument("--jsonl", action="store_true", help="write the results as JSONL (default)")
+    sc.add_argument(
+        "--no-resume", action="store_true",
+        help="discard the results already in --out and start over (destructive)",
+    )
+    sc.add_argument(
+        "--no-interactions", action="store_true",
+        help="skip the per-pose interaction profiling (faster, no key-residue column)",
+    )
+    sc.add_argument(
+        "--no-poses", action="store_true",
+        help="do not write one pose file per molecule (no shortlist, smaller output)",
+    )
+    sc.add_argument("--dry-run", action="store_true", help="report the filtered library and the cost, dock nothing")
+    sc.add_argument(
+        "--consensus", action="store_true",
+        help="rescore the shortlist with vina, vinardo and ad4 and rank the hits by "
+             "how well the force fields agree",
+    )
+    sc.add_argument(
+        "--consensus-top", type=int, default=0, metavar="N",
+        help="molecules covered by --consensus (default: --top, else 50)",
+    )
+    sc.add_argument(
+        "--consensus-method", choices=["rank", "borda", "z"], default="rank",
+        help="how --consensus combines the force fields",
+    )
+    sc.add_argument(
+        "--allow-box-mismatch", action="store_true",
+        help="dock even when the box does not touch the receptor",
+    )
+    sc.add_argument("--json-out", help="write the run summary as JSON")
+    sc.add_argument("-q", "--quiet", action="store_true", help="no progress line and no table")
+    sc.set_defaults(func=cmd_screen)
 
     # -- score --------------------------------------------------------------
     s = sub.add_parser("score", help="score a ligand in place")

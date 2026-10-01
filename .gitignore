@@ -1,12 +1,8 @@
-# Everything listed here is *generated*: a build product, a cache or a local run
-# artefact. Nothing that ships is ignored — in particular `demo/` (bundled demo
-# data and screenshots) and `docs/` are tracked content.
-
-# --- Rust build artefacts ---------------------------------------------------
-/target/
+# Rust
+/target
 **/*.rs.bk
 
-# --- Python bytecode, caches, virtual environments, packaging --------------
+# Python
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -20,12 +16,54 @@ venv/
 .ruff_cache/
 pytest-of-*/
 
-# --- The compiled extension module (`maturin develop` rebuilds it) ---------
+# maturin / setuptools-rust build artifacts
 python/odock/*.pyd
 python/odock/*.so
 python/odock/*.dll
 
-# --- Local run artefacts ---------------------------------------------------
-/out/
-/.rust-tmp/
+# Local scratch
+/reference
+/scratch
+/out
+/.rust-tmp
 *.log
+*.npy
+/tmp*/
+
+# A release snapshot of this repository, staged at its own root by the release
+# process. It is not part of the project and must not be committed or packaged
+# (`tools/inspect_dist.py` fails if a root `odock/` reaches an artefact).
+/odock/
+
+# Internal working documents, explicitly not for publication: `odck.md` is the
+# requirements brief and `DELIVERY.md` is the hand-over superseded by
+# docs/VALIDATION.md. They stay on disk; they must not be committed and maturin's
+# `exclude` keeps them out of the artefacts, with the inspect tool as the backstop.
+#
+# `docs/INTERFACES.md` was the frozen integration contract between workstreams.
+# It is an internal document with no meaning to a reader of a published
+# repository, so it was moved out of the published `docs/` set (it now lives in
+# the ignored `out/` scratch area). The path stays reserved here so that a
+# reinstated contract cannot leak by accident either. `docs/VALIDATION.md`, the
+# published replacement for the hand-over, is NOT ignored.
+/odck.md
+/DELIVERY.md
+/docs/INTERFACES.md
+
+# Structures fetched while poking at a system belong in tests/data/, which is
+# where the tests and the benchmark look for them (`--data-dir` defaults to it);
+# a PDB at the repository root is a stray. Already-tracked files stay tracked.
+/*.pdb
+
+# The demo directory *is* published: `demo/README.md` documents it, the README
+# walk-through uses it, and the release checker's declared paths expect it. What
+# must not ship is the vendored AutoDock Vina binary the CLI walk-through used
+# for comparison — 1.2 MB of third-party, Windows-only executable — so the rule
+# targets exactly that file rather than the data around it.
+#
+# This used to be `/demo/*` plus `!/demo/library.smi`. Ignoring the whole
+# directory made the hand-maintained screening library invisible (hence the
+# exception) and silently dropped 18 files that the release is supposed to
+# contain, which `out/verify/release_check.py` reported as a failure. Ignore the
+# binary, not the data.
+/demo/**/vina.exe

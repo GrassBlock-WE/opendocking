@@ -1,0 +1,70 @@
+# Pre-commit hooks for OpenDocking.
+#
+#     python -m pip install pre-commit
+#     python -m pre_commit install
+#     python -m pre_commit run --all-files
+#
+# The Python check is the narrow bug-finding rule set configured in
+# pyproject.toml (E9, F63, F7, F82), not a style pass: the tree has never been
+# linted with a broad selection, and a hook that fails on every existing file is
+# worse than no hook.
+#
+# `cargo fmt` and `cargo clippy` are deliberately NOT hooks here:
+#   * the kernel keeps hand-aligned numeric tables that rustfmt reflows into an
+#     unreadable block (crates/dock-core/src/atom.rs), so a formatting hook would
+#     fight the authors of every change to those files;
+#   * clippy compiles the workspace (minutes), which is too slow for a commit.
+# Both run in CI and through `make lint` / `make fmt`.
+#
+# The `manual`-stage hooks run only when asked for:
+#     python -m pre_commit run --hook-stage manual --all-files
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        # Markdown keeps two trailing spaces as a hard line break.
+        args: [--markdown-linebreak-ext=md]
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=2048]
+      - id: mixed-line-ending
+        args: [--fix=lf]
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    # Keep this in step with the ruff version installed by `.[dev]`.
+    rev: v0.9.10
+    hooks:
+      - id: ruff
+        args: [--fix]
+        types_or: [python, pyi]
+        files: ^(python|tests|tools|examples)/
+
+  - repo: local
+    hooks:
+      # Manual: the Rust checks are worth running before a pull request, not on
+      # every commit (clippy compiles the workspace).
+      - id: cargo-clippy
+        name: cargo clippy (workspace, warnings are errors)
+        entry: cargo clippy --workspace --all-targets -- -D warnings
+        language: system
+        files: \.rs$
+        pass_filenames: false
+        stages: [manual]
+      - id: cargo-test
+        name: cargo test --workspace
+        entry: cargo test --workspace
+        language: system
+        files: \.rs$
+        pass_filenames: false
+        stages: [manual]
+      - id: pytest-fast
+        name: pytest (fast suite)
+        entry: python -m pytest tests -q -m "not slow" --require-demo
+        language: system
+        files: ^(python|tests)/.*\.py$
+        pass_filenames: false
+        stages: [manual]

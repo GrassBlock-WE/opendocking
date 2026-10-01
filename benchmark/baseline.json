@@ -1,0 +1,803 @@
+{
+  "created": "2026-10-01T06:24:10",
+  "command": "python -m odock.benchmark --seeds 42,7,2024 --json out/bench_settled.json | baseline re-cut with --baseline-from",
+  "environment": {
+    "odock": "0.1.0",
+    "kernel": "0.1.0",
+    "python": "3.10.6",
+    "platform": "Windows-10-10.0.26200-SP0",
+    "processor": "AMD64 Family 25 Model 68 Stepping 1, AuthenticAMD",
+    "cpu_count": 16
+  },
+  "settings": {
+    "seeds": [
+      42,
+      7,
+      2024
+    ],
+    "num_poses": 20,
+    "energy_range": 5.0,
+    "min_rmsd": 0.5,
+    "energy_window": 1.0,
+    "hit_cutoff": 2.0
+  },
+  "tolerance": {
+    "top_rmsd": 0.15,
+    "best_within_1kcal": 0.15,
+    "rank_of_correct": 1,
+    "score_rmsd_rho": 0.2,
+    "derivation": "tolerance = repeat-run noise of the same command (measured 0.000 on this machine, floored at 0.15 A); the seed-to-seed spread is a different, larger quantity (largest measured here: 3.17 A) and is recorded per system as top_rmsd_spread, not used as a tolerance"
+  },
+  "systems": {
+    "3PTB": {
+      "system": "3PTB",
+      "ligand": "BEN",
+      "n_heavy": 9,
+      "n_rotatable": 1,
+      "receptor_atoms": 1994,
+      "prep_seconds": 0.2,
+      "exhaustiveness": 16,
+      "seeds": [
+        42,
+        7,
+        2024
+      ],
+      "poses": 15,
+      "top_rmsd": 1.133,
+      "top_rmsd_worst": 1.133,
+      "top_rmsd_spread": 0.001,
+      "fitted_rmsd": 0.376,
+      "best_within_1kcal": 1.133,
+      "rank_of_correct": 1,
+      "affinity_spread": 0.004,
+      "score_rmsd_rho": [
+        0.718,
+        0.85
+      ],
+      "agreement": [
+        0.822,
+        0.911
+      ],
+      "pair_means": {
+        "vina~vinardo": 0.965,
+        "vina~ad4": 0.812,
+        "vinardo~ad4": 0.813
+      },
+      "pair_order_weakest_first": [
+        "vina~ad4",
+        "vinardo~ad4",
+        "vina~vinardo"
+      ],
+      "correct_in_all_runs": true,
+      "reproducibility": 1.0,
+      "top_cluster_runs": [
+        0,
+        1,
+        2
+      ],
+      "n_clusters": 7,
+      "error": "",
+      "runs": [
+        {
+          "seed": 42,
+          "elapsed": 1.95,
+          "poses": 15,
+          "best_affinity": -6.212,
+          "top_rmsd": 1.133,
+          "fitted_rmsd": 0.376,
+          "best_within_1kcal": 1.133,
+          "rank_of_correct": 1,
+          "score_rmsd_rho": 0.718,
+          "agreement": 0.857,
+          "correlations": {
+            "vina~vinardo": 0.929,
+            "vina~ad4": 0.804,
+            "vinardo~ad4": 0.839
+          },
+          "clusters": 8,
+          "top_cluster_size": 4,
+          "rmsds": [
+            1.133,
+            1.915,
+            1.585,
+            1.429,
+            3.888,
+            3.481,
+            3.729,
+            4.294,
+            2.855,
+            3.389,
+            9.686,
+            4.527,
+            4.341,
+            3.387,
+            8.86
+          ],
+          "affinities": [
+            -6.212,
+            -6.2,
+            -6.104,
+            -5.735,
+            -5.303,
+            -4.968,
+            -4.949,
+            -4.817,
+            -4.408,
+            -4.388,
+            -4.252,
+            -4.216,
+            -4.216,
+            -4.105,
+            -3.268
+          ]
+        },
+        {
+          "seed": 7,
+          "elapsed": 3.37,
+          "poses": 9,
+          "best_affinity": -6.212,
+          "top_rmsd": 1.133,
+          "fitted_rmsd": 0.376,
+          "best_within_1kcal": 1.133,
+          "rank_of_correct": 1,
+          "score_rmsd_rho": 0.733,
+          "agreement": 0.911,
+          "correlations": {
+            "vina~vinardo": 0.983,
+            "vina~ad4": 0.883,
+            "vinardo~ad4": 0.867
+          },
+          "clusters": 7,
+          "top_cluster_size": 2,
+          "rmsds": [
+            1.133,
+            1.916,
+            3.636,
+            3.456,
+            4.027,
+            9.706,
+            3.62,
+            3.703,
+            5.266
+          ],
+          "affinities": [
+            -6.212,
+            -6.197,
+            -5.23,
+            -4.971,
+            -4.944,
+            -4.256,
+            -4.233,
+            -4.145,
+            -3.647
+          ]
+        },
+        {
+          "seed": 2024,
+          "elapsed": 3.65,
+          "poses": 9,
+          "best_affinity": -6.209,
+          "top_rmsd": 1.133,
+          "fitted_rmsd": 0.378,
+          "best_within_1kcal": 1.133,
+          "rank_of_correct": 1,
+          "score_rmsd_rho": 0.85,
+          "agreement": 0.822,
+          "correlations": {
+            "vina~vinardo": 0.983,
+            "vina~ad4": 0.75,
+            "vinardo~ad4": 0.733
+          },
+          "clusters": 6,
+          "top_cluster_size": 2,
+          "rmsds": [
+            1.133,
+            1.916,
+            3.335,
+            3.599,
+            9.692,
+            9.795,
+            4.334,
+            3.673,
+            9.884
+          ],
+          "affinities": [
+            -6.209,
+            -6.194,
+            -5.041,
+            -4.912,
+            -4.255,
+            -4.251,
+            -4.216,
+            -4.142,
+            -4.095
+          ]
+        }
+      ]
+    },
+    "1STP": {
+      "system": "1STP",
+      "ligand": "BTN",
+      "n_heavy": 16,
+      "n_rotatable": 5,
+      "receptor_atoms": 1104,
+      "prep_seconds": 0.21,
+      "exhaustiveness": 8,
+      "seeds": [
+        42,
+        7,
+        2024
+      ],
+      "poses": 1,
+      "top_rmsd": 1.027,
+      "top_rmsd_worst": 1.034,
+      "top_rmsd_spread": 0.006,
+      "fitted_rmsd": 0.752,
+      "best_within_1kcal": 1.027,
+      "rank_of_correct": 1,
+      "affinity_spread": 0.018,
+      "score_rmsd_rho": [
+        null,
+        null
+      ],
+      "agreement": [
+        null,
+        null
+      ],
+      "pair_means": {},
+      "pair_order_weakest_first": [],
+      "correct_in_all_runs": true,
+      "reproducibility": 1.0,
+      "top_cluster_runs": [
+        0,
+        1,
+        2
+      ],
+      "n_clusters": 1,
+      "error": "",
+      "runs": [
+        {
+          "seed": 42,
+          "elapsed": 12.12,
+          "poses": 1,
+          "best_affinity": -7.462,
+          "top_rmsd": 1.032,
+          "fitted_rmsd": 0.758,
+          "best_within_1kcal": 1.032,
+          "rank_of_correct": 1,
+          "score_rmsd_rho": null,
+          "agreement": null,
+          "correlations": {
+            "vina~vinardo": null,
+            "vina~ad4": null,
+            "vinardo~ad4": null
+          },
+          "clusters": 1,
+          "top_cluster_size": 1,
+          "rmsds": [
+            1.032
+          ],
+          "affinities": [
+            -7.462
+          ]
+        },
+        {
+          "seed": 7,
+          "elapsed": 12.18,
+          "poses": 1,
+          "best_affinity": -7.45,
+          "top_rmsd": 1.027,
+          "fitted_rmsd": 0.752,
+          "best_within_1kcal": 1.027,
+          "rank_of_correct": 1,
+          "score_rmsd_rho": null,
+          "agreement": null,
+          "correlations": {
+            "vina~vinardo": null,
+            "vina~ad4": null,
+            "vinardo~ad4": null
+          },
+          "clusters": 1,
+          "top_cluster_size": 1,
+          "rmsds": [
+            1.027
+          ],
+          "affinities": [
+            -7.45
+          ]
+        },
+        {
+          "seed": 2024,
+          "elapsed": 12.26,
+          "poses": 1,
+          "best_affinity": -7.468,
+          "top_rmsd": 1.034,
+          "fitted_rmsd": 0.752,
+          "best_within_1kcal": 1.034,
+          "rank_of_correct": 1,
+          "score_rmsd_rho": null,
+          "agreement": null,
+          "correlations": {
+            "vina~vinardo": null,
+            "vina~ad4": null,
+            "vinardo~ad4": null
+          },
+          "clusters": 1,
+          "top_cluster_size": 1,
+          "rmsds": [
+            1.034
+          ],
+          "affinities": [
+            -7.468
+          ]
+        }
+      ]
+    },
+    "3ERT": {
+      "system": "3ERT",
+      "ligand": "OHT",
+      "n_heavy": 29,
+      "n_rotatable": 8,
+      "receptor_atoms": 2297,
+      "prep_seconds": 0.51,
+      "exhaustiveness": 6,
+      "seeds": [
+        42,
+        7,
+        2024
+      ],
+      "poses": 8,
+      "top_rmsd": 1.507,
+      "top_rmsd_worst": 1.941,
+      "top_rmsd_spread": 0.434,
+      "fitted_rmsd": 1.067,
+      "best_within_1kcal": 1.354,
+      "rank_of_correct": 1,
+      "affinity_spread": 0.005,
+      "score_rmsd_rho": [
+        0.429,
+        0.81
+      ],
+      "agreement": [
+        0.81,
+        0.881
+      ],
+      "pair_means": {
+        "vina~vinardo": 0.913,
+        "vina~ad4": 0.829,
+        "vinardo~ad4": 0.806
+      },
+      "pair_order_weakest_first": [
+        "vinardo~ad4",
+        "vina~ad4",
+        "vina~vinardo"
+      ],
+      "correct_in_all_runs": true,
+      "reproducibility": 1.0,
+      "top_cluster_runs": [
+        0,
+        1,
+        2
+      ],
+      "n_clusters": 5,
+      "error": "",
+      "runs": [
+        {
+          "seed": 42,
+          "elapsed": 107.28,
+          "poses": 7,
+          "best_affinity": -10.14,
+          "top_rmsd": 1.724,
+          "fitted_rmsd": 1.068,
+          "best_within_1kcal": 1.724,
+          "rank_of_correct": 1,
+          "score_rmsd_rho": 0.429,
+          "agreement": 0.881,
+          "correlations": {
+            "vina~vinardo": 0.964,
+            "vina~ad4": 0.821,
+            "vinardo~ad4": 0.857
+          },
+          "clusters": 4,
+          "top_cluster_size": 2,
+          "rmsds": [
+            1.724,
+            1.771,
+            10.046,
+            10.566,
+            10.351,
+            8.35,
+            8.507
+          ],
+          "affinities": [
+            -10.14,
+            -10.119,
+            -8.191,
+            -7.755,
+            -7.688,
+            -7.635,
+            -7.602
+          ]
+        },
+        {
+          "seed": 7,
+          "elapsed": 103.67,
+          "poses": 7,
+          "best_affinity": -10.138,
+          "top_rmsd": 1.507,
+          "fitted_rmsd": 1.084,
+          "best_within_1kcal": 1.354,
+          "rank_of_correct": 1,
+          "score_rmsd_rho": 0.679,
+          "agreement": 0.81,
+          "correlations": {
+            "vina~vinardo": 0.964,
+            "vina~ad4": 0.714,
+            "vinardo~ad4": 0.75
+          },
+          "clusters": 5,
+          "top_cluster_size": 2,
+          "rmsds": [
+            1.507,
+            1.354,
+            9.858,
+            10.611,
+            8.257,
+            10.251,
+            10.582
+          ],
+          "affinities": [
+            -10.138,
+            -10.12,
+            -8.301,
+            -7.696,
+            -7.691,
+            -7.624,
+            -7.599
+          ]
+        },
+        {
+          "seed": 2024,
+          "elapsed": 103.57,
+          "poses": 8,
+          "best_affinity": -10.143,
+          "top_rmsd": 1.941,
+          "fitted_rmsd": 1.067,
+          "best_within_1kcal": 1.719,
+          "rank_of_correct": 1,
+          "score_rmsd_rho": 0.81,
+          "agreement": 0.857,
+          "correlations": {
+            "vina~vinardo": 0.81,
+            "vina~ad4": 0.952,
+            "vinardo~ad4": 0.81
+          },
+          "clusters": 5,
+          "top_cluster_size": 2,
+          "rmsds": [
+            1.941,
+            1.719,
+            5.186,
+            9.878,
+            8.434,
+            10.17,
+            8.278,
+            10.446
+          ],
+          "affinities": [
+            -10.143,
+            -10.118,
+            -8.707,
+            -8.03,
+            -7.806,
+            -7.792,
+            -7.731,
+            -7.686
+          ]
+        }
+      ]
+    },
+    "1M17": {
+      "system": "1M17",
+      "ligand": "AQ4",
+      "n_heavy": 29,
+      "n_rotatable": 11,
+      "receptor_atoms": 2985,
+      "prep_seconds": 0.6,
+      "exhaustiveness": 4,
+      "seeds": [
+        42,
+        7,
+        2024
+      ],
+      "poses": 9,
+      "top_rmsd": 1.514,
+      "top_rmsd_worst": 4.688,
+      "top_rmsd_spread": 3.174,
+      "fitted_rmsd": 1.514,
+      "best_within_1kcal": 1.282,
+      "rank_of_correct": 1,
+      "affinity_spread": 0.076,
+      "score_rmsd_rho": [
+        0.317,
+        0.786
+      ],
+      "agreement": [
+        0.522,
+        0.69
+      ],
+      "pair_means": {
+        "vina~vinardo": 0.674,
+        "vina~ad4": 0.593,
+        "vinardo~ad4": 0.635
+      },
+      "pair_order_weakest_first": [
+        "vina~ad4",
+        "vinardo~ad4",
+        "vina~vinardo"
+      ],
+      "correct_in_all_runs": true,
+      "reproducibility": 1.0,
+      "top_cluster_runs": [
+        0,
+        1,
+        2
+      ],
+      "n_clusters": 9,
+      "error": "",
+      "runs": [
+        {
+          "seed": 42,
+          "elapsed": 116.36,
+          "poses": 9,
+          "best_affinity": -6.939,
+          "top_rmsd": 4.688,
+          "fitted_rmsd": 4.688,
+          "best_within_1kcal": 1.43,
+          "rank_of_correct": 3,
+          "score_rmsd_rho": 0.317,
+          "agreement": 0.689,
+          "correlations": {
+            "vina~vinardo": 0.933,
+            "vina~ad4": 0.533,
+            "vinardo~ad4": 0.6
+          },
+          "clusters": 8,
+          "top_cluster_size": 1,
+          "rmsds": [
+            4.688,
+            9.469,
+            1.712,
+            1.43,
+            8.552,
+            7.785,
+            8.895,
+            8.013,
+            8.579
+          ],
+          "affinities": [
+            -6.939,
+            -6.929,
+            -6.895,
+            -6.832,
+            -6.826,
+            -6.806,
+            -6.725,
+            -6.71,
+            -6.66
+          ]
+        },
+        {
+          "seed": 7,
+          "elapsed": 113.21,
+          "poses": 7,
+          "best_affinity": -6.956,
+          "top_rmsd": 1.514,
+          "fitted_rmsd": 1.514,
+          "best_within_1kcal": 1.282,
+          "rank_of_correct": 1,
+          "score_rmsd_rho": 0.786,
+          "agreement": 0.69,
+          "correlations": {
+            "vina~vinardo": 0.571,
+            "vina~ad4": 0.679,
+            "vinardo~ad4": 0.821
+          },
+          "clusters": 4,
+          "top_cluster_size": 3,
+          "rmsds": [
+            1.514,
+            1.282,
+            8.03,
+            4.656,
+            2.248,
+            8.647,
+            8.272
+          ],
+          "affinities": [
+            -6.956,
+            -6.889,
+            -6.796,
+            -6.688,
+            -6.687,
+            -6.647,
+            -6.602
+          ]
+        },
+        {
+          "seed": 2024,
+          "elapsed": 115.53,
+          "poses": 9,
+          "best_affinity": -7.015,
+          "top_rmsd": 1.703,
+          "fitted_rmsd": 1.703,
+          "best_within_1kcal": 1.44,
+          "rank_of_correct": 1,
+          "score_rmsd_rho": 0.433,
+          "agreement": 0.522,
+          "correlations": {
+            "vina~vinardo": 0.517,
+            "vina~ad4": 0.567,
+            "vinardo~ad4": 0.483
+          },
+          "clusters": 7,
+          "top_cluster_size": 3,
+          "rmsds": [
+            1.703,
+            1.44,
+            9.475,
+            4.744,
+            8.149,
+            9.276,
+            2.336,
+            8.846,
+            8.676
+          ],
+          "affinities": [
+            -7.015,
+            -7.006,
+            -6.938,
+            -6.848,
+            -6.831,
+            -6.709,
+            -6.677,
+            -6.64,
+            -6.453
+          ]
+        }
+      ]
+    },
+    "1HVR": {
+      "system": "1HVR",
+      "ligand": "XK2",
+      "n_heavy": 46,
+      "n_rotatable": 8,
+      "receptor_atoms": 1844,
+      "prep_seconds": 0.34,
+      "exhaustiveness": 2,
+      "seeds": [
+        42,
+        7,
+        2024
+      ],
+      "poses": 2,
+      "top_rmsd": 10.075,
+      "top_rmsd_worst": 10.077,
+      "top_rmsd_spread": 0.002,
+      "fitted_rmsd": 0.385,
+      "best_within_1kcal": 0.788,
+      "rank_of_correct": 2,
+      "affinity_spread": 0.035,
+      "score_rmsd_rho": [
+        -1.0,
+        -1.0
+      ],
+      "agreement": [
+        -0.333,
+        1.0
+      ],
+      "pair_means": {
+        "vina~vinardo": 0.333,
+        "vina~ad4": 1.0,
+        "vinardo~ad4": 0.333
+      },
+      "pair_order_weakest_first": [
+        "vinardo~ad4",
+        "vina~vinardo",
+        "vina~ad4"
+      ],
+      "correct_in_all_runs": true,
+      "reproducibility": 1.0,
+      "top_cluster_runs": [
+        0,
+        1,
+        2
+      ],
+      "n_clusters": 2,
+      "error": "",
+      "runs": [
+        {
+          "seed": 42,
+          "elapsed": 262.1,
+          "poses": 2,
+          "best_affinity": -15.244,
+          "top_rmsd": 10.075,
+          "fitted_rmsd": 0.404,
+          "best_within_1kcal": 1.043,
+          "rank_of_correct": 2,
+          "score_rmsd_rho": -1.0,
+          "agreement": 1.0,
+          "correlations": {
+            "vina~vinardo": 1.0,
+            "vina~ad4": 1.0,
+            "vinardo~ad4": 1.0
+          },
+          "clusters": 1,
+          "top_cluster_size": 2,
+          "rmsds": [
+            10.075,
+            1.043
+          ],
+          "affinities": [
+            -15.244,
+            -15.233
+          ]
+        },
+        {
+          "seed": 7,
+          "elapsed": 267.01,
+          "poses": 2,
+          "best_affinity": -15.261,
+          "top_rmsd": 10.075,
+          "fitted_rmsd": 0.385,
+          "best_within_1kcal": 0.788,
+          "rank_of_correct": 2,
+          "score_rmsd_rho": -1.0,
+          "agreement": -0.333,
+          "correlations": {
+            "vina~vinardo": -1.0,
+            "vina~ad4": 1.0,
+            "vinardo~ad4": -1.0
+          },
+          "clusters": 1,
+          "top_cluster_size": 2,
+          "rmsds": [
+            10.075,
+            0.788
+          ],
+          "affinities": [
+            -15.261,
+            -15.214
+          ]
+        },
+        {
+          "seed": 2024,
+          "elapsed": 297.8,
+          "poses": 2,
+          "best_affinity": -15.226,
+          "top_rmsd": 10.077,
+          "fitted_rmsd": 0.408,
+          "best_within_1kcal": 1.103,
+          "rank_of_correct": 2,
+          "score_rmsd_rho": -1.0,
+          "agreement": 1.0,
+          "correlations": {
+            "vina~vinardo": 1.0,
+            "vina~ad4": 1.0,
+            "vinardo~ad4": 1.0
+          },
+          "clusters": 1,
+          "top_cluster_size": 2,
+          "rmsds": [
+            10.077,
+            1.103
+          ],
+          "affinities": [
+            -15.226,
+            -15.213
+          ]
+        }
+      ]
+    }
+  }
+}

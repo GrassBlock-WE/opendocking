@@ -100,7 +100,7 @@ _TYPE_ELEMENT: Dict[str, str] = {
     "CG0": "C", "CG1": "C", "CG2": "C", "CG3": "C", "W": "H",
 }
 
-#: The ligand types the project brief section C.3 asks AutoGrid maps for when nothing
+#: The ligand types the project asks AutoGrid maps for when nothing
 #: better is known ("A, C, HD, N, NA, OA, S, SA, Cl, F 等").
 STANDARD_LIGAND_TYPES: Tuple[str, ...] = (
     "A", "C", "HD", "N", "NA", "OA", "S", "SA", "Cl", "F",

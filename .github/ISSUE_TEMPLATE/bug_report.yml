@@ -1,0 +1,103 @@
+name: Bug report
+description: Something did not work. Please include the environment, the exact command and the output.
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for taking the time to report this. A report with an
+        environment, an exact command and the complete output is usually fixed in
+        one step; "it doesn't work" costs a round trip. Several of this project's
+        real defects were found this way, so please fill in every field you can.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you expected, and what happened instead.
+      placeholder: |
+        I expected `odock screen ...` to dock the library; instead it exited 2 with
+        "results.jsonl belongs to another campaign" although I had never run it in
+        that directory.
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: The exact command
+      description: Copy-pasteable, with every flag. If you used the Python API, paste the snippet.
+      render: shell
+      placeholder: |
+        odock screen -r rec.pdbqt -i library.smi --box box.json -o out -e 8 --jobs 4
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: The full output
+      description: |
+        The whole error, not a paraphrase, and the exit code
+        (`echo $LASTEXITCODE` on Windows, `echo $?` elsewhere). Tracebacks are useful.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: |
+        Paste the output of `odock info` (kernel version, force fields, GPU status)
+        and tell us the OS, `python --version`, and whether the extension came from
+        `maturin develop` or from a wheel.
+      placeholder: |
+        odock info:
+          OpenDocking 0.1.0
+          python        : 3.10.6 (...)
+          rdkit         : 2026.03.1
+          vina          : cutoff 8.00 A, 6 terms, grid=yes
+          gpu           : GPU backend unavailable: ...
+        OS: Windows 11 24H2
+        install: maturin develop --release (git 5d2b8d1)
+    validations:
+      required: true
+
+  - type: textarea
+    id: input
+    attributes:
+      label: The smallest input that reproduces it
+      description: |
+        A structure or PDBQT file if you can share one. `odock fetch 3PTB -o 3PTB.pdb`
+        and the bundled `tests/data/` are good starting points; `--limit 2` keeps a
+        screening run short.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Where does it seem to be?
+      options:
+        - the Rust kernel (docking, scoring, search)
+        - the Python API or the CLI
+        - preparation, filtering, the chemistry layer
+        - screening / batch campaigns
+        - the 3-D workbench (GUI)
+        - packaging, installation or CI
+        - the documentation
+        - I do not know
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I ran the command again and it failed the same way (not a transient failure)
+          required: false
+        - label: I checked `make test` (or `pytest tests -q -m "not slow"`) is green on this machine
+          required: false

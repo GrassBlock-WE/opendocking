@@ -32,13 +32,7 @@ for p in (ROOT / "python", ROOT / "tests"):
         sys.path.insert(0, str(p))
 
 import odock  # noqa: E402
-from odock.cli import _use_utf8_streams  # noqa: E402
 from redock import redock  # noqa: E402
-
-#: This script prints Å and Å³. Reconfigure the console streams first, exactly
-#: as the `odock` command line does, so a non-UTF-8 code page (GBK, cp1252)
-#: cannot turn a run into a `UnicodeEncodeError`.
-_use_utf8_streams()
 
 #: 6,7-bis(2-methoxyethoxy)-N-(3-ethynylphenyl)quinazolin-4-amine (erlotinib).
 ERLOTINIB = "COCCOc1cc2c(cc1OCCOC)ncnc2Nc3cccc(c3)C#C"
@@ -48,12 +42,33 @@ DEMO_SMILES = "CCOC(=O)N1CCC(CC1)Oc1ccc(NC(=O)C)cc1"
 DEMO_NAME = "demo-ligand"
 
 
+def _utf8_streams() -> None:
+    """Make the console able to print the units this script reports.
+
+    The box is printed with Ångström signs.  On a Windows console whose code
+    page is not UTF-8 Python encodes stdout with GBK or cp1252, and `print`
+    raises `UnicodeEncodeError`, turning the documented regeneration command
+    into a crash before it docks anything.  `odock`'s own CLI reconfigures the
+    same two streams for exactly this reason; reconfiguring is harmless where
+    the console is already UTF-8.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):  # pragma: no cover - stream replaced
+            pass
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--outdir", default=str(ROOT / "demo"))
     ap.add_argument("--fast", action="store_true", help="fewer Monte-Carlo runs")
     args = ap.parse_args(argv)
 
+    _utf8_streams()
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
     exhaustive = 4 if args.fast else 16
@@ -180,6 +195,7 @@ that erlotinib's binding mode is partly water-mediated.
 | `egfr/receptor.pdbqt`, `egfr/ligand.pdbqt`, `egfr/poses.pdbqt` | the same for EGFR |
 | `egfr/box.json` | the active site of the EGFR run |
 | `ligand_from_smiles.pdbqt`, `.smi` | a ligand built from a SMILES alone |
+| `library.smi` | a 17-molecule screening library for `3ptb/box.json` — hand-written and checked in, **not** produced by this script; see `docs/SCREENING.md` |
 
 ## Where the structures came from
 

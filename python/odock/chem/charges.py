@@ -35,8 +35,7 @@ This is an honest approximation, not a transcription of the Kollman parameter
 table: the returned values have the right *character* (united-atom, charge
 conserving, dipole-bearing) but they are **not** the published Kollman numbers.
 Callers that need the literal Kollman set must supply their own per-residue
-table. The name is kept because the frozen interface (the chem layer's published interface)
-exposes it under that name.
+table. The name is kept because the frozen interface exposes it under that name.
 
 Atom typing
 -----------

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """The OpenDocking 3-D workbench.
 
-The window follows the layout in the project brief §4: a seven-menu bar, a workspace
+The window follows the required layout: a seven-menu bar, a workspace
 tree on the left, the 3-D viewport in the middle with a floating tool strip, an
 inspector with Receptor/Ligand/Grid/Engine tabs on the right, and a collapsible
 bottom drawer holding the pose table, the run monitor and the log.
@@ -36,9 +36,10 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 
-from . import dialogs, i18n
+from . import dashboard, dialogs, i18n
 from .i18n import tr
 from .sequence import SequenceTrack
+from . import sequence as sequence_module
 from .structure import Model, guess_bonds, parse_pdbqt
 from .viewport import (
     INTERACTION_COLORS,
@@ -173,6 +174,32 @@ def _bond_pairs(bonds: Sequence) -> List[Tuple[int, int]]:
     return out
 
 
+def _scrollable_panel(widget, minimum: Tuple[int, int] = (150, 110)):
+    """Put ``widget`` in a scroll area so it compresses instead of blocking.
+
+    A panel that paints its own content reports a minimum size derived from the
+    font metrics and from whatever it happens to hold. Two such panels side by
+    side in one dock area then *add up* to a window that can no longer be made
+    narrow — which is exactly what the run monitor did when its measurement
+    table was 638 px wide under a fallback font (a window minimum of 1134 px).
+
+    Inside a scroll area the panel keeps its own size and gains scrollbars, so
+    the window keeps a small floor while the panel stays readable at whatever
+    size the user gives it.
+    """
+    area = QtWidgets.QScrollArea()
+    area.setObjectName("panelArea")
+    area.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+    area.setWidgetResizable(True)
+    area.setWidget(widget)
+    area.setMinimumSize(int(minimum[0]), int(minimum[1]))
+    area.setSizePolicy(
+        QtWidgets.QSizePolicy.Policy.Preferred,
+        QtWidgets.QSizePolicy.Policy.Preferred,
+    )
+    return area
+
+
 # ---------------------------------------------------------------------------
 # The 3-D viewport widget
 # ---------------------------------------------------------------------------
@@ -202,10 +229,18 @@ class ViewportWidget(QtWidgets.QWidget):
     #: where ``hit`` is ``("receptor"|"ligand", atom_index)``. An empty click
     #: carries ``None`` so the window can clear the selection.
     atomClicked = QtCore.pyqtSignal(object, bool)
+    #: The atom under the cursor while hovering: ``(hit_or_None)``. Used by the
+    #: status bar, which reports the atom the user is pointing at.
+    atomHovered = QtCore.pyqtSignal(object)
 
     MODE_ORBIT = "orbit"
     MODE_MEASURE = "measure"
     MODE_BOND = "bond"
+
+    #: Minimum seconds between two hover picks. A pick walks every atom, so
+    #: without this a fast mouse over a 3 000-atom protein would spend more time
+    #: picking than drawing.
+    HOVER_INTERVAL = 0.04
 
     def __init__(self, scene: Scene, parent=None) -> None:
         super().__init__(parent)
@@ -231,11 +266,42 @@ class ViewportWidget(QtWidgets.QWidget):
         self._anim_timer: Optional[QtCore.QTimer] = None
         self._anim_frames: List[List] = []
         self._anim_index = 0
+        #: The colour the 3-D renderer clears to, and the flat colour QPainter
+        #: fills the widget with before the image is blitted. Both belong to the
+        #: theme: a light window chrome around a near-black viewport reads as a
+        #: hole in the window, and vice versa.
+        self.background: Tuple[float, float, float, float] = (
+            dashboard.DARK.viewport_clear
+        )
+        self.canvas: Tuple[int, int, int] = dashboard.DARK.viewport_canvas
+        #: Whether the viewport canvas is light, which decides the HUD ink.
+        self._light_canvas = False
+        #: The atom-under-the-cursor readout. On by default; View ▸ Inspect
+        #: atom switches it off.
+        self.hover_visible = True
+        self._hover = None
+        self._hover_at = 0.0
         self.setMinimumSize(420, 320)
         self.setFocusPolicy(QtCore.Qt.FocusPolicy.StrongFocus)
         self.setMouseTracking(True)
         self.setAutoFillBackground(False)
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+
+    def set_theme(self, theme) -> None:
+        """Take the viewport colours of ``theme`` (its own clear colour)."""
+        clear, canvas = dashboard.viewport_colors(theme)
+        self.background = tuple(clear)
+        self.canvas = tuple(canvas)
+        # The HUD is drawn with QPainter over the rendered image, so its ink has
+        # to follow the theme as well: light-grey legend text is invisible on a
+        # light viewport.
+        self._light_canvas = sum(self.canvas) > 380
+        self.update()
+
+    def hover_readout(self) -> Optional[Tuple[str, int]]:
+        """The atom currently under the cursor, or ``None``."""
+        return self._hover
+
 
     # -- context and framebuffer -------------------------------------------
 
@@ -291,7 +357,7 @@ class ViewportWidget(QtWidgets.QWidget):
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
         painter = QtGui.QPainter(self)
-        painter.fillRect(self.rect(), QtGui.QColor(22, 24, 32))
+        painter.fillRect(self.rect(), QtGui.QColor(*self.canvas))
         if not self._ensure_context():
             painter.setPen(QtGui.QColor(220, 160, 120))
             painter.drawText(
@@ -310,7 +376,10 @@ class ViewportWidget(QtWidgets.QWidget):
 
         self.framebuffer.use()
         try:
-            self.renderer.draw(self.camera, width, height, target=self.framebuffer)
+            self.renderer.draw(
+                self.camera, width, height, background=self.background,
+                target=self.framebuffer,
+            )
         except Exception as exc:
             # A rendering failure must never take the whole application down:
             # PyQt turns an escaping exception in a virtual method into an
@@ -336,8 +405,29 @@ class ViewportWidget(QtWidgets.QWidget):
         self._paint_overlay(painter)
         painter.end()
 
+    #: The QPainter HUD ink for a dark and for a light viewport. The HUD is drawn
+    #: *over* the rendered image, so a style sheet cannot reach it: these are
+    #: picked from ``_light_canvas``, which :meth:`set_theme` sets.
+    HUD_INK = ((210, 220, 230), (24, 33, 44))
+    HUD_HINT = ((255, 200, 120), (150, 82, 0))
+
+    def _hud_ink(self) -> QtGui.QColor:
+        return QtGui.QColor(*self.HUD_INK[1 if self._light_canvas else 0])
+
+    def _hud_hint(self) -> QtGui.QColor:
+        return QtGui.QColor(*self.HUD_HINT[1 if self._light_canvas else 0])
+
+    def hud_hint_rect(self) -> QtCore.QRectF:
+        """Where the tool hint is drawn: top right, right-aligned.
+
+        It used to be drawn along the bottom edge, which is exactly where the
+        floating tool strip sits — so the hint that tells you what the measure
+        tool does was the one thing the tool strip hid.
+        """
+        return QtCore.QRectF(0.0, 8.0, max(10.0, self.width() - 12.0), 18.0)
+
     def _paint_overlay(self, painter: QtGui.QPainter) -> None:
-        """A small HUD: the interaction legend and the active tool."""
+        """A small HUD: the interaction legend, the surface colour bar, the tool."""
         interactions = self.scene.interactions or []
         if interactions:
             kinds: List[str] = []
@@ -352,19 +442,238 @@ class ViewportWidget(QtWidgets.QWidget):
                 painter.setBrush(QtGui.QColor(int(r * 255), int(g * 255), int(b * 255)))
                 painter.setPen(QtCore.Qt.PenStyle.NoPen)
                 painter.drawEllipse(10, y - 6, 8, 8)
-                painter.setPen(QtGui.QColor(210, 220, 230))
+                painter.setPen(self._hud_ink())
                 count = sum(1 for i in interactions if getattr(i, "kind", "") == kind)
                 painter.drawText(24, y + 2, f"{_interaction_label(kind)} ({count})")
                 y += 16
 
+        # The surface colour bar and the scale bar are part of the picture, not
+        # decoration: without the first a colour map cannot be read, and without
+        # the second no distance in the image can be believed.
+        self._paint_legend(painter, self.width(), self.height())
+        self._paint_scale_bar(painter, self.width(), self.height())
+
         if self.mode != self.MODE_ORBIT:
-            painter.setPen(QtGui.QColor(255, 200, 120))
+            painter.setPen(self._hud_hint())
             painter.setFont(QtGui.QFont("Segoe UI", 9, QtGui.QFont.Weight.DemiBold))
             hint = {
                 self.MODE_MEASURE: tr("viewport.hint_measure"),
                 self.MODE_BOND: tr("viewport.hint_bond"),
             }.get(self.mode, self.mode)
-            painter.drawText(10, self.height() - 10, hint)
+            painter.drawText(
+                self.hud_hint_rect(),
+                int(QtCore.Qt.AlignmentFlag.AlignRight)
+                | int(QtCore.Qt.AlignmentFlag.AlignVCenter),
+                hint,
+            )
+
+        self._paint_hover(painter)
+
+    #: The colour bar: a 14 px vertical ramp with five tick labels, drawn over
+    #: the rendered image so a screenshot carries it.
+    LEGEND_BAR_WIDTH = 14
+    LEGEND_BAR_HEIGHT = 104
+
+    def _paint_legend(self, painter: QtGui.QPainter, width: int, height: int) -> None:
+        """The surface colour bar, its title and its tick labels.
+
+        The stops come from the surface itself (``Scene.legend_stops``), which
+        is what keeps the bar honest: it shows the range the *builder* used, not
+        the range the caller thought it asked for. The labels are numbers only —
+        the unit is in the title — and the whole block sits on a translucent
+        panel so it stays readable over bright geometry.
+        """
+        stops = self.scene.legend_stops(count=5)
+        if not stops or width < 120 or height < 160:
+            return
+        bar_width = self.LEGEND_BAR_WIDTH
+        bar_height = min(self.LEGEND_BAR_HEIGHT, max(60, height // 4))
+        left = 16.0
+        top = height - 22.0 - bar_height
+        title = self._legend_title()
+        painter.save()
+        try:
+            painter.setFont(QtGui.QFont("Segoe UI", 8))
+            metrics = painter.fontMetrics()
+            title_width = min(
+                max(80.0, float(metrics.horizontalAdvance(title)) + 4.0), width - 24.0
+            )
+            panel = QtCore.QRectF(
+                left - 5.0,
+                top - metrics.height() - 8.0,
+                bar_width + 12.0 + max(
+                    title_width,
+                    max(
+                        float(
+                            metrics.horizontalAdvance(f"{label}   ")
+                        )
+                        for _fraction, _colour, label in stops
+                    ),
+                ),
+                bar_height + metrics.height() + 16.0,
+            )
+            background = QtGui.QColor(10, 14, 20, 150)
+            if self._light_canvas:
+                background = QtGui.QColor(250, 252, 255, 190)
+            painter.setPen(QtCore.Qt.PenStyle.NoPen)
+            painter.setBrush(background)
+            painter.drawRoundedRect(panel, 5.0, 5.0)
+
+            gradient = QtGui.QLinearGradient(
+                QtCore.QPointF(left, top + bar_height), QtCore.QPointF(left, top)
+            )
+            for fraction, colour, _label in stops:
+                gradient.setColorAt(
+                    min(1.0, max(0.0, float(fraction))),
+                    QtGui.QColor(
+                        int(colour[0] * 255), int(colour[1] * 255), int(colour[2] * 255)
+                    ),
+                )
+            painter.setPen(QtGui.QPen(QtGui.QColor(150, 160, 175, 200), 1))
+            painter.setBrush(QtGui.QBrush(gradient))
+            painter.drawRect(QtCore.QRectF(left, top, bar_width, bar_height))
+
+            painter.setPen(self._hud_ink())
+            painter.drawText(
+                QtCore.QRectF(
+                    left - 2.0, top - metrics.height() - 4.0, panel.width(), metrics.height() + 2
+                ),
+                int(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter),
+                title,
+            )
+            for fraction, _colour, label in stops:
+                y = top + (1.0 - float(fraction)) * bar_height
+                painter.drawLine(
+                    QtCore.QPointF(left + bar_width, y),
+                    QtCore.QPointF(left + bar_width + 4, y),
+                )
+                painter.drawText(
+                    QtCore.QRectF(
+                        left + bar_width + 7.0, y - metrics.height() / 2, 120, metrics.height() + 2
+                    ),
+                    int(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter),
+                    label,
+                )
+        finally:
+            painter.restore()
+
+    def _legend_title(self) -> str:
+        """``hydrophobicity (0 polar → 1 apolar)`` as one line."""
+        surface = self.scene.surface
+        name = str(getattr(surface, "property_name", "") or "")
+        try:
+            import odock.gui.surface as _surface
+
+            label, unit = _surface.PROPERTY_LABELS.get(name, (name, ""))
+        except Exception:  # pragma: no cover - defensive
+            label, unit = name, ""
+        return f"{label} ({unit})" if unit else label
+
+    def _paint_scale_bar(self, painter: QtGui.QPainter, width: int, height: int) -> None:
+        """A length bar in Å, derived from the very projection used to draw.
+
+        ``u_proj[1][1] = 1/tan(fov/2)`` says how many pixels one Å at the
+        camera's target distance covers, so the bar is a measurement of the
+        image rather than a decoration: the same length in the model is the
+        same number of pixels on screen.
+        """
+        if width < 160 or height < 120:
+            return
+        focus = float(self.camera.distance)
+        tangent = math.tan(math.radians(max(1.0, float(self.camera.fov)) / 2.0))
+        if tangent <= 1e-6 or focus <= 0.0:  # pragma: no cover - degenerate camera
+            return
+        world_per_pixel = 2.0 * focus * tangent / max(1, height)
+        chosen = None
+        for length in (1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0):
+            pixels = length / world_per_pixel
+            if pixels > 0.30 * width:
+                break
+            chosen = (length, pixels)
+        if chosen is None:
+            return
+        length, pixels = chosen
+        painter.save()
+        try:
+            painter.setFont(QtGui.QFont("Segoe UI", 8))
+            metrics = painter.fontMetrics()
+            label = tr("legend.scale", length=length)
+            text_width = float(metrics.horizontalAdvance(label)) + 10.0
+            x0 = (width - pixels) / 2.0
+            y = height - 26.0
+            background = QtGui.QColor(10, 14, 20, 150)
+            if self._light_canvas:
+                background = QtGui.QColor(250, 252, 255, 190)
+            painter.setPen(QtCore.Qt.PenStyle.NoPen)
+            painter.setBrush(background)
+            painter.drawRoundedRect(
+                QtCore.QRectF(
+                    x0 - 8.0,
+                    y - metrics.height() - 8.0,
+                    pixels + 16.0,
+                    metrics.height() + 20.0,
+                ),
+                4.0,
+                4.0,
+            )
+            painter.setPen(QtGui.QPen(self._hud_ink(), 2))
+            painter.drawLine(QtCore.QPointF(x0, y), QtCore.QPointF(x0 + pixels, y))
+            for tick in (x0, x0 + pixels):
+                painter.drawLine(QtCore.QPointF(tick, y - 4), QtCore.QPointF(tick, y + 4))
+            painter.setPen(self._hud_ink())
+            painter.drawText(
+                QtCore.QRectF(x0 - 20.0, y - metrics.height() - 5.0, pixels + 40.0, metrics.height() + 2),
+                int(QtCore.Qt.AlignmentFlag.AlignHCenter | QtCore.Qt.AlignmentFlag.AlignVCenter),
+                label,
+            )
+            del text_width
+        finally:
+            painter.restore()
+
+
+    def _paint_hover(self, painter: QtGui.QPainter) -> None:
+        """The atom the cursor is over: one small card, bottom right.
+
+        Hovering is how a user finds out *which* atom they are looking at
+        without clicking anything and without disturbing the selection, so the
+        card is read-only and carries the fields the Selection dock would show.
+        """
+        hit = self._hover
+        if not hit or self.mode != self.MODE_ORBIT:
+            return
+        kind, index = hit
+        atoms = self.scene.ligand if kind == "ligand" else self.scene.receptor
+        try:
+            atom = atoms[int(index)]
+        except (IndexError, TypeError):
+            return
+        rows = dashboard.atom_readout(atom, kind=kind, index=int(index))
+        if not rows:
+            return
+        painter.setFont(QtGui.QFont("Segoe UI", 8))
+        metrics = painter.fontMetrics()
+        width = max(
+            metrics.horizontalAdvance(f"{label}: {value}") for label, value in rows
+        ) + 18
+        height = 10 + len(rows) * (metrics.height() + 1)
+        x = max(6, self.width() - width - 10)
+        y = max(6, self.height() - height - 10)
+        rect = QtCore.QRectF(x, y, width, height)
+        background = QtGui.QColor(12, 16, 22, 205)
+        if self._light_canvas:  # a light theme needs a light card
+            background = QtGui.QColor(252, 253, 255, 225)
+        painter.setPen(QtGui.QPen(QtGui.QColor(90, 110, 130, 200), 1))
+        painter.setBrush(background)
+        painter.drawRoundedRect(rect, 5.0, 5.0)
+        painter.setPen(self._hud_ink())
+        line = rect.top() + 4
+        for label, value in rows:
+            painter.drawText(
+                QtCore.QRectF(rect.left() + 8, line, width - 16, metrics.height() + 1),
+                int(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter),
+                f"{label}: {value}",
+            )
+            line += metrics.height() + 1
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
@@ -487,6 +796,8 @@ class ViewportWidget(QtWidgets.QWidget):
             self.refresh()
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if self._drag_mode is None:
+            self._update_hover(event)
         if self._last_pos is None or self._drag_mode is None:
             self._last_pos = event.position()
             return
@@ -505,6 +816,44 @@ class ViewportWidget(QtWidgets.QWidget):
             return
         self.cameraChanged.emit()
         self.refresh()
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        if self._hover is not None:
+            self._hover = None
+            self.atomHovered.emit(None)
+            self.update()
+        super().leaveEvent(event)
+
+    def _update_hover(self, event) -> None:
+        """Pick the atom under the cursor, throttled, and report changes."""
+        if not self.hover_visible or self.renderer is None or self.mode != self.MODE_ORBIT:
+            if self._hover is not None:
+                self._hover = None
+                self.atomHovered.emit(None)
+                self.update()
+            return
+        now = time.monotonic()
+        if now - self._hover_at < self.HOVER_INTERVAL:
+            return
+        self._hover_at = now
+        try:
+            hit = self.renderer.pick_atom(
+                self.camera, *self._device_size(), *self._device_pos(event)
+            )
+        except Exception:  # pragma: no cover - a pick must never break a paint
+            return
+        if hit == self._hover:
+            return
+        self._hover = hit
+        self.atomHovered.emit(hit)
+        self.update()
+
+    def set_hover_visible(self, visible: bool) -> None:
+        self.hover_visible = bool(visible)
+        if not self.hover_visible and self._hover is not None:
+            self._hover = None
+            self.atomHovered.emit(None)
+        self.update()
 
     def _screen_axes(self):
         """Screen right/up expressed in world axes, for panning and dragging."""
@@ -651,21 +1000,52 @@ class ViewportWidget(QtWidgets.QWidget):
         self._selection.clear()
         self.refresh()
 
-    def snapshot(self, path, width: int = 2400, height: int = 1600) -> bool:
-        """Render a high-resolution image straight from the GL context."""
+    def set_surface(self, surface) -> dict:
+        """Hand the built surface to the scene (and to the renderer, if any).
+
+        The surface lives on the scene, so the frame loop picks it up on the
+        first paint even when no GL context exists yet.
+        """
+        self.scene.surface = surface
+        if self.renderer is not None:
+            return self.renderer.set_surface(surface)
+        self.update()
+        return dict(getattr(surface, "stats", {}) or {}) if surface is not None else {}
+
+    def snapshot(self, path, width: int = 2400, height: int = 1600, annotate: bool = True) -> bool:
+        """Render a high-resolution image straight from the GL context.
+
+        ``annotate`` draws the colour bar and the scale bar into the file. A
+        figure without its legend cannot be read, and the whole point of the
+        export is a picture someone else can interpret.
+        """
         if not self._ensure_context() or self.renderer is None:
             return False
-        data = self.renderer.render_image(self.camera, int(width), int(height))
+        data = self.renderer.render_image(
+            self.camera, int(width), int(height), background=self.background
+        )
         image = QtGui.QImage(
             data, int(width), int(height), int(width) * 3,
             QtGui.QImage.Format.Format_RGB888,
         ).copy()
+        if annotate:
+            painter = QtGui.QPainter(image)
+            try:
+                # A 2400 px figure needs a bigger font than the 600 px widget.
+                scale = max(1.0, image.height() / 800.0)
+                painter.scale(scale, scale)
+                self._paint_legend(painter, int(image.width() / scale), int(image.height() / scale))
+                self._paint_scale_bar(
+                    painter, int(image.width() / scale), int(image.height() / scale)
+                )
+            finally:
+                painter.end()
         return bool(image.save(str(path)))
 
     # -- pose animation -----------------------------------------------------
 
     def play_animation(self, frames: Sequence[Sequence], interval_ms: int = 90) -> None:
-        """Interpolate between poses (the project brief §E.3, the conformer player)."""
+        """Interpolate between poses (the conformer player)."""
         from .structure import Atom
 
         self.stop_animation()
@@ -720,11 +1100,25 @@ class _DockWorker(QtCore.QThread):
     finished_ok = QtCore.pyqtSignal(object)
     failed = QtCore.pyqtSignal(str)
     ticked = QtCore.pyqtSignal(str)
+    #: ``(phase, seconds since the run started)``. The phases are the ones this
+    #: thread can actually observe: the grid is built by ``build_engine``, the
+    #: search (and, inside it, the kernel's refinement) is ``run()``, and "done"
+    #: is the run returning. No per-iteration energy exists to report — the
+    #: kernel holds its state for the whole search — so none is invented.
+    phase = QtCore.pyqtSignal(str, float)
 
     def __init__(self, settings: dict) -> None:
         super().__init__()
         self.settings = settings
         self.engine = None
+        self.trace: Optional[dashboard.RunTrace] = None
+        self.phases: List[dashboard.PhaseRecord] = []
+        self.elapsed = 0.0
+
+    def _enter(self, name: str, elapsed: float) -> None:
+        """Record and announce a phase boundary."""
+        self.phases.append(dashboard.PhaseRecord(name=name, started=float(elapsed)))
+        self.phase.emit(name, float(elapsed))
 
     def run(self) -> None:  # noqa: D401
         try:
@@ -733,6 +1127,8 @@ class _DockWorker(QtCore.QThread):
             from odock.docking import build_engine, result_from_engine
 
             s = self.settings
+            t0 = _time.perf_counter()
+            self._enter("grid", 0.0)
             self.ticked.emit(tr("worker.building_grid"))
             # `build_engine` + `run()` rather than the `dock()` convenience
             # wrapper: holding the engine is what makes pause and abort
@@ -757,27 +1153,60 @@ class _DockWorker(QtCore.QThread):
                 search=s.get("search"),
             )
             self.engine = engine
+            self._close_last(t0)
+            self._enter("search", _time.perf_counter() - t0)
             self.ticked.emit(tr("worker.searching"))
-            t0 = _time.perf_counter()
             raw = engine.run()
-            elapsed = _time.perf_counter() - t0
-            self.ticked.emit(tr("worker.search_done", seconds=elapsed))
+            search_seconds = _time.perf_counter() - t0
+            self._close_last(t0)
+            # The refinement lives inside `run()` and returns with it: the stage
+            # is marked complete when its results are in hand, and carries no
+            # separate duration because the kernel does not expose one.
+            self._enter("refine", search_seconds)
+            # The refinement returns inside `run()`, so there is no separate
+            # duration to report: the stage is marked with a zero-length span
+            # rather than a made-up number.
+            self.phases[-1].finished = search_seconds
+            self.elapsed = _time.perf_counter() - t0
+            self.ticked.emit(tr("worker.search_done", seconds=search_seconds))
             if raw.get("cancelled"):
                 self.ticked.emit(tr("worker.cancelled"))
             result = result_from_engine(
                 engine,
                 raw,
-                elapsed=elapsed,
+                elapsed=search_seconds,
                 box=s["box"],
                 receptor_pdbqt=s["receptor_text"],
                 ligand_pdbqt=s["ligand_text"],
                 energy_range=s["energy_range"],
+            )
+            self._enter("done", self.elapsed)
+            self._close_last(t0)
+            self.trace = dashboard.RunTrace(
+                energies=[float(pose.affinity) for pose in result.poses],
+                phases=list(self.phases),
+                elapsed=float(self.elapsed),
+                scoring=str(s["scoring"]),
+                grid_points=int(getattr(result, "grid_points", 0) or 0),
+                grid_mb=int(getattr(result, "grid_mb", 0) or 0),
+                num_tors=float(getattr(result, "num_tors", 0.0) or 0.0),
+                exhaustiveness=int(s["exhaustiveness"]),
+                seed=int(s["seed"]),
+                cancelled=bool(raw.get("cancelled")),
             )
             self.finished_ok.emit(result)
         except Exception as exc:  # pragma: no cover - reported to the user
             import traceback
 
             self.failed.emit(f"{exc}\n\n{traceback.format_exc()}")
+
+    def _close_last(self, t0: float) -> None:
+        """Finish the phase that is currently open."""
+        if not self.phases:
+            return
+        record = self.phases[-1]
+        record.finished = time.perf_counter() - t0
+
 
     # -- control -----------------------------------------------------------
 
@@ -854,6 +1283,8 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         ligand: Optional[str] = None,
         poses: Optional[str] = None,
         parent=None,
+        *,
+        session: Optional["dashboard.SessionStore"] = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(tr("app.title"))
@@ -893,6 +1324,21 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         self._ghost_visible = False
         self._pose_index = 0
         self._charge_model = "gasteiger"
+        #: The molecular surface. The *settings* live on the window (so a
+        #: language switch, which rebuilds every widget, cannot lose them), the
+        #: built mesh lives on the scene (where the renderer finds it), and the
+        #: cut plane lives in both because the shader reads it from the scene.
+        from . import surface as _surface_module
+
+        self.surface_settings = _surface_module.SurfaceSettings()
+        self._surface_alpha = 1.0
+        self._surface_clip = None
+        self._pocket_only = False
+        self._highlight_pocket = False
+        #: How wide a shell "pocket lining only" builds. Wide enough to hold a
+        #: probe around the lining, which is what makes the shell the answer
+        #: rather than an approximation of it.
+        self._pocket_radius = 9.0
         #: Radio actions of the two View ▸ style submenus, keyed by style name.
         self._style_actions: Dict[str, Dict[str, QtGui.QAction]] = {}
         #: The pose text is kept so that a language switch can reload it.
@@ -909,15 +1355,38 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         #: Panel state that is expensive to recompute and worth restoring.
         self._maps_computed = False
         self._filter_verdict: Optional[Tuple[bool, Tuple[str, ...]]] = None
+        #: The instrument panels. A language switch rebuilds every widget, so
+        #: the *data* of the dashboard, the comparison and the measurements
+        #: lives on the window and is re-applied to the fresh widgets.
+        self.run_history = dashboard.SessionHistory(cap=12)
+        self._comparison: Optional[dashboard.PoseComparison] = None
+        self._comparison_rows: Tuple[int, int] = (0, 1)
+        #: Appearance and arrangement, both switchable from the View menu.
+        self.color_theme: dashboard.Theme = dashboard.DARK
+        self.density = "comfortable"
+        self._preset = "docking"
+        #: The session file. ``None`` disables persistence entirely, which is
+        #: what a test (or a plain ``DockingWorkbench()``) gets: nothing is ever
+        #: written to the user's session behind their back.
+        self.session: Optional[dashboard.SessionStore] = session
+        self.recent = (
+            session.recent if session is not None else dashboard.RecentFiles()
+        )
+        self._autosave_timer: Optional[QtCore.QTimer] = None
+        self._autosave_pending = False
 
         self._build_viewport()
         self._build_inspector()
         self._build_workspace()
         self._build_bottom()
+        self._build_dashboard()
+        self._build_comparison()
         self._build_selection_panel()
         self._build_menus()
         self._build_statusbar()
         self._apply_style()
+        self._install_autosave()
+        self.setAcceptDrops(True)
 
         if receptor:
             self.load_receptor(receptor)
@@ -947,12 +1416,15 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         self._build_inspector()
         self._build_workspace()
         self._build_bottom()
+        self._build_dashboard()
+        self._build_comparison()
         self._build_selection_panel()
         self._build_menus()
         self._build_statusbar()
         self._apply_style()
         self.setWindowTitle(tr("app.title"))
         self._restore_ui_state(state)
+        self._session_changed()
 
     def _capture_ui_state(self) -> dict:
         """Everything the rebuild has to put back."""
@@ -986,6 +1458,8 @@ class DockingWorkbench(QtWidgets.QMainWindow):
                     "workspace_dock",
                     "inspector_dock",
                     "bottom_dock",
+                    "dashboard_dock",
+                    "comparison_dock",
                     "selection_dock",
                 )
             },
@@ -996,6 +1470,22 @@ class DockingWorkbench(QtWidgets.QMainWindow):
             "central_split": list(self.central_splitter.sizes()),
             "running": bool(self._worker is not None and self._worker.isRunning()),
             "paused": self._paused,
+            "theme": self.color_theme.name,
+            "density": self.density,
+            "preset": self._preset,
+            "surface": {
+                "settings": self.surface_settings,
+                "alpha": float(self._surface_alpha),
+                "clip": self._surface_clip,
+                "pocket_only": bool(self._pocket_only),
+                "highlight": bool(self._highlight_pocket),
+                "show": bool(self.scene.show_surface),
+                "legend": bool(self.scene.surface_legend),
+            },
+            "history": self.run_history.to_list(),
+            "measurements": [dict(item) for item in self._measurements],
+            "comparison_rows": tuple(self._comparison_rows),
+            "comparison": self._comparison is not None,
             "engine": {
                 "scoring": self.engine.currentText(),
                 "search": self.search.currentIndex(),
@@ -1028,13 +1518,23 @@ class DockingWorkbench(QtWidgets.QMainWindow):
                 action.setParent(None)
                 action.deleteLater()
 
-        for name in ("workspace_dock", "inspector_dock", "bottom_dock", "selection_dock"):
+        for name in (
+            "workspace_dock",
+            "inspector_dock",
+            "bottom_dock",
+            "dashboard_dock",
+            "comparison_dock",
+            "selection_dock",
+        ):
             dock = getattr(self, name, None)
             if dock is not None:
                 self.removeDockWidget(dock)
                 dock.setParent(None)
                 dock.deleteLater()
                 setattr(self, name, None)
+        self.run_dashboard = None
+        self.measure_history = None
+        self.comparison = None
 
         for name in ("lbl_status", "lbl_energy"):
             label = getattr(self, name, None)
@@ -1062,6 +1562,14 @@ class DockingWorkbench(QtWidgets.QMainWindow):
     def _restore_ui_state(self, state: dict) -> None:
         """Put the captured session back into the freshly built widgets."""
         self._charge_model = state["charge_model"]
+
+        # The appearance goes back first: it is what the user sees while the
+        # rest of the interface is being repopulated.
+        self.color_theme = dashboard.theme_named(state.get("theme", "dark"))
+        self.density = str(state.get("density", "comfortable"))
+        self._preset = str(state.get("preset", self._preset))
+        self._apply_style()
+        self._sync_appearance_actions()
 
         engine = state["engine"]
         self.engine.setCurrentText(engine["scoring"])
@@ -1141,6 +1649,34 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         if self._paused:
             self.btn_pause.setText(tr("btn.resume"))
 
+        # The surface survives the rebuild: the mesh on the scene, the settings
+        # here, and the widgets the new menu built have to agree with them.
+        surface_state = state.get("surface") or {}
+        if surface_state.get("settings") is not None:
+            self.surface_settings = surface_state["settings"]
+        self._surface_alpha = float(surface_state.get("alpha", self._surface_alpha))
+        self._surface_clip = surface_state.get("clip", self._surface_clip)
+        self._pocket_only = bool(surface_state.get("pocket_only", self._pocket_only))
+        self._highlight_pocket = bool(
+            surface_state.get("highlight", self._highlight_pocket)
+        )
+        self.scene.surface_alpha = self._surface_alpha
+        self.scene.surface_clip = self._surface_clip
+        self.scene.show_surface = bool(surface_state.get("show", self.scene.show_surface))
+        self.scene.surface_legend = bool(
+            surface_state.get("legend", self.scene.surface_legend)
+        )
+        for name, value in (
+            ("surface_action", self.scene.show_surface and self.scene.surface is not None),
+            ("legend_action", self.scene.surface_legend),
+            ("pocket_action", self._pocket_only),
+            ("highlight_action", self._highlight_pocket),
+        ):
+            self._set_action_checked(getattr(self, name, None), bool(value))
+        self._sync_surface_actions()
+        if self.scene.surface is not None and self.viewport.renderer is not None:
+            self.viewport.set_surface(self.scene.surface)
+
         target, distance, azimuth, elevation = state["camera"]
         if state["had_renderer"]:
             # Building the context frames the camera, so restore it afterwards.
@@ -1158,11 +1694,93 @@ class DockingWorkbench(QtWidgets.QMainWindow):
                 dock.setVisible(visible)
         self.inspector.setCurrentIndex(state["tab"])
 
+        # The instrument panels: their data survives the rebuild, the widgets
+        # around it are new.
+        self.run_history = dashboard.SessionHistory.from_list(state.get("history", []))
+        if self.run_dashboard is not None:
+            self.run_dashboard.history = self.run_history
+            self.run_dashboard.reset(clear_history=False)
+        self._measurements = [dict(item) for item in state.get("measurements", [])]
+        self._sync_measurements()
+        self._comparison_rows = tuple(state.get("comparison_rows", (0, 1)))
+        self._comparison = None
+        if state.get("comparison") and len(self.pose_models) >= 2:
+            self._update_comparison(*self._comparison_rows[:2])
+        elif self.comparison is not None:
+            self.comparison.clear()
+
         self.log.setPlainText(state["log"])
         self.lbl_status.setText(state["status"])
         self._log(
             tr("log.language", language=i18n.language_name(i18n.current_language()))
         )
+
+    # -- the instrument panels ----------------------------------------------
+
+    def _build_dashboard(self) -> None:
+        """The run monitor, docked to the right of the pose table.
+
+        A tab widget holds the live run dashboard and the measurement history:
+        both are "what the instrument has recorded", and both are wanted beside
+        the poses rather than in a dialog.
+        """
+        dock = QtWidgets.QDockWidget(tr("dock.dashboard"), self)
+        dock.setObjectName("dashboardDock")
+        dock.setAllowedAreas(
+            QtCore.Qt.DockWidgetArea.BottomDockWidgetArea
+            | QtCore.Qt.DockWidgetArea.TopDockWidgetArea
+            | QtCore.Qt.DockWidgetArea.RightDockWidgetArea
+        )
+        self.dashboard_tabs = QtWidgets.QTabWidget()
+        self.run_dashboard = dashboard.RunDashboard()
+        self.run_dashboard.history = self.run_history
+        self.run_dashboard.trace.set_history(list(self.run_history))
+        self.measure_history = dashboard.MeasurementHistory()
+        self.measure_history.clearRequested.connect(self._clear_measurements)
+        self.measure_history.copyRequested.connect(self._copy_measurements)
+        # Scroll areas, so the two panels compress (and scroll) rather than
+        # dictating how narrow the window may become — they sit beside the pose
+        # table, and their minimums would otherwise add up with its.
+        self.dashboard_tabs.addTab(
+            _scrollable_panel(self.run_dashboard), tr("tab.run")
+        )
+        self.dashboard_tabs.addTab(
+            _scrollable_panel(self.measure_history), tr("tab.measure")
+        )
+        self.dashboard_tabs.setCurrentIndex(0)
+        dock.setWidget(self.dashboard_tabs)
+        self.addDockWidget(QtCore.Qt.DockWidgetArea.BottomDockWidgetArea, dock)
+        # Beside the pose table, not on top of it: `splitDockWidget` puts the
+        # dashboard to the right inside the bottom drawer, so the poses and the
+        # run they came from are visible in the same glance.
+        self.splitDockWidget(self.bottom_dock, dock, QtCore.Qt.Orientation.Horizontal)
+        # An opening *proportion*, not a floor: `resizeDocks` is a hint the user
+        # can drag away, `setMinimumWidth` would not be.
+        self.resizeDocks(
+            [self.bottom_dock, dock], [2, 1], QtCore.Qt.Orientation.Horizontal
+        )
+        # The drawer opens tall enough for the phase strip, the read-outs and most
+        # of the trace: the panel is meant to be readable while a run is going on,
+        # not only after the user drags the divider.
+        self.resizeDocks([self.bottom_dock], [280], QtCore.Qt.Orientation.Vertical)
+        self.dashboard_dock = dock
+
+    def _build_comparison(self) -> None:
+        """The two-pose panel, tabbed with the inspector."""
+        dock = QtWidgets.QDockWidget(tr("dock.comparison"), self)
+        dock.setObjectName("comparisonDock")
+        dock.setAllowedAreas(
+            QtCore.Qt.DockWidgetArea.RightDockWidgetArea
+            | QtCore.Qt.DockWidgetArea.LeftDockWidgetArea
+            | QtCore.Qt.DockWidgetArea.BottomDockWidgetArea
+        )
+        self.comparison = dashboard.PoseComparisonWidget()
+        self.comparison.copyRequested.connect(self._copy_comparison)
+        dock.setWidget(_scrollable_panel(self.comparison))
+        self.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, dock)
+        self.tabifyDockWidget(self.inspector_dock, dock)
+        self.inspector_dock.raise_()
+        self.comparison_dock = dock
 
     # -- construction -------------------------------------------------------
 
@@ -1175,6 +1793,8 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         self.viewport.atomsPicked.connect(self._on_atoms_picked)
         self.viewport.bondPicked.connect(self._on_bond_picked)
         self.viewport.atomClicked.connect(self._on_atom_clicked)
+        self.viewport.atomHovered.connect(self._on_atom_hovered)
+        self.viewport.set_theme(self.color_theme)
 
         # The residue ruler sits directly under the 3-D view, always visible, so
         # the sequence and the picture share one glance.
@@ -1534,8 +2154,10 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         self.table.setSelectionBehavior(
             QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
         )
+        # Extended, not single: Ctrl-clicking a second row is how two poses are
+        # put side by side in the comparison panel.
         self.table.setSelectionMode(
-            QtWidgets.QAbstractItemView.SelectionMode.SingleSelection
+            QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
         )
         self.table.setEditTriggers(
             QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers
@@ -1553,6 +2175,16 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         self.pose_slider.valueChanged.connect(self._on_pose_changed)
         row.addWidget(self.pose_slider, 1)
         self.lbl_pose = QtWidgets.QLabel(tr("label.no_poses"))
+        # A plain, unwrapped QLabel reports its *whole* text as its minimum width,
+        # so "mode 1 / 6 · affinity · rmsd · binding: <residues>" (1188 px on the
+        # reference machine) silently became the minimum width of the entire
+        # window. Wrapping it inside a cap bounds that, keeps the text complete
+        # for callers that read it back, and the tooltip repeats it in one line.
+        self.lbl_pose.setWordWrap(True)
+        self.lbl_pose.setMaximumWidth(self.POSE_LABEL_WIDTH)
+        self.lbl_pose.setTextInteractionFlags(
+            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
+        )
         row.addWidget(self.lbl_pose)
         self.btn_play = QtWidgets.QPushButton(tr("btn.play"))
         self.btn_play.setCheckable(True)
@@ -1703,6 +2335,29 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         self._act(export, tr("action.export_csv"), lambda: self._export("csv"))
         self._act(export, tr("action.export_svg"), lambda: self._export("svg"))
         self._act(export, tr("action.export_screenshot"), self._save_screenshot)
+        export.addSeparator()
+        # The interop exports leave the program entirely, so they live at the
+        # bottom of the same submenu the other "give me a file" actions do.
+        self._act(export, tr("action.export_pymol"), lambda: self._export_scene("pymol"))
+        self._act(
+            export, tr("action.export_chimerax"), lambda: self._export_scene("chimerax")
+        )
+        self._act(
+            export, tr("action.export_pose_pdb"), lambda: self._export_scene("pose")
+        )
+        self._act(
+            export, tr("action.export_surface_obj"), lambda: self._export_scene("surface")
+        )
+        file_menu.addSeparator()
+        self.recent_menu = file_menu.addMenu(tr("menu.recent"))
+        self.recent_menu.aboutToShow.connect(self._rebuild_recent_menu)
+        self._rebuild_recent_menu()
+        self.restore_action = self._act(
+            file_menu,
+            tr("action.restore_session"),
+            self.restore_session,
+            shortcut="Ctrl+Shift+R",
+        )
         file_menu.addSeparator()
         self._act(file_menu, tr("action.quit"), self.close, shortcut="Ctrl+Q")
 
@@ -1774,6 +2429,7 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         )
         self._act(analysis, tr("action.clear_annotations"), self._clear_interactions)
         self._act(analysis, tr("action.cluster_poses"), self._cluster_poses)
+        self._act(analysis, tr("action.compare_poses"), self._compare_selected)
         analysis.addSeparator()
         self._act(analysis, tr("action.diagram_svg"), lambda: self._export("svg"))
         # The lambda swallows the ``checked`` bool QAction.triggered emits: this
@@ -1783,6 +2439,11 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         analysis.addSeparator()
         self._act(analysis, tr("action.export_xlsx"), lambda: self._export("xlsx"))
         self._act(analysis, tr("action.export_csv"), lambda: self._export("csv"))
+        analysis.addSeparator()
+        # The three measurements that turn "it fits" into a number.
+        self._act(analysis, tr("action.sasa_report"), self._sasa_report)
+        self._act(analysis, tr("action.ligand_burial"), self._ligand_burial)
+        self._act(analysis, tr("action.burial_per_pose"), self._burial_per_pose)
 
         view = bar.addMenu(tr("menu.view"))
         self._style_actions = {
@@ -1793,7 +2454,13 @@ class DockingWorkbench(QtWidgets.QMainWindow):
                 view, tr("menu.ligand_style"), LIGAND_STYLES, "ligand"
             ),
         }
+        self._build_surface_menu(view)
         view.addSeparator()
+        # The palette is the fastest way to reach any of the actions below, so
+        # it sits at the top of the View menu where the eye lands first.
+        self._act(
+            view, tr("action.palette"), self._open_palette, shortcut="Ctrl+K"
+        )
         self._act(view, tr("action.bond_check"), self._open_bond_check)
         self._act(
             view,
@@ -1821,6 +2488,8 @@ class DockingWorkbench(QtWidgets.QMainWindow):
             self.workspace_dock,
             self.inspector_dock,
             self.bottom_dock,
+            self.dashboard_dock,
+            self.comparison_dock,
             self.selection_dock,
         ):
             panels.addAction(dock.toggleViewAction())
@@ -1828,6 +2497,16 @@ class DockingWorkbench(QtWidgets.QMainWindow):
             view, tr("action.stack_pose_dock"), self._set_pose_split, checkable=True
         )
         self.stack_action.setChecked(self._pose_stacked)
+        view.addSeparator()
+        self._build_appearance_menu(view)
+        self.inspect_action = self._act(
+            view,
+            tr("action.inspect_atom"),
+            self._toggle_inspect,
+            checkable=True,
+        )
+        self.inspect_action.setChecked(True)
+        self._act(view, tr("action.copy_view"), self._copy_view, shortcut="Ctrl+Shift+C")
         view.addSeparator()
         # The lambda swallows the ``checked`` bool that QAction.triggered emits:
         # connected straight to the method, it would arrive as ``radius=False``
@@ -1866,46 +2545,171 @@ class DockingWorkbench(QtWidgets.QMainWindow):
             )
             language.addAction(action)
 
+    def _build_appearance_menu(self, view: QtWidgets.QMenu) -> None:
+        """View ▸ Theme / Density / Layout: the appearance and arrangement."""
+        theme_menu = view.addMenu(tr("menu.theme"))
+        group = QtGui.QActionGroup(theme_menu)
+        group.setExclusive(True)
+        self._theme_actions: Dict[str, QtGui.QAction] = {}
+        for name, key in (("dark", "action.theme_dark"), ("light", "action.theme_light")):
+            action = QtGui.QAction(tr(key), theme_menu)
+            action.setCheckable(True)
+            action.setChecked(name == self.color_theme.name)
+            action.setActionGroup(group)
+            action.triggered.connect(lambda _=False, n=name: self.set_theme(n))
+            theme_menu.addAction(action)
+            self._theme_actions[name] = action
+
+        density_menu = view.addMenu(tr("menu.density"))
+        group = QtGui.QActionGroup(density_menu)
+        group.setExclusive(True)
+        self._density_actions: Dict[str, QtGui.QAction] = {}
+        for name, key in (
+            ("comfortable", "action.density_comfortable"),
+            ("compact", "action.density_compact"),
+        ):
+            action = QtGui.QAction(tr(key), density_menu)
+            action.setCheckable(True)
+            action.setChecked(name == self.density)
+            action.setActionGroup(group)
+            action.triggered.connect(lambda _=False, n=name: self.set_density(n))
+            density_menu.addAction(action)
+            self._density_actions[name] = action
+
+        layout_menu = view.addMenu(tr("menu.layout"))
+        group = QtGui.QActionGroup(layout_menu)
+        group.setExclusive(True)
+        self._layout_actions: Dict[str, QtGui.QAction] = {}
+        for name, key in (
+            ("docking", "action.layout_docking"),
+            ("analysis", "action.layout_analysis"),
+            ("compare", "action.layout_compare"),
+        ):
+            action = QtGui.QAction(tr(key), layout_menu)
+            action.setCheckable(True)
+            action.setChecked(name == self._preset)
+            action.setActionGroup(group)
+            action.triggered.connect(lambda _=False, n=name: self._apply_layout_preset(n))
+            layout_menu.addAction(action)
+            self._layout_actions[name] = action
+
+    # -- appearance ---------------------------------------------------------
+
+    def set_theme(self, name: str) -> None:
+        """Switch between the dark and the light theme."""
+        theme = dashboard.theme_named(name)
+        self.color_theme = theme
+        self._apply_style()
+        self._sync_appearance_actions()
+        self._log(
+            tr(
+                "log.theme",
+                theme=tr(f"action.theme_{theme.name}"),
+                density=tr(f"action.density_{self.density}"),
+            )
+        )
+
+    def set_density(self, name: str) -> None:
+        """Comfortable or compact: padding, tab sizes and font size."""
+        self.density = name if name in dashboard.DENSITIES else "comfortable"
+        self._apply_style()
+        self._sync_appearance_actions()
+        self._log(
+            tr(
+                "log.theme",
+                theme=tr(f"action.theme_{self.color_theme.name}"),
+                density=tr(f"action.density_{self.density}"),
+            )
+        )
+
+    def _sync_appearance_actions(self) -> None:
+        """Tick the radio entries that match the live appearance."""
+        for name, action in getattr(self, "_theme_actions", {}).items():
+            action.setChecked(name == self.color_theme.name)
+        for name, action in getattr(self, "_density_actions", {}).items():
+            action.setChecked(name == self.density)
+        for name, action in getattr(self, "_layout_actions", {}).items():
+            action.setChecked(name == self._preset)
+
+    def _apply_layout_preset(self, name: str) -> None:
+        """Arrange the docks for a job: docking, analysis or comparison."""
+        preset = dashboard.layout_preset(name)
+        self._preset = str(name).lower()
+        for key, dock_name in (
+            ("workspace", "workspace_dock"),
+            ("inspector", "inspector_dock"),
+            ("bottom", "bottom_dock"),
+            ("dashboard", "dashboard_dock"),
+            ("comparison", "comparison_dock"),
+            ("selection", "selection_dock"),
+        ):
+            dock = getattr(self, dock_name, None)
+            if dock is not None:
+                dock.setVisible(bool(preset["docks"].get(key, True)))
+        if self.inspector_dock is not None and self.inspector_dock.isVisible():
+            self.inspector.setCurrentIndex(int(preset["inspector_tab"]))
+        self._set_pose_split(bool(preset["pose_stacked"]))
+        if preset["raise_dashboard"] and self.dashboard_dock is not None:
+            self.dashboard_dock.raise_()
+        if name == "compare" and self.comparison_dock is not None:
+            self.comparison_dock.raise_()
+        self._sync_appearance_actions()
+        self._log(tr("log.preset", name=tr(f"action.layout_{self._preset}")))
+        self._session_changed()
+
     # -- styling ------------------------------------------------------------
 
     def _apply_style(self) -> None:
-        self.setStyleSheet(
-            """
-            QMainWindow, QWidget { background: #10141c; color: #d8e2ee; font-size: 12px; }
-            QGroupBox { border: 1px solid #232b3a; border-radius: 5px; margin-top: 9px; }
-            QGroupBox::title { subcontrol-origin: margin; left: 8px; color: #7fa7d0; }
-            QPushButton {
-                background: #1b2230; border: 1px solid #2c3648; border-radius: 4px;
-                padding: 4px 9px;
-            }
-            QPushButton:hover { background: #243046; }
-            QPushButton#primary { background: #1d5f8a; border-color: #2f86bd; font-weight: bold; }
-            QPushButton#primary:hover { background: #24719f; }
-            QTableWidget, QTreeWidget, QListWidget, QPlainTextEdit, QLineEdit, QComboBox,
-            QSpinBox, QDoubleSpinBox {
-                background: #151b26; border: 1px solid #26303f; border-radius: 3px;
-                selection-background-color: #1d5f8a;
-            }
-            QTabBar::tab { background: #151b26; padding: 5px 12px; border: 1px solid #26303f; }
-            QTabBar::tab:selected { background: #1d5f8a; }
-            QMenuBar::item:selected, QMenu::item:selected { background: #1d5f8a; }
-            QFrame#toolStrip { background: rgba(18, 24, 34, 190); border: 1px solid #2c3648;
-                               border-radius: 6px; }
-            QToolButton { color: #cfe2f5; padding: 2px 6px; }
-            QToolButton:hover { background: #243046; border-radius: 4px; }
-            QProgressBar { border: 1px solid #26303f; border-radius: 3px; text-align: center; }
-            QProgressBar::chunk { background: #1d5f8a; }
-            QSplitter::handle { background: #232b3a; }
-            QSplitter::handle:hover { background: #2f86bd; }
-            QStatusBar { background: #0c1016; }
-            """
-        )
+        """The theme and density of the whole window, viewport included."""
+        self.setStyleSheet(dashboard.stylesheet(self.color_theme, self.density))
+        viewport = getattr(self, "viewport", None)
+        if viewport is not None:
+            viewport.set_theme(self.color_theme)
+        panel = getattr(self, "run_dashboard", None)
+        if panel is not None:
+            panel.set_theme(self.color_theme)
+        ruler = getattr(self, "sequence", None)
+        if ruler is not None:
+            # The ruler paints its own background, so it cannot inherit this
+            # sheet: it is handed the palette that matches the theme.
+            ruler.set_palette(
+                sequence_module.LIGHT_RULER
+                if self.color_theme.name == "light"
+                else sequence_module.DARK_RULER
+            )
 
     # -- logging ------------------------------------------------------------
 
     def _log(self, message: str) -> None:
         self.log.appendPlainText(message)
         self.lbl_status.setText(message if len(message) < 120 else message[:117] + "…")
+        # Anything worth telling the user is worth remembering: this one hook
+        # makes loading, the box, the engine settings, the selection and every
+        # menu action restore after a restart, without a save call at each site.
+        self._session_changed()
+
+    #: How much room the pose read-out may claim in the pose row. Wide enough for
+    #: "mode 1 / 6  affinity -6.210 kcal/mol  rmsd l.b:", which is the part a user
+    #: reads while browsing; the binding residues stay in the tooltip.
+    POSE_LABEL_WIDTH = 420
+
+    def _set_pose_label(self, text: str) -> None:
+        """Show ``text`` in the pose read-out, wrapped, with a one-line tooltip.
+
+        The label sits in the bottom drawer, so an unbounded one silently decides
+        how narrow the window may become. The cap plus word wrap bounds that, the
+        text itself stays complete (``lbl_pose.text()`` and
+        :meth:`pose_label_text` return every character), and the tooltip repeats
+        it unwrapped for a quick hover read.
+        """
+        text = str(text or "")
+        self._pose_label_text = text
+        self.lbl_pose.setText(text)
+        self.lbl_pose.setToolTip(text)
+
+    def pose_label_text(self) -> str:
+        """The pose read-out in full, whatever the label is showing."""
+        return getattr(self, "_pose_label_text", self.lbl_pose.text())
 
     # -- project ------------------------------------------------------------
 
@@ -1938,7 +2742,7 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         self._filter_verdict = None
         self.lbl_receptor.setText(tr("label.no_receptor"))
         self.lbl_ligand.setText(tr("label.no_ligand"))
-        self.lbl_pose.setText(tr("label.no_poses"))
+        self._set_pose_label(tr("label.no_poses"))
         self.lbl_box_info.setText("—")
         self.lbl_maps.setText(tr("label.no_grid"))
         self.lbl_filters.setText(tr("label.filters_none"))
@@ -1960,6 +2764,17 @@ class DockingWorkbench(QtWidgets.QMainWindow):
                 widget.blockSignals(False)
         self.viewport.refresh(upload_receptor=True)
         self._rebuild_tree()
+        # A new project is a new instrument state: the dashboard forgets the
+        # runs, the comparison and the measurements of the old one.
+        self.run_history.clear()
+        self._comparison = None
+        if self.run_dashboard is not None:
+            self.run_dashboard.history = self.run_history
+            self.run_dashboard.reset()
+        if self.comparison is not None:
+            self.comparison.clear()
+        self._measurements = []
+        self._sync_measurements()
         self._log(tr("log.new_project"))
 
     def _save_project(self) -> None:
@@ -2104,6 +2919,7 @@ class DockingWorkbench(QtWidgets.QMainWindow):
             return False
         self.receptor_text = text
         self._pending["receptor"] = self._remember_path(path)
+        self._note_recent(path)
         self.scene.receptor = models[0].atoms
         self.scene.receptor_bonds = _perceived_bonds(self.scene.receptor, "receptor")
         self.sequence.set_structure(self.scene.receptor, "receptor")
@@ -2144,6 +2960,7 @@ class DockingWorkbench(QtWidgets.QMainWindow):
             return False
         self.ligand_text = text
         self._pending["ligand"] = self._remember_path(path)
+        self._note_recent(path)
         self.ligand_models = models
         self.scene.ligand = models[0].atoms
         self.scene.ligand_bonds = _perceived_bonds(self.scene.ligand, "ligand")
@@ -2155,6 +2972,9 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         self._log(tr("log.ligand", n=len(self.scene.ligand), name=label))
         self.lbl_filters.setText(tr("label.filters_none"))
         self._detect_bonds(quiet=True)
+        # The imported ligand is the pose on screen until a pose file arrives,
+        # so the ruler marks the residues it touches right away.
+        self._mark_pose_contacts()
         self.viewport.refresh()
         if self.scene.receptor:
             # Together with the receptor that surrounds it. A 15 Å close-up of the
@@ -2180,6 +3000,7 @@ class DockingWorkbench(QtWidgets.QMainWindow):
             self._report_error(tr("log.cannot_read", path=path, error=exc), interactive)
             return False
         self._pending["poses"] = self._remember_path(path)
+        self._note_recent(path)
         self.poses_text = text
         first_poses = not self.pose_models
         self.pose_models = models
@@ -2375,7 +3196,7 @@ class DockingWorkbench(QtWidgets.QMainWindow):
             self.lbl_energy.setText(tr("label.affinity_short", value=affinity))
         if model.rmsd_lower is not None:
             text += tr("label.rmsd_lb", value=model.rmsd_lower)
-        self.lbl_pose.setText(text)
+        self._set_pose_label(text)
         # Selecting a pose is about where it binds: compute this pose's contacts
         # with the current cut-offs and name the residues it touches. The camera
         # is deliberately left alone so two poses can be compared.
@@ -2399,6 +3220,9 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         the results table row.
         """
         analysis = _try_import("analysis")
+        # The contact marks are computed here, from the coordinates alone, so
+        # they work on an installation without the analysis extra.
+        self._mark_pose_contacts()
         if analysis is None or not self.scene.receptor or not self.scene.ligand:
             return
         try:
@@ -2431,10 +3255,40 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         except Exception:  # pragma: no cover - defensive
             summary = ""
         if summary:
-            self.lbl_pose.setText(
-                self.lbl_pose.text() + tr("label.pose_binding", residues=summary)
+            self._set_pose_label(
+                self.pose_label_text() + tr("label.pose_binding", residues=summary)
             )
         self._populate_table()
+
+    #: How close a receptor residue has to come to the ligand to count as a
+    #: contact. 4.5 Å between heavy atoms is the usual "touches" definition and
+    #: is the same cut-off the pose-comparison panel uses, so the ruler, the
+    #: comparison and the table all speak about the same set of residues.
+    CONTACT_CUTOFF = 4.5
+
+    def _mark_pose_contacts(self) -> None:
+        """Underline the residues the displayed pose touches on the ruler.
+
+        The ruler is the sequence view of the binding site, so the contacts
+        belong on it: read the letters that are lit up and the answer to "what
+        does this pose touch?" is a glance rather than a table.
+        """
+        ruler = getattr(self, "sequence", None)
+        if ruler is None:
+            return
+        if not self.scene.receptor or not self.scene.ligand:
+            ruler.clear_contact_marks()
+            return
+        try:
+            contacts = dashboard.contact_map(
+                self.scene.ligand,
+                self.scene.receptor,
+                cutoff=self.CONTACT_CUTOFF,
+            )
+        except Exception:  # pragma: no cover - a mark must never break a load
+            ruler.clear_contact_marks()
+            return
+        ruler.set_contact_marks({"contact": list(contacts)})
 
     def _reference_atoms(self) -> list:
         """The ligand the displayed pose is compared against, if any.
@@ -2534,9 +3388,19 @@ class DockingWorkbench(QtWidgets.QMainWindow):
             self.table.blockSignals(False)
 
     def _on_table_selection(self) -> None:
-        rows = {index.row() for index in self.table.selectedIndexes()}
-        if rows:
-            self.pose_slider.setValue(min(rows))
+        rows = sorted({index.row() for index in self.table.selectedIndexes()})
+        if not rows:
+            return
+        # Two ctrl-clicked rows *are* the pose-comparison request: that is the
+        # gesture a chemist already has in their fingers, and the panel answers
+        # immediately rather than behind a menu.
+        if len(rows) >= 2:
+            if self._update_comparison(rows[0], rows[1]) is not None:
+                self._log(tr("log.compare", a=rows[0] + 1, b=rows[1] + 1))
+                if self.comparison_dock is not None:
+                    self.comparison_dock.raise_()
+            return
+        self.pose_slider.setValue(min(rows))
 
     def _toggle_playback(self, checked: bool = True) -> None:
         if not self.pose_models:
@@ -3256,6 +4120,8 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         # request so browsing poses does not bring it back.
         self._focus_requested = False
         self.scene.interaction_focus = []
+        if getattr(self, "sequence", None) is not None:
+            self.sequence.clear_contact_marks()
         self.viewport.refresh(upload_receptor=True)
         self._populate_table()
         self._rebuild_tree()
@@ -3303,8 +4169,10 @@ class DockingWorkbench(QtWidgets.QMainWindow):
     def _clear_measurements(self) -> None:
         self._measurements = []
         self.scene.measurements = []
+        self._sync_measurements()
         self.viewport.refresh()
         self._rebuild_tree()
+        self._log(tr("log.measure_cleared"))
 
     def _on_atoms_picked(self, selection) -> None:
         if len(selection) < 2:
@@ -3338,6 +4206,7 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         )
         self.viewport.refresh()
         self._rebuild_tree()
+        self._sync_measurements()
 
     def _set_tool(self, mode: str) -> None:
         target = (
@@ -3443,6 +4312,768 @@ class DockingWorkbench(QtWidgets.QMainWindow):
     def _toggle_ligand(self, checked: bool) -> None:
         self.scene.show_ligand = bool(checked)
         self.viewport.refresh()
+
+    # -- the molecular surface ----------------------------------------------
+    #
+    # The workbench used to answer "what shape does this protein present?" with
+    # a sparse `dots` sampling, which is a picture of atoms, not a surface. The
+    # surface built here is the real thing: a triangulated solvent-accessible
+    # (or solvent-excluded) surface with a property on every vertex, painted
+    # with a documented scale and drawn with a legend. It is built on a worker
+    # thread — a 2 000-atom receptor takes seconds, and the window must not
+    # freeze for them — and its cost is reported rather than hidden.
+
+    def _set_action_checked(self, action, value: bool) -> None:
+        """Set a checkable action's state without firing its slot.
+
+        The initial state of a menu entry is read from the scene, and the scene
+        is not ready to be acted on while the menu is being built (the status
+        bar does not exist yet). Blocking the signal is the standard Qt way to
+        state a fact rather than to issue a command.
+        """
+        if action is None:
+            return
+        previous = action.blockSignals(True)
+        try:
+            action.setChecked(bool(value))
+        finally:
+            action.blockSignals(previous)
+
+    def _build_surface_menu(self, view: QtWidgets.QMenu) -> None:
+        """View ▸ Surface: everything that decides what the surface looks like."""
+        menu = view.addMenu(tr("menu.surface"))
+        self.surface_action = self._act(
+            menu, tr("action.surface_show"), self._toggle_surface, checkable=True
+        )
+        self._set_action_checked(
+            self.surface_action, bool(self.scene.show_surface and self.scene.surface is not None)
+        )
+        self.legend_action = self._act(
+            menu, tr("action.surface_legend"), self._toggle_legend, checkable=True
+        )
+        self._set_action_checked(self.legend_action, bool(self.scene.surface_legend))
+        menu.addSeparator()
+        self._act(menu, tr("action.surface_rebuild"), lambda: self._rebuild_surface())
+
+        modes = menu.addMenu(tr("menu.surface_mode"))
+        self._surface_mode_actions = self._radio_group(
+            modes,
+            (
+                ("sas", tr("action.surface_mode_sas")),
+                ("ses", tr("action.surface_mode_ses")),
+            ),
+            self.surface_settings.mode,
+            self._set_surface_mode,
+        )
+        colours = menu.addMenu(tr("menu.surface_colour"))
+        self._surface_property_actions = self._radio_group(
+            colours,
+            (
+                ("hydrophobicity", tr("action.surface_by_hydrophobicity")),
+                ("electrostatic", tr("action.surface_by_potential")),
+                ("element", tr("action.surface_by_element")),
+            ),
+            self.surface_settings.property,
+            self._set_surface_property,
+        )
+        self._act(menu, tr("action.surface_range"), self._choose_surface_range)
+        self._act(menu, tr("action.surface_opacity"), self._choose_surface_opacity)
+        menu.addSeparator()
+        self.pocket_action = self._act(
+            menu, tr("action.surface_pocket"), self._toggle_pocket_lining, checkable=True
+        )
+        self._set_action_checked(self.pocket_action, bool(self._pocket_only))
+        self.highlight_action = self._act(
+            menu, tr("action.surface_highlight"), self._toggle_pocket_highlight, checkable=True
+        )
+        self._set_action_checked(self.highlight_action, bool(self._highlight_pocket))
+        menu.addSeparator()
+        self._act(menu, tr("action.surface_cut_front"), lambda: self._cut_surface("front"))
+        self._act(menu, tr("action.surface_cut_centre"), lambda: self._cut_surface("centre"))
+        self._act(menu, tr("action.surface_cut_clear"), self._clear_surface_cut)
+        menu.addSeparator()
+        self._act(menu, tr("action.surface_stats"), self._surface_statistics)
+
+    def _radio_group(self, parent, entries, current, slot) -> Dict[str, QtGui.QAction]:
+        """An exclusive set of menu entries; returns ``{value: action}``."""
+        group = QtGui.QActionGroup(parent)
+        group.setExclusive(True)
+        actions: Dict[str, QtGui.QAction] = {}
+        for value, label in entries:
+            action = QtGui.QAction(label, parent)
+            action.setCheckable(True)
+            action.setChecked(value == current)
+            action.setActionGroup(group)
+            action.triggered.connect(lambda _=False, v=value: slot(v))
+            parent.addAction(action)
+            actions[value] = action
+        return actions
+
+    def _surface_atoms(self) -> List:
+        """The atoms a surface is built from: the visible receptor by default."""
+        atoms = (
+            list(self.scene.visible_receptor())
+            if self.scene.show_receptor
+            else list(self.scene.receptor)
+        )
+        return atoms or list(self.scene.receptor)
+
+    def _surface_centre(self):
+        """The point a pocket-limited surface is centred on, or ``None``."""
+        ligand = self.scene.ligand
+        if ligand:
+            return tuple(
+                sum(float(getattr(atom, axis)) for atom in ligand) / len(ligand)
+                for axis in ("x", "y", "z")
+            )
+        if self.scene.box is not None:
+            return tuple(float(value) for value in self.scene.box[0])
+        centre = self.scene.bounds()
+        return tuple((centre[0][axis] + centre[1][axis]) / 2.0 for axis in range(3))
+
+    def _pocket_keys(self, radius: float = 5.0) -> set:
+        """Residue keys of the receptor atoms lining the site."""
+        centre = self._surface_centre()
+        keys = set()
+        if centre is None:
+            return keys
+        limit = radius * radius
+        for atom in self.scene.receptor:
+            dx = float(atom.x) - centre[0]
+            dy = float(atom.y) - centre[1]
+            dz = float(atom.z) - centre[2]
+            if dx * dx + dy * dy + dz * dz <= limit:
+                keys.add(
+                    (
+                        str(getattr(atom, "chain", "") or ""),
+                        int(getattr(atom, "res_id", 0) or 0),
+                        str(getattr(atom, "res_name", "") or ""),
+                    )
+                )
+        return keys
+
+    def _surface_settings(self):
+        """The settings for the next build, from the window's own state."""
+        from . import surface as surface_module
+
+        base = self.surface_settings
+        centre = radius = None
+        if self._pocket_only:
+            centre = self._surface_centre()
+            # A shell wide enough to hold the lining plus a probe: the surface
+            # of a contact is local by construction, so a shell is the answer
+            # and not an approximation of it (odock.sasa.interface_area makes
+            # the same argument for the same reason).
+            radius = float(self._pocket_radius)
+        highlighted = self._pocket_keys() if self._highlight_pocket else None
+        return surface_module.SurfaceSettings(
+            mode=base.mode,
+            spacing=base.spacing,
+            probe=base.probe,
+            property=base.property,
+            hydrophobicity_scale=base.hydrophobicity_scale,
+            value_range=base.value_range,
+            dielectric=base.dielectric,
+            epsilon=base.epsilon,
+            screening=base.screening,
+            centre=centre,
+            radius=radius,
+            bonds=self.scene.receptor_bonds,
+            highlighted_residues=highlighted,
+            max_points=base.max_points,
+            directions=base.directions,
+        )
+
+    def _rebuild_surface(self) -> None:
+        """Build the surface off the main thread and put it on screen.
+
+        Everything that decides the mesh is read here, on the main thread, and
+        handed to the worker as plain data: the worker then touches neither the
+        scene nor any widget, which is what makes the build safe to run while
+        the user keeps orbiting.
+        """
+        from . import surface as surface_module
+
+        atoms = self._surface_atoms()
+        if not atoms:
+            self._log(tr("log.surface_no_receptor"))
+            return
+        try:
+            settings = self._surface_settings()
+        except Exception as exc:  # pragma: no cover - reported to the user
+            self._report_error(str(exc), True)
+            return
+        self._log(
+            tr(
+                "log.surface_building",
+                mode=settings.mode.upper(),
+                atoms=len(atoms),
+            )
+        )
+
+        def work():
+            return surface_module.build_surface(atoms, settings)
+
+        def done(result) -> None:
+            self._on_surface_built(result)
+
+        self._run_background(work, done, label=tr("action.surface_rebuild"))
+
+    def _on_surface_built(self, result) -> None:
+        """Put a finished surface on the scene and report its measured cost."""
+        stats = self.viewport.set_surface(result)
+        self.scene.show_surface = True
+        if getattr(self, "surface_action", None) is not None:
+            self.surface_action.setChecked(True)
+        self.scene.surface_clip = self._surface_clip
+        self.viewport.refresh()
+        if not isinstance(stats, dict) or not stats.get("triangles"):
+            self._log(tr("log.surface_empty"))
+            return
+        self._log(
+            tr(
+                "log.surface_built",
+                mode=str(result.mode).upper(),
+                triangles=int(stats.get("triangles", 0)),
+                area=f"{float(stats.get('area', 0.0)):.0f}",
+                spacing=f"{float(stats.get('spacing', 0.0)):.2f}",
+                seconds=f"{float(stats.get('seconds', 0.0)):.2f}",
+                atoms=int(stats.get("atoms", 0)),
+            )
+        )
+        self._session_changed()
+
+    def _toggle_surface(self, checked: bool) -> None:
+        wanted = bool(checked)
+        if wanted and self.scene.surface is None and self.scene.receptor:
+            # Nothing built yet: "show surface" means "build one".
+            self._rebuild_surface()
+            return
+        self.scene.show_surface = wanted
+        self.viewport.refresh()
+        self._log(tr("log.surface_shown" if wanted else "log.surface_hidden"))
+
+    def _toggle_legend(self, checked: bool) -> None:
+        self.scene.surface_legend = bool(checked)
+        self.viewport.update()
+
+    def _set_surface_mode(self, mode: str) -> None:
+        self.surface_settings.mode = mode
+        self._log(tr("log.surface_mode", mode=str(mode).upper()))
+        if self.scene.receptor:
+            self._rebuild_surface()
+
+    def _set_surface_property(self, name: str) -> None:
+        self.surface_settings.property = name
+        self._log(
+            tr("log.surface_property", property=tr(f"property.{name}"))
+        )
+        if self.scene.receptor:
+            self._rebuild_surface()
+
+    def _choose_surface_range(self) -> None:
+        """Set the colour range of the surface, or return it to automatic."""
+        surface = self.scene.surface
+        low, high = (
+            getattr(surface, "value_range", (0.0, 1.0)) if surface else (0.0, 1.0)
+        )
+        value, ok = QtWidgets.QInputDialog.getText(
+            self,
+            tr("dialog.surface_range"),
+            tr("label.surface_auto") + "\n" + tr("label.surface_min") + " / " + tr("label.surface_max"),
+            text=f"{low:.4g}, {high:.4g}",
+        )
+        if not ok:
+            return
+        text = str(value).strip()
+        if not text or text in ("0", "0,0", "auto"):
+            self.surface_settings.value_range = None
+            self._log(tr("log.surface_range_auto"))
+        else:
+            try:
+                parts = [float(piece) for piece in text.replace(";", ",").split(",")]
+                if len(parts) != 2 or parts[0] >= parts[1]:
+                    raise ValueError
+            except ValueError:
+                self._report_error(
+                    tr("log.surface_range_bad", text=text), True
+                )
+                return
+            self.surface_settings.value_range = (parts[0], parts[1])
+            self._log(
+                tr(
+                    "log.surface_range",
+                    low=f"{parts[0]:.3g}",
+                    high=f"{parts[1]:.3g}",
+                )
+            )
+        if self.scene.receptor:
+            self._rebuild_surface()
+
+    def _choose_surface_opacity(self) -> None:
+        value, ok = QtWidgets.QInputDialog.getDouble(
+            self,
+            tr("dialog.surface_opacity"),
+            tr("label.surface_opacity"),
+            float(self.scene.surface_alpha),
+            0.05,
+            1.0,
+            2,
+        )
+        if not ok:
+            return
+        self._surface_alpha = float(value)
+        self.scene.surface_alpha = float(value)
+        self.viewport.refresh()
+        self._log(tr("log.surface_opacity", value=f"{float(value):.2f}"))
+
+    def _toggle_pocket_lining(self, checked: bool) -> None:
+        wanted = bool(checked)
+        if wanted and not self.scene.ligand and self.scene.box is None:
+            self._report_error(tr("log.no_ligand"), True)
+            return
+        self._pocket_only = wanted
+        if wanted:
+            self._log(
+                tr(
+                    "log.surface_pocket",
+                    atoms=len(self._surface_atoms()),
+                )
+            )
+        else:
+            self._log(tr("log.surface_whole"))
+        if self.scene.receptor:
+            self._rebuild_surface()
+
+    def _toggle_pocket_highlight(self, checked: bool) -> None:
+        """Mark the lining residues on the surface *and* as ball-and-stick.
+
+        The tint alone is hard to read on a busy surface, so the same residues
+        are also emphasised through the interaction-focus machinery the
+        workbench already has: they are drawn as ball-and-stick while the rest
+        of the structure recedes. That is the difference between a picture that
+        says "the pocket is around here" and one that names the residues.
+        """
+        self._highlight_pocket = bool(checked)
+        keys = self._pocket_keys() if self._highlight_pocket else set()
+        if self._highlight_pocket:
+            self._log(tr("log.surface_highlight", n=len(keys)))
+        else:
+            self._log(tr("log.surface_highlight_off"))
+        renderer = self.viewport.renderer
+        if renderer is not None:
+            if keys:
+                indices = [
+                    index
+                    for index, atom in enumerate(self.scene.receptor)
+                    if (
+                        str(getattr(atom, "chain", "") or ""),
+                        int(getattr(atom, "res_id", 0) or 0),
+                        str(getattr(atom, "res_name", "") or ""),
+                    )
+                    in keys
+                ]
+                renderer.set_interaction_focus(indices, [])
+            else:
+                renderer.clear_interaction_focus()
+            self.viewport.dirty_ligand = True
+        if self.scene.receptor and self.scene.surface is not None:
+            self._rebuild_surface()
+
+    def _cut_surface(self, where: str) -> None:
+        """Cut the surface with a world-fixed plane through the binding site.
+
+        The plane's normal is the *current* view direction, frozen at the
+        moment the action runs: unlike the camera-space front clip, two poses of
+        the same protein are then cut identically, which is what makes the two
+        pictures comparable.
+        """
+        centre = self._surface_centre()
+        if centre is None:
+            self._report_error(tr("log.surface_no_receptor"), True)
+            return
+        camera = self.viewport.camera
+        eye = camera.eye()
+        normal = [centre[axis] - eye[axis] for axis in range(3)]
+        length = math.sqrt(sum(component * component for component in normal))
+        if length < 1e-9:  # pragma: no cover - degenerate camera
+            return
+        normal = [component / length for component in normal]
+        offset = 0.0
+        if where == "front" and self.scene.ligand:
+            # Keep the whole ligand: put the plane 0.5 Å in front of its
+            # frontmost atom, so what is removed is the protein wall between the
+            # camera and the site rather than the site itself.
+            projected = [
+                sum(normal[axis] * float(getattr(atom, axis)) for axis in range(3))
+                for atom in self.scene.ligand
+            ]
+            middle = sum(normal[axis] * centre[axis] for axis in range(3))
+            offset = max(0.0, middle - min(projected)) + 0.5
+        distance = -sum(normal[axis] * centre[axis] for axis in range(3)) + offset
+        self._surface_clip = (tuple(normal), float(distance))
+        self.scene.surface_clip = self._surface_clip
+        self.viewport.refresh()
+        self._log(
+            tr(
+                "log.surface_cut",
+                x=f"{centre[0]:.1f}",
+                y=f"{centre[1]:.1f}",
+                z=f"{centre[2]:.1f}",
+            )
+        )
+
+    def _clear_surface_cut(self) -> None:
+        self._surface_clip = None
+        self.scene.surface_clip = None
+        self.viewport.refresh()
+        self._log(tr("log.surface_cut_cleared"))
+
+    def _sync_surface_actions(self) -> None:
+        """Tick the surface radio entries that match the live settings."""
+        for value, action in getattr(self, "_surface_mode_actions", {}).items():
+            action.setChecked(value == self.surface_settings.mode)
+        for value, action in getattr(self, "_surface_property_actions", {}).items():
+            action.setChecked(value == self.surface_settings.property)
+
+    def _surface_statistics(self) -> None:
+        surface = self.scene.surface
+        stats = self.scene.surface_stats()
+        if surface is None or not stats:
+            self._report_error(tr("log.surface_failed"), True)
+            return
+        grid = stats.get("grid") or (0, 0, 0)
+        self._log(
+            tr(
+                "log.surface_stats",
+                mode=str(stats.get("mode", surface.mode)).upper(),
+                vertices=int(stats.get("vertices", surface.vertices_count)),
+                triangles=int(stats.get("triangles", surface.triangles_count)),
+                area=f"{float(stats.get('area', surface.area)):.0f}",
+                spacing=f"{float(stats.get('spacing', surface.spacing)):.2f}",
+                grid="×".join(str(int(size)) for size in grid),
+                probe=f"{float(stats.get('probe', surface.probe)):.1f}",
+                seconds=f"{float(stats.get('seconds', 0.0)):.2f}",
+            )
+        )
+
+    # -- SASA, burial and the interop exports --------------------------------
+
+    def _show_report(self, title: str, text: str, svg: Optional[str] = None) -> None:
+        """A read-only monospace report in a dialog, plus the log line.
+
+        ``svg`` adds a *Save figure…* button: a table of numbers is what a
+        modeller checks, and a figure is what they paste into a report, and the
+        same computation produces both.
+        """
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle(title)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        view = QtWidgets.QPlainTextEdit(text)
+        view.setReadOnly(True)
+        view.setFont(QtGui.QFont("Consolas", 9))
+        layout.addWidget(view)
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Close
+        )
+        if svg:
+            save = buttons.addButton(
+                tr("btn.save_figure"), QtWidgets.QDialogButtonBox.ButtonRole.ActionRole
+            )
+
+            def write_figure() -> None:
+                path, _ = QtWidgets.QFileDialog.getSaveFileName(
+                    dialog, tr("btn.save_figure"), "burial.svg", tr("filter.svg")
+                )
+                if not path:
+                    return
+                Path(path).write_text(svg, encoding="utf-8")
+                self._log(tr("log.figure_saved", name=Path(path).name))
+
+            save.clicked.connect(write_figure)
+        buttons.rejected.connect(dialog.reject)
+        buttons.accepted.connect(dialog.accept)
+        layout.addWidget(buttons)
+        dialog.resize(680, 460)
+        dialog.exec()
+
+    def _sasa_report(self) -> None:
+        """Per-residue SASA and burial of the receptor, plus the ligand's own."""
+        from odock import sasa as sasa_module
+
+        receptor = list(self.scene.receptor)
+        if not receptor:
+            self._log(tr("log.surface_no_receptor"))
+            return
+        ligand = list(self.scene.ligand)
+
+        def work():
+            report = sasa_module.burial(receptor, ligand, reference="unbound")
+            ligand_record = (
+                sasa_module.ligand_buried_contact_area(ligand, receptor)
+                if ligand
+                else None
+            )
+            contact = sasa_module.interface_area(receptor, ligand) if ligand else None
+            return report, ligand_record, contact
+
+        def done(payload) -> None:
+            report, ligand_record, contact = payload
+            lines = [tr("sasa.header"), ""]
+            lines.append(
+                tr(
+                    "sasa.model",
+                    probe=f"{report.probe:.2f}",
+                    points=report.points,
+                )
+            )
+            lines.append(
+                tr(
+                    "sasa.reference.unbound"
+                    if report.reference == "unbound"
+                    else "sasa.reference.free"
+                )
+            )
+            lines.append("")
+            lines.append(
+                tr(
+                    "sasa.total",
+                    total=f"{report.total_area:.1f}",
+                    reference=f"{report.reference_total:.1f}",
+                    buried=f"{report.buried_area:.1f}",
+                    share=f"{100.0 * report.buried_fraction:.1f}%",
+                )
+            )
+            if ligand_record is not None:
+                lines.append(
+                    tr(
+                        "sasa.ligand",
+                        free=f"{ligand_record['free_area']:.1f}",
+                        exposed=f"{ligand_record['complex_area']:.1f}",
+                        buried=f"{ligand_record['buried_area']:.1f}",
+                        share=f"{100.0 * ligand_record['buried_fraction']:.1f}%",
+                    )
+                )
+            if contact is not None:
+                lines.append(
+                    tr(
+                        "sasa.interface",
+                        buried=f"{contact['buried_area']:.1f}",
+                        atoms=int(contact["receptor_atoms_total"]),
+                    )
+                )
+            lines.append("")
+            lines.append(report.table(15))
+            text = "\n".join(lines)
+            self._show_report(tr("dialog.sasa_report"), text)
+            self._log(
+                tr(
+                    "log.sasa_report",
+                    residues=len(report.residues),
+                    buried=f"{report.buried_area:.1f}",
+                    share=f"{100.0 * report.buried_fraction:.1f}%",
+                )
+            )
+
+        self._run_background(work, done, label=tr("action.sasa_report"))
+
+    def _ligand_burial(self) -> None:
+        """How much ligand surface the pocket hides, for the pose on screen."""
+        from odock import sasa as sasa_module
+
+        ligand = list(self.scene.ligand)
+        receptor = list(self.scene.receptor)
+        if not ligand:
+            self._log(tr("log.ligand_burial_none"))
+            return
+        record = sasa_module.ligand_buried_contact_area(ligand, receptor)
+        self._log(
+            tr(
+                "log.ligand_burial",
+                free=f"{record['free_area']:.1f}",
+                exposed=f"{record['complex_area']:.1f}",
+                buried=f"{record['buried_area']:.1f}",
+                share=f"{100.0 * record['buried_fraction']:.1f}%",
+            )
+        )
+
+    def _burial_per_pose(self) -> None:
+        """The buried contact area of every pose: a number per pose, not a feel."""
+        from odock import sasa as sasa_module
+
+        receptor = list(self.scene.receptor)
+        poses = [
+            model.atoms for model in (self.pose_models or []) if getattr(model, "atoms", None)
+        ]
+        if not receptor or not poses:
+            self._log(tr("log.ligand_burial_none"))
+            return
+        affinity = [
+            getattr(model, "affinity", None) for model in (self.pose_models or [])
+        ]
+        records = sasa_module.buried_contact_per_pose(poses, receptor, affinity=affinity)
+        lines = [tr("sasa.poses")]
+        for index, record in enumerate(records):
+            score = record.get("affinity")
+            score_text = "     —" if score is None else f"{float(score):6.2f}"
+            lines.append(
+                f"{index + 1:>4}  {score_text}  {record['buried_area']:8.1f}  "
+                f"{100.0 * record['buried_fraction']:7.1f}"
+            )
+        self._show_report(
+            tr("dialog.burial_per_pose"),
+            "\n".join(lines),
+            svg=sasa_module.pose_burial_svg(
+                records, title=tr("dialog.burial_per_pose")
+            ),
+        )
+        best = max(records, key=lambda item: item["buried_area"])
+        self._log(
+            tr(
+                "log.burial_per_pose",
+                n=len(records),
+                best=f"pose {int(best['pose']) + 1} {best['buried_area']:.1f} Å²",
+            )
+        )
+
+    def _interop_state(self, *, property_name: str = "") -> "object":
+        """The live scene as an :class:`odock.interop.SceneState`."""
+        from odock import interop as interop_module
+
+        surface = self.scene.surface
+        values = None
+        if surface is not None and getattr(surface, "values", None) is not None:
+            # Per *atom* values, not per vertex: the B-factor column of a PDB is
+            # per atom, and mapping a vertex property back onto atoms is what
+            # makes `spectrum b` in PyMOL reproduce the surface colours.
+            values = self._surface_values_per_atom(surface)
+        range_ = getattr(surface, "value_range", None)
+        return interop_module.SceneState(
+            receptor=list(self.scene.receptor),
+            ligand=list(self.scene.ligand),
+            receptor_bonds=self.scene.receptor_bonds,
+            ligand_bonds=self.scene.ligand_bonds,
+            interactions=self.scene.interactions,
+            measurements=self.scene.measurements,
+            box=self.scene.box,
+            style_protein=self.scene.style_protein,
+            style_ligand=self.scene.style_ligand,
+            show_receptor=self.scene.show_receptor,
+            show_ligand=self.scene.show_ligand,
+            receptor_scale=self.scene.receptor_scale,
+            ball_scale=self.scene.ball_scale,
+            receptor_values=values,
+            property_name=property_name or str(getattr(surface, "property_name", "")),
+            property_range=tuple(range_) if range_ else None,
+            show_surface=bool(self.scene.show_surface and surface is not None),
+            surface_mode=str(getattr(surface, "mode", self.surface_settings.mode)),
+            surface_property=str(getattr(surface, "property_name", self.surface_settings.property)),
+            surface_alpha=float(self.scene.surface_alpha),
+            surface=surface,
+            camera={
+                "target": tuple(self.viewport.camera.target),
+                "distance": float(self.viewport.camera.distance),
+                "azimuth": float(self.viewport.camera.azimuth),
+                "elevation": float(self.viewport.camera.elevation),
+                "fov": float(self.viewport.camera.fov),
+            },
+            title=tr("app.title"),
+        )
+
+    def _surface_values_per_atom(self, surface):
+        """A per-receptor-atom property array from a per-vertex surface.
+
+        A vertex takes the value of the atom it belongs to, and an atom takes
+        the mean over its own vertices — so the atom-level number the exported
+        PDB carries is the same property the surface is painted with, aggregated
+        the only way that is defined. Atoms the surface does not cover (a
+        pocket-lining build leaves most of the protein out) stay at the neutral
+        middle of the range rather than at zero, which would read as an extreme
+        value in a diverging palette.
+        """
+        try:
+            import numpy as np
+
+            values = np.asarray(surface.values, dtype=float).reshape(-1)
+            index = np.asarray(surface.atom_index, dtype=np.int64).reshape(-1)
+            receptor = list(self.scene.receptor)
+            if values.size == 0 or index.size != values.size:
+                return None
+            low, high = getattr(surface, "value_range", (0.0, 1.0))
+            neutral = 0.5 * (float(low) + float(high))
+            out = np.full(len(receptor), neutral, dtype=float)
+            # ``atom_index`` indexes the *selected* atoms, so a pocket-lining
+            # build has to be mapped back through ``selected`` before it means
+            # anything in the scene. Getting this wrong paints the wrong atoms
+            # with the right numbers, which is the one error a picture cannot
+            # show you.
+            source = index.copy()
+            selected = getattr(surface, "selected", None)
+            if selected is not None and len(selected):
+                table = np.asarray(selected, dtype=np.int64)
+                safe = np.clip(source, 0, max(0, table.size - 1))
+                source = table[safe]
+            valid = (index >= 0) & (source >= 0) & (source < len(receptor))
+            if not valid.any():
+                return out.tolist()
+            sums = np.bincount(
+                source[valid], weights=values[valid], minlength=len(receptor)
+            )
+            counts = np.bincount(source[valid], minlength=len(receptor))
+            covered = counts > 0
+            out[covered] = sums[covered] / counts[covered]
+            return out.tolist()
+        except Exception:  # pragma: no cover - a duck-typed surface
+            return None
+
+    def _export_scene(self, what: str) -> None:
+        """File ▸ Export ▸ PyMOL / ChimeraX / PDB / OBJ: the whole scene at once.
+
+        A `.pml` on its own is useless if the coordinates it names are not
+        beside it, so the three interop exports write a *bundle*: the two
+        structures, the pose, the script and (when there is one) the surface
+        mesh. The file dialog picks a directory because that is what the user
+        then hands to a collaborator.
+        """
+        from odock import interop as interop_module
+
+        if not self.scene.has_content():
+            self._report_error(tr("log.no_receptor"), True)
+            return
+        if what == "surface" and self.scene.surface is None:
+            self._report_error(tr("log.surface_failed"), True)
+            return
+        directory = QtWidgets.QFileDialog.getExistingDirectory(
+            self, tr(f"action.export_{'pose_pdb' if what == 'pose' else what}"), ""
+        )
+        if not directory:
+            return
+        try:
+            state = self._interop_state()
+            if what == "surface":
+                path = Path(directory) / "odock_surface.obj"
+                path.write_text(
+                    interop_module.surface_obj_text(self.scene.surface), encoding="utf-8"
+                )
+                self._write_or_raise(str(path), "surface_obj")
+                return
+            manifest = interop_module.export_bundle(directory, state)
+            if what == "pymol":
+                self._write_or_raise(str(manifest["pymol"]), "pymol")
+            elif what == "chimerax":
+                self._write_or_raise(str(manifest["chimerax"]), "chimerax")
+            else:
+                self._write_or_raise(str(manifest["pose"]), "pose_pdb")
+            self._log(
+                tr(
+                    "log.export_bundle",
+                    n=len(manifest["files"]),
+                    what=tr(f"action.export_{'pose_pdb' if what == 'pose' else what}"),
+                    name=Path(directory).name,
+                )
+            )
+        except Exception as exc:  # pragma: no cover - reported to the user
+            self._report_error(str(exc), True)
 
     # -- exports ------------------------------------------------------------
 
@@ -3666,13 +5297,24 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         )
         worker = _DockWorker(settings)
         worker.ticked.connect(self._log)
+        worker.phase.connect(self._on_dock_phase)
         worker.finished_ok.connect(self._on_docking_done)
         worker.failed.connect(self._on_docking_failed)
         worker.finished.connect(lambda: self._set_running(False))
         self._worker = worker
         self._set_running(True)
         self.progress.setRange(0, 0)
+        if self.run_dashboard is not None:
+            self.run_dashboard.begin_run(
+                scoring=settings["scoring"],
+                exhaustiveness=settings["exhaustiveness"],
+                seed=settings["seed"],
+            )
         worker.start()
+
+    def _on_dock_phase(self, name: str, elapsed: float) -> None:
+        if self.run_dashboard is not None:
+            self.run_dashboard.set_phase(name, elapsed)
 
     def _set_running(self, running: bool) -> None:
         self.btn_run.setEnabled(not running)
@@ -3721,11 +5363,32 @@ class DockingWorkbench(QtWidgets.QMainWindow):
                 n=len(result.poses),
             )
         )
+        self._record_run(result)
         self.load_poses(result.to_pdbqt())
         self._log(tr("log.contacts_hint"))
 
+    def _record_run(self, result) -> dashboard.RunTrace:
+        """Put a finished run on the dashboard, with the real pose energies."""
+        worker = self._worker
+        trace = getattr(worker, "trace", None)
+        if trace is None:  # pragma: no cover - only if the worker died oddly
+            trace = dashboard.RunTrace(
+                energies=[float(pose.affinity) for pose in result.poses],
+                elapsed=float(getattr(result, "elapsed", 0.0) or 0.0),
+                grid_points=int(result.grid_points or 0),
+                grid_mb=int(result.grid_mb or 0),
+                num_tors=float(result.num_tors or 0.0),
+            )
+        self.run_history.add(trace)
+        if self.run_dashboard is not None:
+            self.run_dashboard.history = self.run_history
+            self.run_dashboard.finish_run(trace)
+        return trace
+
     def _on_docking_failed(self, message: str) -> None:
         self._log(tr("log.docking_failed", message=message.splitlines()[0]))
+        if self.run_dashboard is not None:
+            self.run_dashboard.fail_run(tr("dashboard.status.failed"))
         self._report_error(message, True)
 
     def _score_current(self) -> None:
@@ -3966,6 +5629,477 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         if block is not None:
             ruler.ensureVisible(block.index)
 
+    # -- the command palette ------------------------------------------------
+
+    def open_palette(self) -> "dashboard.CommandPalette":
+        """Show Ctrl+K. Always rebuilt from the menu bar, so never stale."""
+        palette = dashboard.CommandPalette(self, self)
+        palette.refresh()
+        palette.exec()
+        return palette
+
+    #: Kept as a method alias so a menu action (which passes ``checked``) can be
+    #: connected to it directly without the argument mattering.
+    def _open_palette(self, _checked: bool = False) -> None:
+        self.open_palette()
+
+    # -- the 3-D read-out and the clipboard ---------------------------------
+
+    def _toggle_inspect(self, checked: bool) -> None:
+        """View ▸ Inspect atom: the cursor's atom card in the 3-D view."""
+        self.viewport.set_hover_visible(bool(checked))
+        if not checked:
+            self.lbl_status.setText(tr("status.ready"))
+
+    def _on_atom_hovered(self, hit) -> None:
+        """The status bar follows the cursor's atom."""
+        if not hit:
+            return
+        kind, index = hit
+        atoms = self.scene.ligand if kind == "ligand" else self.scene.receptor
+        try:
+            atom = atoms[int(index)]
+        except (IndexError, TypeError):
+            return
+        self.lbl_status.setText(
+            dashboard.atom_readout_text(atom, kind=kind, index=int(index))
+        )
+
+    def _copy_view(self) -> None:
+        """Copy the 3-D view — including its HUD — to the clipboard."""
+        try:
+            pixmap = self.viewport.grab()
+        except Exception as exc:  # pragma: no cover - reported to the user
+            self._report_error(str(exc), True)
+            return
+        if pixmap.isNull() or not dashboard.copy_pixmap_to_clipboard(pixmap):
+            self._report_error(tr("log.copy_view_failed"), True)
+            return
+        self._log(tr("log.copy_view"))
+
+    # -- pose comparison ----------------------------------------------------
+
+    def compare_selected(self) -> Optional[dashboard.PoseComparison]:
+        """Compare the two poses the user ctrl-clicked in the results table."""
+        rows = sorted({index.row() for index in self.table.selectedIndexes()})
+        if len(rows) < 2:
+            return None
+        return self._update_comparison(rows[0], rows[1])
+
+    def _compare_selected(self, _checked: bool = False) -> None:
+        comparison = self.compare_selected()
+        if comparison is None:
+            if len(self.pose_models) < 2:
+                self._report_error(tr("log.compare_unavailable"), True)
+            else:
+                self._log(tr("log.compare_unavailable"))
+            return
+        if self.comparison_dock is not None:
+            self.comparison_dock.raise_()
+
+    def _copy_comparison(self) -> None:
+        """Put the two-pose report on the clipboard as plain text."""
+        comparison = getattr(self, "_comparison", None)
+        if comparison is None:
+            self._log(tr("log.compare_unavailable"))
+            return
+        dashboard.copy_text_to_clipboard(comparison.as_text())
+        self._log(tr("log.compare_copied"))
+
+    def _update_comparison(self, row_a: int, row_b: int) -> Optional[dashboard.PoseComparison]:
+        """Compute and show the two-pose panel for rows ``row_a``/``row_b``."""
+        panel = getattr(self, "comparison", None)
+        if (
+            panel is None
+            or len(self.pose_models) < 2
+            or not self.scene.receptor
+            or row_a == row_b
+        ):
+            return None
+        first, second = self.pose_models[row_a], self.pose_models[row_b]
+        try:
+            comparison = dashboard.compare_poses(
+                first.atoms,
+                second.atoms,
+                self.scene.receptor,
+                index_a=row_a,
+                index_b=row_b,
+                affinity_a=first.affinity,
+                affinity_b=second.affinity,
+            )
+        except Exception as exc:
+            panel.clear()
+            self._log(tr("log.compare_failed", message=str(exc).splitlines()[0]))
+            return None
+        self._comparison = comparison
+        self._comparison_rows = (int(row_a), int(row_b))
+        panel.set_comparison(comparison)
+        self._mark_comparison_contacts(comparison)
+        return comparison
+
+    def _mark_comparison_contacts(self, comparison: dashboard.PoseComparison) -> None:
+        """The ruler shows *which* residues the two poses disagree about.
+
+        Green where both poses touch the residue, red where only one of them
+        does — the same split the fingerprint table lists, but readable against
+        the sequence it belongs to. The diff already holds both contact maps, so
+        nothing is recomputed here.
+        """
+        ruler = getattr(self, "sequence", None)
+        if ruler is None:
+            return
+        ruler.set_contact_marks(
+            {
+                "shared": [key for key, _a, _b in comparison.diff.shared],
+                "unique": [contact.key for contact in comparison.diff.only_a]
+                + [contact.key for contact in comparison.diff.only_b],
+            }
+        )
+
+    # -- measurements -------------------------------------------------------
+
+    def _sync_measurements(self) -> None:
+        history = getattr(self, "measure_history", None)
+        if history is not None:
+            history.set_measurements(self._measurements)
+
+    def _copy_measurements(self) -> None:
+        if not self._measurements:
+            self._log(tr("measure.empty"))
+            return
+        history = self.measure_history
+        dashboard.copy_text_to_clipboard(history.as_text())
+        self._log(tr("log.measure_copied", n=len(self._measurements)))
+
+    # -- recent files -------------------------------------------------------
+
+    def _note_recent(self, path) -> None:
+        remembered = self._remember_path(path)
+        if remembered:
+            self.recent.add(remembered)
+        self._rebuild_recent_menu()
+        self._session_changed()
+
+    def _rebuild_recent_menu(self) -> None:
+        """File ▸ Recent files, rebuilt from the list every time it opens."""
+        menu = getattr(self, "recent_menu", None)
+        if menu is None:
+            return
+        menu.clear()
+        paths = self.recent.existing()
+        if not paths:
+            empty = QtGui.QAction(tr("action.recent_empty"), menu)
+            empty.setEnabled(False)
+            menu.addAction(empty)
+            return
+        for path in paths:
+            action = QtGui.QAction(Path(path).name, menu)
+            action.setStatusTip(path)
+            action.triggered.connect(lambda _=False, p=path: self.open_recent(p))
+            menu.addAction(action)
+        menu.addSeparator()
+        self._act(menu, tr("action.recent_clear"), self._clear_recent)
+
+    def _clear_recent(self) -> None:
+        self.recent.clear()
+        self._rebuild_recent_menu()
+        self._session_changed()
+
+    def open_recent(self, path) -> bool:
+        """Load a recent file, routing it by what the file *is*, not its name."""
+        target = Path(path)
+        if not target.is_file():
+            self.recent.drop(str(target))
+            self._rebuild_recent_menu()
+            self._log(tr("log.recent_missing", name=target.name))
+            return False
+        return self.open_structure(target)
+
+    # -- drag and drop ------------------------------------------------------
+
+    def _dropped_paths(self, event) -> List[str]:
+        mime = event.mimeData()
+        if not mime.hasUrls():
+            return []
+        paths = []
+        for url in mime.urls():
+            if url.isLocalFile():
+                paths.append(url.toLocalFile())
+        return [path for path in paths if path]
+
+    def dragEnterEvent(self, event) -> None:  # noqa: N802
+        if self._dropped_paths(event):
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dragMoveEvent(self, event) -> None:  # noqa: N802
+        if self._dropped_paths(event):
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dropEvent(self, event) -> None:  # noqa: N802
+        paths = self._dropped_paths(event)
+        if not paths:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        for path in paths:
+            self.open_structure(path)
+
+    def open_structure(self, path) -> bool:
+        """Load one structure file, choosing the loader from its contents.
+
+        The viewer draws receptors, ligands and poses, and the three loaders are
+        different, so a dropped file is routed by what it *says* it is
+        (:func:`odock.gui.dashboard.classify_structure`) — a ``MODEL`` record or
+        a ``VINA RESULT`` remark means poses, a ``ROOT`` block means a flexible
+        ligand, anything else is a receptor. Nothing is guessed from the suffix.
+        """
+        target = Path(path)
+        try:
+            text = target.read_text(encoding="utf-8", errors="replace")
+        except Exception as exc:
+            self._report_error(tr("log.drop_unsupported", name=target.name), True)
+            self._log(tr("log.error", message=str(exc)))
+            return False
+        kind = dashboard.classify_structure(text)
+        if kind is None:
+            self._report_error(tr("log.drop_unsupported", name=target.name), True)
+            return False
+        loader = {
+            "poses": self.load_poses,
+            "ligand": self.load_ligand,
+            "receptor": self.load_receptor,
+        }[kind]
+        ok = bool(loader(target))
+        self._log(tr("log.dropped", what=tr(f"drop.{kind}"), name=target.name))
+        return ok
+
+    # -- the session --------------------------------------------------------
+
+    def _install_autosave(self) -> None:
+        """A debounced writer: any logged action schedules one save."""
+        if self.session is None:
+            return
+        timer = QtCore.QTimer(self)
+        timer.setSingleShot(True)
+        timer.setInterval(1500)
+        timer.timeout.connect(self.save_session)
+        self._autosave_timer = timer
+
+    def _session_changed(self) -> None:
+        """Something worth remembering happened; save soon (never immediately).
+
+        The debounce matters: a docking run logs dozens of lines in a burst, and
+        rewriting the session file for each of them would be pointless.
+        """
+        timer = self._autosave_timer
+        if timer is None:
+            return
+        self._autosave_pending = True
+        timer.start()
+
+    def _session_payload(self) -> dict:
+        """Everything the next launch needs to put this session back.
+
+        A window with nothing loaded keeps the *previous* session's structures:
+        restoring is an offer, and a launch that is closed again without
+        touching anything must not destroy the very session it offered (while
+        the appearance and engine preferences it did change are still saved).
+        """
+        box = self._current_box()
+        docks = {
+            name: bool(getattr(self, name) is not None and not getattr(self, name).isHidden())
+            for name in (
+                "workspace_dock",
+                "inspector_dock",
+                "bottom_dock",
+                "dashboard_dock",
+                "comparison_dock",
+                "selection_dock",
+            )
+        }
+        payload = {
+            "language": i18n.current_language(),
+            "theme": self.color_theme.name,
+            "density": self.density,
+            "layout": self._preset,
+            "receptor": self._pending.get("receptor"),
+            "ligand": self._pending.get("ligand"),
+            "poses": self._pending.get("poses"),
+            "box": (
+                {
+                    "center": list(box.center),
+                    "size": list(box.size),
+                    "spacing": float(box.spacing),
+                }
+                if box is not None
+                else None
+            ),
+            "engine": {
+                "scoring": self.engine.currentText(),
+                "search": self.search.currentIndex(),
+                "exhaustiveness": self.exhaustiveness.value(),
+                "num_poses": self.poses.value(),
+                "seed": self.seed.value(),
+                "energy_range": self.energy_range.value(),
+                "islands": self.islands.value(),
+                "population": self.population.value(),
+                "generations": self.generations.value(),
+                "use_grid": self.use_grid.isChecked(),
+                "threads": self.threads.value(),
+            },
+            "selection": [list(item) for item in self.sequence.selected_keys()],
+            "pose_index": self.pose_slider.value() if self.pose_models else 0,
+            "history": self.run_history.to_list(),
+            "measurements": [dict(item) for item in self._measurements],
+            "docks": docks,
+            "splitters": {
+                "central": list(self.central_splitter.sizes()),
+                "pose": list(self.pose_splitter.sizes()),
+            },
+        }
+        if self.session is not None and not self.scene.has_content():
+            previous = self.session.payload
+            if previous is None:
+                # A store that was never opened (a window built straight from a
+                # path) still has a file worth preserving.
+                previous = self.session.load()
+            previous = previous or {}
+            for key in ("receptor", "ligand", "poses"):
+                if not payload.get(key):
+                    payload[key] = previous.get(key)
+            if payload["box"] is None:
+                payload["box"] = previous.get("box")
+        return payload
+
+    def save_session(self) -> bool:
+        """Write the session file now (and only if persistence is on)."""
+        if self.session is None:
+            return False
+        timer = self._autosave_timer
+        if timer is not None:
+            timer.stop()
+        self._autosave_pending = False
+        return bool(self.session.save(self._session_payload()))
+
+    def restore_session(self, payload: Optional[dict] = None) -> bool:
+        """Put a saved session back, without touching anything it did not save.
+
+        Called by File ▸ Restore session and by the launch offer. Every field is
+        optional: a session written by an older build still restores whatever it
+        does carry.
+        """
+        data = payload if payload is not None else (
+            self.session.load() if self.session is not None else None
+        )
+        if not isinstance(data, dict):
+            self._log(tr("log.session_none"))
+            return False
+        language = data.get("language")
+        if isinstance(language, str) and language in i18n.LANGUAGES:
+            if language != i18n.current_language():
+                self.set_language(language)
+        self.color_theme = dashboard.theme_named(data.get("theme", self.color_theme.name))
+        self.density = str(data.get("density", self.density))
+        self._apply_style()
+        self._sync_appearance_actions()
+
+        for key, loader in (
+            ("receptor", self.load_receptor),
+            ("ligand", self.load_ligand),
+            ("poses", self.load_poses),
+        ):
+            path = data.get(key)
+            if path and Path(str(path)).is_file():
+                loader(path)
+
+        box = data.get("box")
+        if isinstance(box, dict) and box.get("center"):
+            self._set_box(
+                box["center"], box.get("size", (20.0, 20.0, 20.0)), box.get("spacing", 0.375)
+            )
+        engine = data.get("engine") or {}
+        if engine.get("scoring"):
+            self.engine.setCurrentText(str(engine["scoring"]))
+        for widget, field in (
+            (self.exhaustiveness, "exhaustiveness"),
+            (self.poses, "num_poses"),
+            (self.seed, "seed"),
+            (self.energy_range, "energy_range"),
+            (self.islands, "islands"),
+            (self.population, "population"),
+            (self.generations, "generations"),
+            (self.threads, "threads"),
+        ):
+            if engine.get(field) is not None:
+                widget.setValue(int(engine[field]))
+        if engine.get("search") is not None:
+            self.search.setCurrentIndex(int(engine["search"]))
+        if engine.get("use_grid") is not None:
+            self.use_grid.setChecked(bool(engine["use_grid"]))
+        keys = data.get("selection") or []
+        if keys:
+            self.sequence.select_keys([tuple(item) for item in keys])
+        history = data.get("history") or []
+        if history:
+            self.run_history = dashboard.SessionHistory.from_list(history)
+            if self.run_dashboard is not None:
+                self.run_dashboard.history = self.run_history
+                self.run_dashboard.reset(clear_history=False)
+        measurements = data.get("measurements") or []
+        if measurements:
+            self._measurements = [dict(item) for item in measurements]
+            self._sync_measurements()
+        docks = data.get("docks") or {}
+        for name, visible in docks.items():
+            dock = getattr(self, name, None)
+            if dock is not None:
+                dock.setVisible(bool(visible))
+        splitters = data.get("splitters") or {}
+        if splitters.get("central"):
+            self.central_splitter.setSizes([int(v) for v in splitters["central"]])
+        if splitters.get("pose"):
+            self.pose_splitter.setSizes([int(v) for v in splitters["pose"]])
+        preset = data.get("layout")
+        if isinstance(preset, str) and preset in dashboard.LAYOUT_PRESETS:
+            self._preset = preset
+            self._sync_appearance_actions()
+        name = None
+        if self.session is not None:
+            name = self.session.path.name
+        self._log(tr("log.session_restored", name=name or "session.json"))
+        return True
+
+    def session_offer(self) -> Optional[str]:
+        """A one-line description of the restorable session, or ``None``."""
+        if self.session is None:
+            return None
+        payload = self.session.payload
+        if not isinstance(payload, dict):
+            return None
+
+        def shown(key: str) -> str:
+            value = payload.get(key)
+            if not value:
+                return tr("dialog.restore_session.none")
+            return Path(str(value)).name
+
+        return tr(
+            "dialog.restore_session.detail",
+            receptor=shown("receptor"),
+            ligand=shown("ligand"),
+            poses=shown("poses"),
+        )
+
+    def clear_session(self) -> None:
+        """Forget the saved session (File ▸ Restore session's sibling)."""
+        if self.session is not None:
+            self.session.clear()
+        self._log(tr("log.session_cleared"))
+
     # -- misc ---------------------------------------------------------------
 
     def resizeEvent(self, event) -> None:  # noqa: N802
@@ -3976,6 +6110,13 @@ class DockingWorkbench(QtWidgets.QMainWindow):
             strip.move(12, max(12, self.viewport.height() - strip.height() - 12))
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        # The session is written once, here, so the dock layout and the pose the
+        # user was looking at are what the next launch offers.
+        timer = self._autosave_timer
+        if timer is not None:
+            timer.stop()
+        if self.session is not None:
+            self.save_session()
         for worker in (self._worker, self._background):
             if worker is not None and worker.isRunning():
                 cancel = getattr(worker, "cancel", None)
@@ -4023,6 +6164,13 @@ def launch_gui(
     Returns the exit code of the Qt event loop, which is 0 when the window is
     closed normally: bare `odock` therefore exits successfully on a plain close.
 
+    This is where the **session** lives: the store is opened, the last session is
+    offered (File ▸ Restore session, and a question when the platform can ask
+    one), and the session is written when the window closes. Constructing a
+    ``DockingWorkbench`` directly — which is what the tests and the simulation
+    harness do — leaves persistence off entirely, so nothing is ever written to a
+    user's session behind their back.
+
     Set ``ODOCK_GUI_AUTOQUIT_MS`` to close the window automatically after that
     many milliseconds. It exists so that the launch path can be exercised
     without a human, and is the only behaviour it changes.
@@ -4030,8 +6178,32 @@ def launch_gui(
     _quiet_qt_messages()
     _configure_surface_format()
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv[:1])
-    window = DockingWorkbench(receptor=receptor, ligand=ligand, poses=poses)
+    store = dashboard.SessionStore.default()
+    payload = store.load()
+    window = DockingWorkbench(
+        receptor=receptor, ligand=ligand, poses=poses, session=store
+    )
     window.show()
+    if payload and not any((receptor, ligand, poses)):
+        detail = window.session_offer()
+        if detail:
+            window._log(
+                tr("dialog.restore_session.text", detail=detail).replace("\n\n", " — ")
+            )
+            # A modal question needs somebody who can answer it: an offscreen
+            # (test/CI) Qt platform cannot, so the offer stays in the status bar
+            # and in File ▸ Restore session instead of blocking the launch.
+            if (
+                app.platformName() != "offscreen"
+                and not os.environ.get("ODOCK_NO_RESTORE_PROMPT")
+            ):
+                answer = QtWidgets.QMessageBox.question(
+                    window,
+                    tr("dialog.restore_session"),
+                    tr("dialog.restore_session.text", detail=detail),
+                )
+                if answer == QtWidgets.QMessageBox.StandardButton.Yes:
+                    window.restore_session(payload)
     autoquit = os.environ.get("ODOCK_GUI_AUTOQUIT_MS")
     if autoquit:
         try:

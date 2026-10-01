@@ -496,10 +496,10 @@ odock score -r receptor.pdbqt -l ligand.pdbqt
 
 For the prepared 3PTB ligand at its crystallographic position:
 ```text
-affinity          :     -5.806 kcal/mol
-  inter           :     -6.146
+affinity          :     -7.659 kcal/mol
+  inter           :     -8.106
   intra           :     -0.044
-  conf-independent:      0.339
+  conf-independent:      0.448
   unbound         :     -0.044
 ```
 
@@ -563,9 +563,9 @@ error: the GUI needs PyQt6 and ModernGL (<...>).
 ```
 
 The GUI is a viewer *and* a driver: it loads a receptor, a ligand and optionally
-a pose file, lets you drag the search box in 3-D, and runs the same Rust kernel
-the CLI and the Python API use. Everything in it is optional — the CLI and the
-Python API never import it.
+a pose file, shows the search box in 3-D (edited from the Grid panel, not by
+dragging it), and runs the same Rust kernel the CLI and the Python API use.
+Everything in it is optional — the CLI and the Python API never import it.
 
 **Mouse and keyboard**
 
@@ -573,10 +573,20 @@ Python API never import it.
 |---|---|
 | left drag | orbit the camera |
 | right drag | pan |
-| **shift** + left drag | move the search box in the plane of the screen |
 | wheel | zoom |
+| left click on an atom | select its residue (shift/ctrl adds) |
+| hover an atom | the read-out card, bottom right, names it |
+| double click | centre the camera on that residue |
 | pose slider / table row | show that mode |
-| `Frame all` / `Frame ligand` | re-centre the camera |
+| **ctrl** + click a second table row | compare the two poses (see 5.5) |
+| `Ctrl+K` | command palette |
+| `Ctrl+Shift+C` | copy the 3-D view to the clipboard |
+| `Ctrl+Shift+R` | restore the saved session |
+| `Home` | reset the view |
+
+The search box is edited from the **Grid** tab (centre, size, spacing) and the
+Grid menu; a drag in the 3-D view orbits or pans and never moves the box, so a
+mis-aimed drag can never change what is being docked.
 
 **Rendering note.** The viewport renders with a ModernGL context that it owns
 and blits the image into the widget, rather than sharing Qt's GL context. That
@@ -593,151 +603,135 @@ plus its ligand renders in a few milliseconds.
 If OpenGL 3.3 is unavailable the 3-D area shows an explanatory message and the
 rest of the workbench (loading, scoring, docking, the pose table) keeps working.
 
-### 5.5 Pocket detection, filters and clustering
+### 5.5 The instrument panels
 
-Four subcommands answer questions that come up before and after a docking run.
-All of them accept `--json-out FILE` where a machine-readable result makes sense.
+The panels below are what turn the window from a viewer into something you can
+read a run from. Everything here is available from the menus; nothing needs a
+config file or a hidden gesture.
 
-**`odock pocket` — blind cavity detection.** No ligand and no prior knowledge of
-the site are needed: the receptor is rasterised, a rolling probe marks the space
-a water-sized sphere cannot occupy, and the surviving buried regions are grouped
-into cavities and ranked.
+#### The run monitor
 
-```bash
-odock pocket -r receptor.pdbqt --spacing 1.0 --min-volume 100 --max 10
-odock pocket -r receptor.pdbqt --json-out pockets.json
-```
+`Docking ▸ Start` (F5) fills the **Run monitor**, docked to the right of the
+pose table. It shows:
 
-```text
-#  center (x, y, z)              volume/Å³  score  residues
--  ----------------------------  ---------  -----  ---------------------------
-1  (   17.31,    0.58,   27.83)  403.0      0.78   LEU123 A, VAL235 A, ILE238 A
-2  (   -0.37,   18.27,   19.16)  192.0      0.73   GLN192 A, SER195 A, SER214 A
-```
+* the **phase readout** — `Grid › Search › Refine › Done` — with a tick on the
+  stages that are finished and the length each one actually took. The running
+  stage counts up as it goes; a finished stage keeps its measured length. A
+  stage's length is always the *difference* between two clock marks, never a
+  mark itself, so a number can never sit under the wrong label;
+* a **live elapsed clock**, the engine and exhaustiveness in use, the number of
+  reported poses and the grid size (points and MB);
+* the **best affinity of the session**, with the run number it came from;
+* the **energy trace**: affinity against pose, one point per reported pose, the
+  newest run bright, earlier runs dimmed for comparison, and the best-so-far as
+  a dashed rule.
 
-`--spacing` is the probe grid step (smaller is slower and finer), `--min-volume`
-discards small cavities, `--probe` sets the probe radius (1.4 Å is water) and
-`--max` caps the list. The score prefers cavities that are large *and* genuinely
-enclosed; it is a shortlisting heuristic, not a binding-affinity prediction. The
-residues column names the residues within 5 Å of the cavity centre, so a pocket
-can be recognised at a glance. In the workbench the same search fills the pocket
-dialog, and one click aims the search box at the chosen cavity.
+**What the trace is, exactly.** The kernel returns its refined pose energies
+*once, at the end of a run* (`Docking::run` holds its state for the whole
+search), so there is no per-iteration energy to plot and the panel does not
+invent one. The points you see are the real reported affinities, drawn the
+moment each run returns; the phase chips, the clock and the status line are
+genuinely live while the search runs. The panel says so on screen under the
+plot, and `python/odock/gui/dashboard.py` records the honest route to a live
+convergence curve (a progress callback out of the Rust search) as a TODO.
 
-**`odock filter` — library pre-filters.** One report for as many files as you
-like, mixing formats freely:
+A cancelled run is still recorded, labelled as cancelled, and its partial pose
+list is drawn.
 
-```bash
-odock filter -i library.sdf -i more.smi --json-out filters.json
-```
+#### Comparing two poses
 
-```text
-name          MW     LogP  HBD  HBA  RotB  tPSA  Lipinski  Veber  PAINS  verdict
-------------  -----  ----  ---  ---  ----  ----  --------  -----  -----  -------
-benzoic acid  122.1  1.38  1    1    1     37.3  pass      pass   pass   PASS
-```
+**Ctrl-click a second row** in the results table. The **Pose comparison** panel
+opens beside the Inspector with the answer to "which of these two should I
+believe?":
 
-The table gives the descriptors each rule uses (MW, LogP, HBD, HBA, RotB, tPSA)
-and the verdict of Lipinski, Veber and PAINS; the rule breaches are listed under
-the table, and the JSON form keeps the per-filter detail. Only descriptors are
-computed — no conformers are generated — so a large SDF is triaged quickly.
+* **Symmetric-aware RMSD** — `fitted` (after optimal superposition, the number
+  that answers "same binding mode or not?") and `in place` (no superposition,
+  the crystallographic figure of merit). Symmetry-equivalent atoms of the same
+  element are allowed to stand in for one another, so a benzene flipped by one
+  carbon is not reported as a 2.8 Å error.
+* **Affinity difference** — the two affinities and their difference, with a
+  same/different binding-mode verdict (≤ 2 Å fitted *and* mostly the same
+  contacts).
+* **Contact fingerprint** — every receptor residue within 4.5 Å of the ligand,
+  split into *both*, *only the first* and *only the second*, each with the
+  closest atom pair and its distance.
 
-**`odock cluster` — symmetry-aware RMSD clustering.** Poses that landed in the
-same place are one binding mode, however many of them the search reported:
+The same split appears on the **sequence ruler** under the 3-D view: green
+where both poses touch a residue, red where only one does. Outside a comparison
+the ruler marks the displayed pose's contacts in amber, so "what does this pose
+touch?" is a glance rather than a table. `Analysis ▸ Compare poses` repeats the
+comparison for the current selection, and **Copy report** puts the whole thing
+on the clipboard as plain text.
 
-```bash
-odock cluster -p poses.pdbqt --cutoff 2.0
-odock cluster -p poses.pdbqt -l ligand.pdbqt      # + RMSD to a reference
-```
+#### The command palette (`Ctrl+K`)
 
-```text
-cluster  size  representative  affinity  mean RMSD/Å
--------  ----  --------------  --------  -----------
-1        2     mode 1          -6.210    0.065
-2        1     mode 3          -5.309    0.000
-3        2     mode 4          -5.045    1.673
-4        1     mode 6          -4.414    0.000
-```
+Type a few letters of what you want — `cmp`, `box`, `csv` — and press Enter.
+The palette is rebuilt **from the menu bar every time it opens**, so it can
+never go stale: every entry it offers is a real action with its real shortcut,
+and a new menu entry appears in it immediately. Menu paths are shown as
+tooltips, the arrow keys move the highlight, and the footer counts the commands
+found.
 
-(the bundled `demo/3ptb/poses.pdbqt`: six poses, four clusters). Atom
-equivalences (the two oxygens of a carboxylate, the six carbons of a benzene
-ring) are handled by graph-based matching, so a 180° ring flip counts as the same
-pose. With `-l`, the reference ligand's RMSD is added for each cluster
-representative — the redocking check, per cluster.
+#### The session
 
-**`odock interactions` and `odock diagram`.** The interaction profile of one
-pose, and the 2-D topology diagram of the same contacts:
+The workbench remembers where you were. It autosaves the loaded files, the
+search box, the engine settings, the selected residues, the pose you were
+looking at, the theme, the dock arrangement and the splitter sizes, and writes
+the file again whenever you close the window.
 
-```bash
-odock interactions -r receptor.pdbqt -l ligand.pdbqt
-odock diagram -r receptor.pdbqt -l ligand.pdbqt -o interactions.svg
-```
+* On launch it **offers** the last session — a question when a display can
+  answer it, otherwise a line in the log and `File ▸ Restore session`
+  (`Ctrl+Shift+R`).
+* `File ▸ Recent files` lists what you opened lately (newest first, files that
+  have since been deleted are not offered) and reopens the right structure:
+  a `MODEL` file as poses, a `ROOT` file as a ligand, anything else as a
+  receptor.
+* A session with nothing loaded never overwrites the saved one, so a bare
+  launch that you close again cannot destroy the session it just offered.
+* The file lives at `%APPDATA%\OpenDocking\session.json` on Windows and
+  `~/.config/opendocking/session.json` elsewhere. Set `ODOCK_SESSION_FILE` to
+  put it somewhere else.
 
-On the bundled `demo/egfr/` system (erlotinib in the EGFR kinase domain), the
-profile reproduces the known binding mode — the hinge hydrogen bond to Met769
-plus the hydrophobic contacts around it:
+#### Theme, density and layout
 
-```text
-kind         receptor      ligand        d/Å   detail
------------  ------------  ------------  ----  -----------------------
-hbond        MET769 A N    AQ4999 A N2   2.70  MET769:N->AQ4999:N2
-hydrophobic  LEU764 A CB   AQ4999 A C1   3.43  LEU764:CB...AQ4999:C1
-hydrophobic  THR766 A CG2  AQ4999 A C1   3.53  THR766:CG2...AQ4999:C1
-...
+`View ▸ Theme` chooses **Dark** or **Light**, and `View ▸ Density` chooses
+**Comfortable** or **Compact** (font size, control padding, table padding and
+tab sizes). The 3-D view has its own background colour per theme — a light
+window around a near-black viewport reads as a hole in the window — and so does
+the sequence ruler, which paints itself.
 
-summary: hbond 1, hydrophobic 9
-key residues: LEU694, LEU764, LEU768, LYS721, MET769, THR766
-```
+`View ▸ Layout` arranges the windows for a job in one click:
 
-Six interaction types are detected — hydrogen bonds, salt bridges, π–π stacking
-(face-to-face or T-shaped), cation–π, hydrophobic contacts and steric clashes —
-and every geometric cut-off is a flag (`--hbond`, `--salt`, `--pi`,
-`--cation-pi`, `--hydrophobic`, `--clash-ratio`), shared by both commands, so the
-diagram always matches the profile it was drawn from.
+| preset | what it opens |
+|---|---|
+| **Docking** | workspace, inspector on the Engine tab, pose table and run monitor |
+| **Analysis** | inspector on Receptor, pose table, selection panel; workspace and dashboard closed |
+| **Compare** | pose table, run monitor and the pose-comparison panel, everything else closed |
 
-### 5.6 Reports, standard input files and downloads
+Every dock can also be toggled individually from `View ▸ Panels`.
 
-**`odock report`** turns a pose file into a results table. XLSX or CSV, decided
-by `--csv` or the file extension:
+#### Loading structures by drag and drop
 
-```bash
-odock report -p poses.pdbqt -r receptor.pdbqt -o report.xlsx
-odock report -p poses.pdbqt -o report.csv --csv
-```
+Drop a `.pdbqt` or `.pdb` file anywhere on the window. The file is routed by
+what it *says* it is, never by its name: a `MODEL` record or a `VINA RESULT`
+remark means poses, a `ROOT` block means a flexible ligand, anything else is a
+receptor. Several files can be dropped at once, and a file the workbench cannot
+read is reported in the log and a message box instead of being silently
+ignored.
 
-With `-r`, the "key interacting residues" column is filled in per mode. XLSX
-writing needs `openpyxl`; without it the writer degrades to CSV and says so.
+#### Measurements, the atom read-out and screenshots
 
-**`odock export`** writes the input files that the original AutoDock tools read,
-so an OpenDocking run can be handed to AutoGrid/AutoDock, or archived for
-reproducibility:
-
-```bash
-odock export gpf    -r receptor.pdbqt -o receptor.gpf --box box.json
-odock export dpf    -r receptor.pdbqt -l ligand.pdbqt -o receptor.dpf --box box.json
-odock export config -r receptor.pdbqt -l ligand.pdbqt -o vina.txt --box box.json -e 32
-odock export pdb    -i receptor.pdbqt -o receptor.pdb
-```
-
-* `gpf` — an AutoGrid grid parameter file: odd `npts`, spacing, the map list for
-  every atom type (read from the receptor unless `--ligand-types` says
-  otherwise), `elecmap`, `dsolvmap` and the dielectric.
-* `dpf` — an AutoDock 4 docking parameter file: ligand types and torsions taken
-  from the ligand PDBQT, the map references, `move`/`about`, and the search
-  section chosen with `--parameters {lga,ga,ls,none}`.
-* `config` — an AutoDock Vina configuration file (`receptor`, `ligand`,
-  `center_*`, `size_*`, `exhaustiveness`, …).
-* `pdb` — a cleaned structure as PDB, with the `MASTER`/`END` tail.
-
-**`odock fetch`** downloads from the RCSB, with the identifier validated before
-any request is made:
-
-```bash
-odock fetch 3PTB -o 3PTB.pdb            # a whole entry
-odock fetch BEN --ligand -o BEN.sdf     # a chemical component
-```
-
-A 404, a refused connection or a timeout is reported as a one-line error naming
-the identifier and the reason — never as a traceback.
+* The **measure tool** (View ▸ Measure) turns two atom clicks into a distance,
+  and the **Measurements** tab of the run monitor lists them with their atoms
+  as a table you can copy or clear. They are also drawn in the 3-D view and
+  listed in the workspace tree.
+* **View ▸ Inspect atom** toggles the hover read-out: point at any atom and a
+  small card names its residue, atom, element, AD4 type, charge and position,
+  and the status bar repeats it. It is on by default and costs nothing when the
+  cursor is still.
+* `View ▸ Copy view` (`Ctrl+Shift+C`) puts the current 3-D image — including its
+  legend — on the clipboard, ready to paste into a slide. `File ▸ Export ▸
+  Screenshot…` still writes a high-resolution PNG to disk.
 
 ---
 
@@ -746,16 +740,16 @@ the identifier and the reason — never as a traceback.
 ### 6.1 The results table
 
 The first four modes of the recorded 3PTB validation run
-(`--exhaustiveness 16 --seed 42`, seven modes inside the 3 kcal/mol window):
+(`--exhaustiveness 16 --seed 42`, six modes written in total):
 
 ```text
 mode |   affinity | dist from best mode
      | (kcal/mol) | rmsd l.b.| rmsd u.b.
 -----+------------+----------+----------
-   1       -6.213      0.000      0.000
-   2       -6.191      0.060      1.602
-   3       -5.035      2.410      3.547
-   4       -4.935      2.777      3.567
+   1       -7.991      0.000      0.000
+   2       -7.797      0.202      1.608
+   3       -7.307      2.614      3.602
+   4       -7.007      2.276      3.267
 ```
 
 * **mode** — pose rank, best first. Modes are deduplicated: two poses closer
@@ -773,7 +767,7 @@ mode |   affinity | dist from best mode
 The two RMSD columns compare poses *to each other*, not to any experimental
 structure. To compare with a crystal pose, use `odock.aligned_rmsd` (§7.6).
 
-The CLI additionally prints `best affinity: -6.213 kcal/mol` unless `-q` is
+The CLI additionally prints `best affinity: -7.991 kcal/mol` unless `-q` is
 given.
 
 ### 6.2 The pose file
@@ -782,11 +776,11 @@ Each `MODEL` carries a `REMARK` block:
 
 ```text
 MODEL 1
-REMARK VINA RESULT:       -6.213      0.000      0.000
-REMARK INTER + INTRA:        -6.619
-REMARK INTER:                -6.576
+REMARK VINA RESULT:       -7.991      0.000      0.000
+REMARK INTER + INTRA:        -8.501
+REMARK INTER:                -8.458
 REMARK INTRA:                -0.043
-REMARK CONF_INDEPENDENT:      0.363
+REMARK CONF_INDEPENDENT:      0.467
 REMARK UNBOUND:              -0.043
 REMARK OPEN DOCKING MODE 1
 ROOT
@@ -853,7 +847,7 @@ result = odock.dock(
 )
 
 print(result.summary())              # metadata + table
-print(result.best_affinity)          # -6.213 (or None)
+print(result.best_affinity)          # -7.991 (or None)
 open("poses.pdbqt", "w").write(result.to_pdbqt())
 open("poses.pdb", "w").write(result.to_pdb())      # PDB view, REMARKs kept
 ```
@@ -953,11 +947,11 @@ for name, value in components.items():
 ```
 
 ```text
-affinity              -5.806
-total                 -5.806
-inter                 -6.146
+affinity              -7.659
+total                 -7.659
+inter                 -8.106
 intra                 -0.044
-conf_independent       0.339
+conf_independent       0.448
 unbound               -0.044
 ```
 
@@ -981,8 +975,8 @@ end = next(i for i, l in enumerate(text) if l.startswith("ENDMDL"))
 model1 = "\n".join(text[start + 1:end]) + "\n"
 
 print(odock.score(open("receptor.pdbqt").read(), model1))
-# {'affinity': -6.213, 'total': -6.213, 'inter': -6.576, 'intra': -0.043,
-#  'conf_independent': 0.363, 'unbound': -0.043}
+# {'affinity': -7.991, 'total': -7.991, 'inter': -8.458, 'intra': -0.043,
+#  'conf_independent': 0.467, 'unbound': -0.043}
 ```
 
 For a single pairwise interaction — useful for teaching and for checking a force
@@ -1335,7 +1329,7 @@ exactly one structure.
 ### `odock score` and multi-model files
 
 `odock score` reads only the **first model** of a pose file. That is almost always
-what you want — scoring mode 1 reproduces the docking report exactly (`-6.213`
+what you want — scoring mode 1 reproduces the docking report exactly (`-7.991`
 for the 3PTB mode 1) — but if you meant a different mode, split the file first
 with `odock split` and score the individual model, or pass that model's text
 directly (see [§7.4](#74-scoring-without-searching)).
@@ -1409,16 +1403,16 @@ box.
 **How do I know whether the docking worked?**
 Re-dock a ligand whose bound pose is known: the top-pose RMSD to the crystal
 structure is the standard figure of merit. `tests/validate_3ptb.py` does exactly
-that for PDB 3PTB and reports `1.133 Å` (no superposition) with affinity
-`-6.213 kcal/mol` at `--exhaustiveness 16 --seed 42`. Anything under ~2 Å means
+that for PDB 3PTB and reports `1.124 Å` (no superposition) with affinity
+`-7.991 kcal/mol` at `--exhaustiveness 16 --seed 42`. Anything under ~2 Å means
 the correct binding mode was found.
 
 **Why is the affinity I get from `odock score` different from the docking
 result?**
 Because they are different conformations. `odock score` evaluates the ligand
 exactly where the file puts it; the docked pose has been optimised. On 3PTB, the
-crystallographic position scores `-5.806 kcal/mol` and the top docked pose scores
-`-6.213` — the search found a slightly better minimum 1.133 Å away from the
+crystallographic position scores `-7.659 kcal/mol` and the top docked pose scores
+`-7.991` — the search found a slightly better minimum 1.124 Å away from the
 crystal position.
 
 **Can I dock several ligands at once?**
@@ -1497,22 +1491,6 @@ odock dock -r receptor.pdbqt -l ligand.pdbqt --box box.json \
 # score / split
 odock score -r receptor.pdbqt -l ligand.pdbqt
 odock split poses.pdbqt --outdir poses
-
-# pockets, filters, clustering, interactions
-odock pocket -r receptor.pdbqt --max 10 --json-out pockets.json
-odock filter -i library.sdf -i more.smi --json-out filters.json
-odock cluster -p poses.pdbqt -l ligand.pdbqt --cutoff 2.0
-odock interactions -r receptor.pdbqt -l ligand.pdbqt --hbond 3.5
-odock diagram -r receptor.pdbqt -l ligand.pdbqt -o interactions.svg
-
-# reports and standard input files
-odock report -p poses.pdbqt -r receptor.pdbqt -o report.xlsx
-odock report -p poses.pdbqt -o report.csv --csv
-odock fetch 3PTB -o 3PTB.pdb
-odock export gpf    -r receptor.pdbqt -o receptor.gpf --box box.json
-odock export dpf    -r receptor.pdbqt -l ligand.pdbqt -o receptor.dpf --box box.json
-odock export config -r receptor.pdbqt -l ligand.pdbqt -o vina.txt --box box.json -e 32
-odock export pdb    -i receptor.pdbqt -o receptor.pdb
 
 # validate
 python tests/validate_3ptb.py --exhaustiveness 16 --seed 42

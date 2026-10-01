@@ -4,21 +4,43 @@ build-backend = "maturin"
 
 [project]
 name = "opendocking"
-version = "0.1.0"
+version = "0.2.0"
 description = "odock — a modern, open-source molecular docking toolchain (Rust core + Python workbench)"
 readme = "README.md"
-license = { file = "LICENSE" }
+# PEP 639: an SPDX expression plus the files that carry the licence text.  The
+# old `license = { file = "LICENSE" }` form produced metadata with no licence
+# field at all (only `License-File:`), which is why `tools/inspect_dist.py`
+# checks for it.
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
 requires-python = ">=3.9"
 authors = [{ name = "The OpenDocking Project" }]
-keywords = ["docking", "molecular-modelling", "cheminformatics", "autodock", "vina"]
+keywords = [
+    "docking",
+    "molecular-docking",
+    "molecular-modelling",
+    "cheminformatics",
+    "virtual-screening",
+    "autodock",
+    "vina",
+    "structural-biology",
+]
 classifiers = [
     "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Environment :: X11 Applications :: Qt",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
-    "Programming Language :: Rust",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Topic :: Scientific/Engineering :: Chemistry",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Rust",
     "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Topic :: Scientific/Engineering :: Chemistry",
 ]
 dependencies = [
     "numpy>=1.22",
@@ -29,14 +51,26 @@ dependencies = [
 chem = ["rdkit>=2022.9"]
 # The PyQt6 + ModernGL 3D workbench.
 gui = ["PyQt6>=6.5", "moderngl>=5.8", "numpy>=1.22"]
-dev = ["pytest>=7", "rdkit>=2022.9"]
+# Everything the test suite and the lint gate need, so `pip install ".[dev]"`
+# is enough to run `make test` and `make lint`.
+dev = [
+    "pytest>=7",
+    "rdkit>=2022.9",
+    "openpyxl>=3.0",
+    "ruff>=0.9",
+    "pre-commit>=3",
+]
 
 [project.scripts]
 odock = "odock.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/opendocking/odock"
-Source = "https://github.com/opendocking/odock"
+Homepage = "https://github.com/GrassBlock-WE/opendocking"
+Repository = "https://github.com/GrassBlock-WE/opendocking"
+Issues = "https://github.com/GrassBlock-WE/opendocking/issues"
+Documentation = "https://github.com/GrassBlock-WE/opendocking/blob/main/docs/USER_GUIDE.md"
+# No `Changelog` key on purpose: there is no CHANGELOG.md yet, and a project URL
+# that points at something else is worse than a missing one.
 
 [tool.maturin]
 manifest-path = "crates/dock-py/Cargo.toml"
@@ -44,6 +78,82 @@ module-name = "odock._odock"
 python-source = "python"
 features = ["pyo3/extension-module"]
 strip = true
+# A wheel holds importable code, not the build residue of the machine that made
+# it: without this, every `__pycache__` directory in the working tree (stale
+# bytecode compiled for whatever interpreter the developer happened to use) is
+# copied into the wheel.
+#
+# The rest of the list is the *deny* half of packaging.  `maturin sdist` archives
+# the working tree, so a file that must not be published has to be named here:
+# `odck.md` is the internal requirements brief the user asked not to publish,
+# `DELIVERY.md` is the internal hand-over superseded by docs/VALIDATION.md, and
+# the rest are a release snapshot of this repository sitting at its own root
+# (`odock/`) plus working directories.  They are listed even though nothing
+# includes them, so that a future broad `include` cannot resurrect them — and
+# `tools/inspect_dist.py` fails if any of them appears in an artefact.
+exclude = [
+    "**/__pycache__/**",
+    "**/*.pyc",
+    "**/*.pyo",
+    "**/.pytest_cache/**",
+    "odck.md",
+    "DELIVERY.md",
+    "reference/*",
+    "out/*",
+    "target/*",
+    ".rust-tmp/*",
+    "scratch/*",
+    "pytest-of-*/*",
+    "tmp*/*",
+]
+# `odock/*` is deliberately NOT in the list above.  `exclude` is not
+# format-scoped: it applies to the wheel as well, and in a wheel `odock/` *is* the
+# package — adding it dropped the wheel from 39 files to 22 (measured, and caught
+# by tools/inspect_dist.py).  The release snapshot at the repository root is
+# therefore handled by the inspect tool's deny-list, which fails if a root
+# `odock/` ever appears in an artefact.
+# The sdist is what a packager reads: ship the documentation, the tests and their
+# crystal structures, the demo library, the benchmark baseline and the release
+# automation with it.  `format = "sdist"` matters: without it maturin puts those
+# files in the *wheel* as well, and a wheel is supposed to be importable code
+# plus metadata, not a copy of the repository.
+#
+# The patterns use `*`, not `**`: maturin matches each entry with a single-level
+# glob, so `docs/*` lists the directory's files while `docs/**` silently matches
+# nothing.  Every one of these is verified by building the sdist and reading it
+# with tools/inspect_dist.py, which fails both when a promised entry is missing
+# and when something internal is present.
+#
+# Note what is deliberately absent: `odck.md` and `DELIVERY.md` (internal, and
+# excluded above), and `odock/` at the repository root (a release snapshot, not
+# part of the project).
+include = [
+    { path = "docs/*", format = "sdist" },
+    { path = "tests/*", format = "sdist" },
+    { path = "tests/data/*", format = "sdist" },
+    { path = "examples/*", format = "sdist" },
+    { path = "tools/*", format = "sdist" },
+    { path = "benchmark/*", format = "sdist" },
+    { path = "demo/library.smi", format = "sdist" },
+    { path = "CONTRIBUTING.md", format = "sdist" },
+    { path = "Makefile", format = "sdist" },
+    { path = ".pre-commit-config.yaml", format = "sdist" },
+    { path = ".github/*", format = "sdist" },
+    { path = ".github/workflows/*", format = "sdist" },
+    { path = ".github/ISSUE_TEMPLATE/*", format = "sdist" },
+]
+
+# The lint gate is deliberately narrow: syntax errors and undefined names, i.e.
+# the rules that cannot be a matter of taste (ruff's own "critical" set).  The
+# tree has never been linted with a broad selection, so broadening this is a
+# deliberate future change, one rule family at a time.
+[tool.ruff]
+target-version = "py39"
+line-length = 100
+exclude = ["out", "target", "reference", "demo"]
+
+[tool.ruff.lint]
+select = ["E9", "F63", "F7", "F82"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

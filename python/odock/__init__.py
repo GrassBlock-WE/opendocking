@@ -85,10 +85,12 @@ def dock_text(receptor_pdbqt: str, ligand_pdbqt: str, box: BoxSpec, **kwargs) ->
 
 
 #: Submodules that are cheap to import and useful to reach as ``odock.<name>``.
-#: The heavy ones (``gui``, the chemistry, the analysis) stay lazy so that
-#: ``import odock`` never needs RDKit, Qt or a GPU.
-_EAGER_SUBMODULES = ("analysis", "chem", "export", "fetch", "filters",
-                     "pocket", "report")
+#: The heavy ones (``gui``, the chemistry) stay lazy so that ``import odock``
+#: never needs RDKit, Qt or a GPU.  ``screen`` is listed so that
+#: ``odock.screen.screen_ligands`` works after a plain ``import odock``; it
+#: itself imports the chemistry lazily.
+_EAGER_SUBMODULES = ("analysis", "chem", "consensus", "export", "fetch", "filters",
+                     "metrics", "pocket", "report", "screen")
 
 
 def __getattr__(name: str):  # pragma: no cover - lazy submodule access

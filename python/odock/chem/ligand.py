@@ -2,7 +2,7 @@
 """Ligand chemistry: multi-format input, 3-D embedding, force-field minimisation,
 rotatable-bond perception and the kinematic torsion tree.
 
-This module implements module B of the project brief on top of RDKit only:
+This module implements the ligand-chemistry requirements on top of RDKit only:
 
 * :func:`read_ligands` — batch-aware input for ``.smi``, ``.sdf``, ``.mol2``,
   ``.mol``, ``.pdb``, ``.pdbqt`` and bare SMILES strings.  Every molecule comes
@@ -13,7 +13,7 @@ This module implements module B of the project brief on top of RDKit only:
   documented fallback chain, reporting the energy before and after on the
   molecule itself.
 * :func:`rotatable_bonds` / :func:`rotation_reason` — torsion perception with
-  every exclusion the project brief demands, each with a machine-readable reason so
+  every exclusion the project requires, each with a machine-readable reason so
   the GUI can explain *why* a bond is rigid.
 * :func:`torsion_tree` — the kinematic ``ROOT -> BRANCH`` tree the AutoDock
   PDBQT dialect is built from.
@@ -74,7 +74,8 @@ __all__ = [
 #: The force fields :func:`minimize` can drive, in fallback order.
 FORCE_FIELDS: Tuple[str, ...] = ("MMFF94", "MMFF94s", "UFF")
 
-#: the project brief asks for 200-1000 gradient steps; anything outside is clamped.
+#: The project requirements ask for 200-1000 gradient steps; anything outside is
+#: clamped.
 MIN_STEPS = 200
 MAX_STEPS = 1000
 
@@ -747,7 +748,7 @@ def minimize(mol, *, force_field: str = "MMFF94", steps: int = 500):
     force_field
         One of :data:`FORCE_FIELDS`.  The name is matched case-insensitively.
     steps
-        Gradient steps, clamped into ``[200, 1000]`` as the project brief requires.
+        Gradient steps, clamped into ``[200, 1000]`` as the project requires.
 
     Returns
     -------
@@ -1190,10 +1191,10 @@ def torsion_tree(mol, *, locked: Sequence[Tuple[int, int]] = ()) -> TorsionTree:
 
     The molecule is split into rigid fragments by removing every rotatable bond
     (:func:`rotatable_bonds`, so ``locked`` applies).  The **largest** fragment
-    becomes the root — the fused ring system or the central carbon that
-    the project brief asks the root finder to pick — with the fragment closest to the
-    molecular centroid breaking a size tie.  Depth-first search then opens one
-    ``BRANCH`` per rotor leaving a frame.
+    becomes the root — the fused ring system or the central carbon that the
+    project requirements ask the root finder to pick — with the fragment closest
+    to the molecular centroid breaking a size tie.  Depth-first search then opens
+    one ``BRANCH`` per rotor leaving a frame.
 
     A torsion tree cannot contain a cycle — AutoDock has no syntax for a closed
     loop — so a second rotor closing a ring of fragments is folded into its

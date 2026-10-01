@@ -10,6 +10,11 @@ homepage.workspace = true
 readme.workspace = true
 description = "PyO3 bindings for the OpenDocking kernel"
 
+# The acknowledged clippy findings live in the workspace manifest, so the CI gate
+# (`cargo clippy --workspace --all-targets -- -D warnings`) fails on anything new.
+[lints]
+workspace = true
+
 [lib]
 name = "_odock"
 crate-type = ["cdylib", "rlib"]

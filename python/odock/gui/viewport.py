@@ -50,6 +50,7 @@ uniform mat4 u_proj;
 
 out vec3 v_view_center;
 out vec3 v_color;
+out vec3 v_center;
 out float v_radius;
 out vec2 v_quad;
 
@@ -57,6 +58,7 @@ void main() {
     v_color = in_radius_color.yzw;
     v_radius = in_radius_color.x;
     v_quad = in_quad;
+    v_center = in_center;
 
     vec4 view_center = u_view * vec4(in_center, 1.0);
     v_view_center = view_center.xyz;
@@ -75,6 +77,7 @@ SPHERE_FS = """
 #version 330
 in vec3 v_view_center;
 in vec3 v_color;
+in vec3 v_center;
 in float v_radius;
 in vec2 v_quad;
 
@@ -92,6 +95,11 @@ uniform float u_clip_front;
 // that are not part of the interaction site being emphasised.
 uniform float u_dim;
 
+// World-space clipping plane, as in MESH_FS. The sphere pass applies the same
+// plane to the *atom* centre, so a clipped surface and the atoms around it cut
+// away together instead of leaving the atoms floating inside the opening.
+uniform vec4 u_clip_plane;
+
 out vec4 fragColor;
 
 /// Desaturate and darken a colour by `amount`.
@@ -107,6 +115,8 @@ void main() {
     // dropped whole, so the pocket wall opens a clean gap onto the ligand
     // instead of showing the hollow inside of a half-cut sphere.
     if (u_clip_front > 0.0 && -v_view_center.z < u_clip_front) discard;
+    if (dot(u_clip_plane.xyz, u_clip_plane.xyz) > 0.0
+        && dot(v_center, u_clip_plane.xyz) + u_clip_plane.w < 0.0) discard;
     float z = sqrt(1.0 - r2);
     vec3 normal = vec3(v_quad, z);
 
@@ -170,11 +180,13 @@ uniform mat4 u_view;
 out vec3 v_normal_view;
 out vec3 v_color;
 out vec3 v_view_pos;
+out vec3 v_world_pos;
 
 void main() {
     v_color = in_color;
     v_normal_view = mat3(u_view) * in_normal;
     v_view_pos = (u_view * vec4(in_pos, 1.0)).xyz;
+    v_world_pos = in_pos;
     gl_Position = u_mvp * vec4(in_pos, 1.0);
 }
 """
@@ -184,6 +196,7 @@ MESH_FS = """
 in vec3 v_normal_view;
 in vec3 v_color;
 in vec3 v_view_pos;
+in vec3 v_world_pos;
 
 uniform vec3 u_light_view;
 uniform float u_alpha;
@@ -194,6 +207,12 @@ uniform float u_clip_front;
 // (see SPHERE_FS).
 uniform float u_dim;
 
+// World-space clipping plane: xyz is the outward normal, w the offset. A
+// fragment on the negative side is discarded, which is how the surface (and
+// the structure with it) can be cut open. All-zero disables it, which is the
+// uniform's default state, so a pass that never sets it is never clipped.
+uniform vec4 u_clip_plane;
+
 out vec4 fragColor;
 
 vec3 dimmed(vec3 color, float amount) {
@@ -203,8 +222,14 @@ vec3 dimmed(vec3 color, float amount) {
 
 void main() {
     if (u_clip_front > 0.0 && -v_view_pos.z < u_clip_front) discard;
+    if (dot(u_clip_plane.xyz, u_clip_plane.xyz) > 0.0
+        && dot(v_world_pos, u_clip_plane.xyz) + u_clip_plane.w < 0.0) discard;
     vec3 normal = normalize(v_normal_view);
     vec3 light = normalize(u_light_view);
+    // A surface has no meaningful "inside": its far wall is visible through
+    // the cut, so the shading must light a back face rather than leave it
+    // black. The two-sided diffuse term is what makes an opened pocket read
+    // as a hollow shell instead of a hole.
     float diff = abs(dot(normal, light));
     float spec = pow(diff, 24.0) * 0.28;
     float rim = pow(1.0 - diff, 3.0) * 0.12;
@@ -279,7 +304,7 @@ void main() {
 }
 """
 
-#: Colour per interaction type, as required by the project brief module E.2.
+#: Colour per interaction type, as the interaction-profile specification requires.
 INTERACTION_COLORS = {
     "hbond": (0.20, 0.90, 0.95, 0.95),        # cyan
     "salt_bridge": (0.95, 0.25, 0.85, 0.95),  # magenta
@@ -594,6 +619,59 @@ class Scene:
     interaction_focus: List[object] = None  # type: ignore[assignment]
     #: How far the non-focused part of the structure recedes, 0.0–1.0.
     focus_dim: float = 0.72
+
+    # -- the molecular surface ---------------------------------------------
+    #: The built surface (an :class:`odock.gui.surface.Surface`), or ``None``.
+    #: The renderer uploads it through the *existing* mesh pipeline — the same
+    #: vertex format, the same lighting, the same ambient occlusion — so a
+    #: 100 000-triangle surface is one extra draw call, not a second renderer.
+    surface: object = None
+    #: Whether the surface is drawn. Independent of the atom styles, exactly as
+    #: in PyMOL: ``show surface`` and ``show cartoon`` are different questions.
+    show_surface: bool = True
+    #: Opacity of the surface, 0.0–1.0. Below 1.0 the surface is blended and
+    #: stops writing depth, so the ligand inside the pocket stays visible
+    #: through it while the surface itself still occludes what is behind.
+    surface_alpha: float = 1.0
+    #: Draw the colour-bar legend in the viewport's HUD. On by default: a
+    #: colour map without its scale is decoration, not a measurement.
+    surface_legend: bool = True
+    #: A world-space clipping plane as ``((nx, ny, nz), d)``: everything with
+    #: ``dot(p, n) + d < 0`` is cut away. ``None`` disables it. Unlike
+    #: :attr:`front_clip` this plane is fixed to the *model*, so two poses of
+    #: the same protein are cut identically and the cut can be compared.
+    surface_clip: Optional[Tuple[Tuple[float, float, float], float]] = None
+
+    def clip_plane_vector(self) -> Tuple[float, float, float, float]:
+        """The clipping plane as the shaders take it; all-zero disables it."""
+        if self.surface_clip is None:
+            return (0.0, 0.0, 0.0, 0.0)
+        normal, offset = self.surface_clip
+        length = math.sqrt(sum(float(value) ** 2 for value in normal))
+        if length < 1e-9:
+            return (0.0, 0.0, 0.0, 0.0)
+        return (
+            float(normal[0]) / length,
+            float(normal[1]) / length,
+            float(normal[2]) / length,
+            float(offset) / length,
+        )
+
+    def surface_stats(self) -> Optional[dict]:
+        """The numbers the last build reported, or ``None`` without a surface."""
+        return dict(getattr(self.surface, "stats", {}) or {}) or None
+
+    def legend_stops(self, count: int = 6):
+        """Colour-bar stops for the HUD, or ``[]`` when there is nothing to show."""
+        if self.surface is None or not self.surface_legend:
+            return []
+        getter = getattr(self.surface, "legend", None)
+        if getter is None or getattr(self.surface, "property_name", "element") == "element":
+            return []
+        try:
+            return list(getter(count=count))
+        except Exception:  # pragma: no cover - a duck-typed surface
+            return []
 
     def __setattr__(self, name: str, value) -> None:
         # ``style_receptor`` is the historical name of ``style_protein`` and
@@ -1460,6 +1538,20 @@ class Renderer:
         self._mesh_receptor_capacity = 0
         self._mesh_ligand_capacity = 0
 
+        # -- the molecular surface -------------------------------------------
+        # The surface is drawn through this same mesh program: its vertex
+        # format *is* (position, normal, colour), so the surface inherits the
+        # lighting, the dimming, the front clip and the SSAO post-pass with no
+        # extra shader. Only the draw itself is special — a translucent surface
+        # has to blend without writing depth.
+        self.surface_buffer = None
+        self.surface_vao = None
+        self.surface_vertices = 0
+        self.surface_triangles = 0
+        self._surface_capacity = 0
+        self._surface_identity = None
+        self.dirty_surface = True
+
         # -- interaction emphasis (the focused residues and ligand atoms) ----
         # A second, small mesh pair: the focused part of the structure is drawn
         # as ball-and-stick whatever the global style is, on top of a dimmed
@@ -1922,6 +2014,81 @@ class Renderer:
         )
         self._upload_focus_mesh(which, mesh)
 
+    # -- the molecular surface ---------------------------------------------
+
+    def set_surface(self, surface) -> dict:
+        """Hand the renderer a built surface and upload it on the next frame.
+
+        Returns the surface's own statistics so the caller can report the
+        triangle count and the build time without asking the surface twice.
+        Passing ``None`` removes the surface (and releases nothing: the buffer
+        is reused by the next one).
+        """
+        self.scene.surface = surface
+        self.dirty_surface = True
+        return dict(getattr(surface, "stats", {}) or {}) if surface is not None else {}
+
+    def upload_surface(self) -> None:
+        """Upload the surface mesh, growing the buffer only when it must."""
+        surface = getattr(self.scene, "surface", None)
+        mesh = None
+        if surface is not None:
+            builder = getattr(surface, "mesh", None)
+            if builder is not None:
+                mesh = builder()
+        vertices = 0 if mesh is None or getattr(mesh, "size", 0) == 0 else int(mesh.shape[0])
+        self.surface_vertices = vertices
+        self.surface_triangles = int(getattr(surface, "triangles_count", 0) or 0)
+        self._surface_identity = id(surface)
+        self.dirty_surface = False
+        if vertices == 0:
+            return
+        flat = np.ascontiguousarray(mesh.reshape(-1), dtype="f4")
+        if self.surface_buffer is None or flat.size > self._surface_capacity:
+            if self.surface_buffer is not None:
+                self.surface_buffer.release()
+            if self.surface_vao is not None:
+                self.surface_vao.release()
+            capacity = max(flat.size, 9 * 4096)
+            self.surface_buffer = self.ctx.buffer(reserve=int(capacity * 4), dynamic=True)
+            self.surface_vao = self.ctx.vertex_array(
+                self.mesh_prog,
+                [(self.surface_buffer, "3f 3f 3f", "in_pos", "in_normal", "in_color")],
+            )
+            self._surface_capacity = capacity
+        assert self.surface_buffer is not None
+        self.surface_buffer.write(flat.tobytes())
+
+    def _draw_surface(self, mvp: np.ndarray, view: np.ndarray) -> None:
+        """One draw call for the whole surface.
+
+        Opaque surfaces write depth like any other geometry. A translucent one
+        is blended with ``depth_mask`` off, so the wall in front of the ligand
+        tints it instead of hiding it, while the surface is still correctly
+        occluded by the atoms that are nearer to the camera.
+        """
+        if self.surface_vertices == 0 or self.surface_vao is None:
+            return
+        alpha = min(1.0, max(0.0, float(self.scene.surface_alpha)))
+        if alpha <= 0.01:
+            return
+        program = self.mesh_prog
+        program["u_mvp"].write(np.ascontiguousarray(mvp.T, dtype="f4").tobytes())
+        program["u_view"].write(np.ascontiguousarray(view.T, dtype="f4").tobytes())
+        program["u_light_view"].value = (0.35, 0.45, 0.82)
+        program["u_alpha"].value = alpha
+        program["u_dim"].value = 0.0
+        # ModernGL's ``depth_mask`` is write-only, so the state is restored
+        # unconditionally rather than read back first.
+        transparent = alpha < 0.99
+        if transparent:
+            self.ctx.depth_mask = False
+        try:
+            self.surface_vao.render(moderngl.TRIANGLES, vertices=self.surface_vertices)
+        finally:
+            if transparent:
+                self.ctx.depth_mask = True
+
     def upload(self, which: str) -> None:
         if self._sync_focus_from_scene():
             self.dirty_receptor = True
@@ -2127,6 +2294,10 @@ class Renderer:
             pass
         ctx.scissor = (0, 0, 0, 0)
         ctx.scissor = None
+        # A translucent surface turns depth writes off for its own pass and back
+        # on afterwards; this makes the frame start from a known state even if a
+        # host ever leaves it off.
+        ctx.depth_mask = True
         ctx.viewport = (0, 0, max(int(width), 1), max(int(height), 1))
 
     def draw(
@@ -2178,6 +2349,10 @@ class Renderer:
             self.upload("receptor")
         if self.dirty_ligand:
             self.upload("ligand")
+        if self.dirty_surface or self._surface_identity != id(
+            getattr(self.scene, "surface", None)
+        ):
+            self.upload_surface()
 
         prog = self.sphere_prog
         # GLSL matrices are column-major while NumPy arrays are row-major,
@@ -2194,6 +2369,13 @@ class Renderer:
         self._clip_front = clip_front
         prog["u_clip_front"].value = clip_front
         self.mesh_prog["u_clip_front"].value = clip_front
+        self.overlay_prog["u_clip_front"].value = clip_front
+        # The world-space clip plane cuts the surface and the structure with it,
+        # so an opened pocket shows its inside rather than a floating bowl.
+        plane = self.scene.clip_plane_vector()
+        prog["u_clip_plane"].value = plane
+        self.mesh_prog["u_clip_plane"].value = plane
+        self.overlay_prog["u_clip_plane"].value = plane
 
         # An interaction focus recedes everything that is not part of the site.
         focus = bool(self._focus_receptor or self._focus_ligand)
@@ -2221,6 +2403,12 @@ class Renderer:
                 self.ligand_vao.render(
                     moderngl.TRIANGLES, vertices=6, instances=self.ligand_count
                 )
+
+        # The molecular surface, after the atoms it belongs to: an opaque
+        # surface then occludes them normally, and a translucent one tints
+        # them without hiding them.
+        if self.scene.show_surface:
+            self._draw_surface(mvp, view)
 
         # The interaction site is drawn opaque and un-dimmed, on top of the
         # receded structure: the focused residues as ball-and-stick, their atoms
@@ -3034,6 +3222,7 @@ class Renderer:
             self.fs_vao,
             self.mesh_receptor_vao,
             self.mesh_ligand_vao,
+            self.surface_vao,
             self.focus_mesh_receptor_vao,
             self.focus_mesh_ligand_vao,
             self.interaction_vao,
@@ -3048,6 +3237,7 @@ class Renderer:
             self.fs_quad,
             self.mesh_receptor_buffer,
             self.mesh_ligand_buffer,
+            self.surface_buffer,
             self.focus_mesh_receptor_buffer,
             self.focus_mesh_ligand_buffer,
             self.interaction_buffer,

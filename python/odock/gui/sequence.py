@@ -69,8 +69,12 @@ __all__ = [
     "AMINO_ACIDS",
     "AMINO_ACID_ALIASES",
     "CLASS_COLORS",
+    "CONTACT_MARKS",
+    "DARK_RULER",
+    "LIGHT_RULER",
     "STANDARD_AMINO_ACIDS",
     "ResidueBlock",
+    "RulerPalette",
     "SequenceTrack",
     "class_color",
     "one_letter",
@@ -219,6 +223,68 @@ def _foreground(rgb: Sequence[float]) -> QtGui.QColor:
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class RulerPalette:
+    """The colours the ruler paints with.
+
+    The ruler is a ``QWidget`` that fills its own background, so it cannot
+    inherit a theme from the style sheet: the window hands it the palette that
+    matches the active theme (see ``DARK_RULER``/``LIGHT_RULER``).
+    """
+
+    background: str = "#0d1016"
+    bar: str = "#181d26"
+    border: str = "#262e3c"
+    tick: str = "#687484"
+    tick_line: str = "#343e4e"
+    tick_text: str = "#929eb0"
+    label: str = "#96a2b4"
+    cell_border: str = "#12161e"
+    cell_text: str = "#ced6e2"
+    tail_line: str = "#4a5668"
+    empty_text: str = "#768294"
+
+
+#: The default ruler palette: the dark workbench.
+DARK_RULER = RulerPalette()
+
+#: The light workbench: a light strip with dark codes, so the ruler does not
+#: glare out of a light window the way a near-black strip does.
+LIGHT_RULER = RulerPalette(
+    background="#e9edf3",
+    bar="#dee3eb",
+    border="#c3cddc",
+    tick="#5b6b7d",
+    tick_line="#c8d1de",
+    tick_text="#4a5a6b",
+    label="#3c4a5b",
+    cell_border="#ffffff",
+    cell_text="#18222e",
+    tail_line="#8fa0b3",
+    empty_text="#5b6b7d",
+)
+
+#: ``(colour, band row)`` of every contact mark the ruler can draw. The bands are
+#: stacked from the bottom of the cell upwards, so two marks on one residue are
+#: both visible. Chosen to be unmistakable against the muted class colours and to
+#: not clash with the gold selection outline.
+CONTACT_MARKS: Dict[str, Tuple[Tuple[float, float, float], int]] = {
+    # The displayed pose touches this residue.
+    "contact": ((1.00, 0.67, 0.27), 0),
+    # Both compared poses touch it …
+    "shared": ((0.36, 0.86, 0.55), 0),
+    # … and one of them touches it alone.
+    "unique": ((0.95, 0.45, 0.42), 1),
+}
+
+#: The order marks are painted in, so a shared mark is never covered by a unique
+#: one on the same cell.
+MARK_ORDER = ("contact", "shared", "unique")
+
+#: Height of one contact band, in pixels.
+MARK_HEIGHT = 3
+
+
 @dataclass
 class ResidueBlock:
     """One residue of the ruler: what it is called and which atoms it holds."""
@@ -288,10 +354,66 @@ class SequenceTrack(QtWidgets.QWidget):
         self._selected: set = set()
         self._anchor: Optional[int] = None
         self._tail_marks: List[Tuple[int, int]] = []
+        #: Residue keys the current pose (and, while comparing, the two compared
+        #: poses) touch, by mark name. Stored as *keys*, not cell indices, so a
+        #: reload of the same structure — switching pose reloads the ligand — keeps
+        #: the marks on the residues they were computed for.
+        self._contact_keys: Dict[str, set] = {}
+        self.palette = DARK_RULER
         self.setFocusPolicy(QtCore.Qt.FocusPolicy.StrongFocus)
         self.setAutoFillBackground(False)
         self.setToolTip(tr("tip.sequence"))
         self.setMinimumHeight(self.row_height())
+
+    # -- appearance ---------------------------------------------------------
+
+    def set_palette(self, palette: RulerPalette) -> None:
+        """Use ``palette`` (the dark or the light ruler colours)."""
+        self.palette = palette if palette is not None else DARK_RULER
+        self.update()
+
+    # -- contact marks ------------------------------------------------------
+
+    def set_contact_marks(self, marks: Dict[str, Sequence[Tuple[str, int, str]]]) -> None:
+        """Highlight the residues a pose touches, by mark name.
+
+        ``marks`` maps a name from :data:`CONTACT_MARKS` ("contact", "shared",
+        "unique") to the residue keys the mark covers. Names that are not in
+        :data:`CONTACT_MARKS` are ignored; an empty mapping clears the marks.
+        """
+        cleaned: Dict[str, set] = {}
+        for name, keys in (marks or {}).items():
+            if name not in CONTACT_MARKS:
+                continue
+            wanted = {tuple(key) for key in keys or ()}
+            if wanted:
+                cleaned[name] = wanted
+        self._contact_keys = cleaned
+        self.update()
+
+    def clear_contact_marks(self) -> None:
+        self._contact_keys = {}
+        self.update()
+
+    def contact_marks(self) -> Dict[str, List[Tuple[str, int, str]]]:
+        """The marks, resolved to the residues the ruler actually has."""
+        present = {block.key for block in self._blocks}
+        return {
+            name: [block.key for block in self._blocks if block.key in keys]
+            for name, keys in self._contact_keys.items()
+            if keys & present
+        }
+
+    def marked_keys(self, name: str) -> List[Tuple[str, int, str]]:
+        """The keys of one mark, in ruler order."""
+        return list(self.contact_marks().get(name, []))
+
+    def _marks_of(self, block: ResidueBlock) -> List[str]:
+        return [
+            name
+            for name in MARK_ORDER
+            if block.key in self._contact_keys.get(name, ())
+        ]
 
     # -- geometry constants -------------------------------------------------
 
@@ -695,12 +817,13 @@ class SequenceTrack(QtWidgets.QWidget):
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
         painter = QtGui.QPainter(self)
-        painter.fillRect(self.rect(), QtGui.QColor(13, 16, 22))
-        painter.setPen(QtGui.QPen(QtGui.QColor(38, 46, 60), 1))
+        colours = self.palette
+        painter.fillRect(self.rect(), QtGui.QColor(colours.background))
+        painter.setPen(QtGui.QPen(QtGui.QColor(colours.border), 1))
         painter.drawLine(0, 0, self.width(), 0)
 
         if not self._blocks:
-            painter.setPen(QtGui.QColor(118, 130, 148))
+            painter.setPen(QtGui.QColor(colours.empty_text))
             painter.setFont(QtGui.QFont("Segoe UI", 8))
             painter.drawText(
                 self.rect().adjusted(12, 0, -12, 0),
@@ -720,7 +843,7 @@ class SequenceTrack(QtWidgets.QWidget):
 
         # the ruler bar behind every row, so a row reads as one line
         painter.setPen(QtCore.Qt.PenStyle.NoPen)
-        painter.setBrush(QtGui.QColor(24, 29, 38))
+        painter.setBrush(QtGui.QColor(colours.bar))
         for _label, y, start_x, end_x in self._rows:
             painter.drawRoundedRect(
                 QtCore.QRect(
@@ -735,7 +858,7 @@ class SequenceTrack(QtWidgets.QWidget):
 
         # A hairline where the entity tail starts: the numbers stop there, so the
         # separation has to read without them.
-        painter.setPen(QtGui.QPen(QtGui.QColor(74, 86, 104), 1))
+        painter.setPen(QtGui.QPen(QtGui.QColor(colours.tail_line), 1))
         for tail_x, tail_y in self._tail_marks:
             painter.drawLine(
                 tail_x + 2, tail_y, tail_x + 2, tail_y + self.CODE_HEIGHT
@@ -744,7 +867,7 @@ class SequenceTrack(QtWidgets.QWidget):
         # tick marks, their numbers, the interval separators and the row labels
         for label, y, _start_x, _end_x in self._rows:
             painter.setFont(label_font)
-            painter.setPen(QtGui.QColor(150, 162, 180))
+            painter.setPen(QtGui.QColor(colours.label))
             painter.drawText(
                 QtCore.QRect(
                     self.PADDING,
@@ -759,11 +882,11 @@ class SequenceTrack(QtWidgets.QWidget):
             for tick_x in sorted(
                 {x for row_label, x, _res in self._ticks if row_label == label}
             ):
-                painter.setPen(QtGui.QPen(QtGui.QColor(104, 116, 134), 1))
+                painter.setPen(QtGui.QPen(QtGui.QColor(colours.tick), 1))
                 painter.drawLine(
                     tick_x, y + self.TICK_HEIGHT - 5, tick_x, y + self.TICK_HEIGHT
                 )
-                painter.setPen(QtGui.QPen(QtGui.QColor(52, 62, 78), 1))
+                painter.setPen(QtGui.QPen(QtGui.QColor(colours.tick_line), 1))
                 painter.drawLine(
                     tick_x,
                     y + self.TICK_HEIGHT,
@@ -771,7 +894,7 @@ class SequenceTrack(QtWidgets.QWidget):
                     y + self.TICK_HEIGHT + self.CODE_HEIGHT,
                 )
             painter.setFont(tick_font)
-            painter.setPen(QtGui.QColor(146, 158, 176))
+            painter.setPen(QtGui.QColor(colours.tick_text))
             for row_label, tick_x, res_id in self._ticks:
                 if row_label != label:
                     continue
@@ -794,12 +917,38 @@ class SequenceTrack(QtWidgets.QWidget):
             painter.setBrush(base if selected else base.darker(160))
             painter.setPen(
                 QtGui.QPen(
-                    QtGui.QColor(255, 214, 120) if selected else QtGui.QColor(18, 22, 30),
+                    QtGui.QColor(255, 214, 120)
+                    if selected
+                    else QtGui.QColor(colours.cell_border),
                     2 if selected else 1,
                 )
             )
             painter.drawRect(rect)
             painter.setFont(entity_font if block.kind != "amino" else code_font)
-            painter.setPen(_foreground(rgb) if selected else QtGui.QColor(206, 214, 226))
+            painter.setPen(
+                _foreground(rgb) if selected else QtGui.QColor(colours.cell_text)
+            )
             painter.drawText(rect, align_center, block.label)
+
+        # the pose-contact bands, on top of the cell so they always read
+        painter.setPen(QtCore.Qt.PenStyle.NoPen)
+        for block in self._blocks:
+            if block.index >= len(self._rects):
+                continue
+            rect = self._rects[block.index]
+            if rect.isNull():
+                continue
+            for name in self._marks_of(block):
+                rgb, row = CONTACT_MARKS[name]
+                painter.setBrush(
+                    QtGui.QColor(int(rgb[0] * 255), int(rgb[1] * 255), int(rgb[2] * 255))
+                )
+                painter.drawRect(
+                    QtCore.QRect(
+                        rect.left(),
+                        rect.bottom() - 1 - (row + 1) * MARK_HEIGHT + 1,
+                        rect.width(),
+                        MARK_HEIGHT,
+                    )
+                )
         painter.end()

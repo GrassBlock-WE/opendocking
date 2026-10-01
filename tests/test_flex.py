@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Tests for the flexible-receptor PDBQT writer (module A.4 of the project brief)."""
+"""Tests for the flexible-receptor PDBQT writer."""
 
 from __future__ import annotations
 

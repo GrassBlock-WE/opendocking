@@ -8,11 +8,13 @@ that the equivalent lives in.
 Every definition below is taken from the source in this repository; nothing is
 paraphrased into a shape the code does not have. Private fields are marked as
 such and are shown for completeness. The upstream column names the class, struct
-or function in AutoDock Vina (the upstream C++ sources, Apache-2.0,
-Copyright (c) 2006–2010, The Scripps Research Institute) that the structure
-mirrors; the AutoDock 4 force field (GPL) is the reference for the AD4 typing
-and terms. The preparation layer follows the *behaviour* documented by Meeko
-(LGPL-2.1) but shares no code with it.
+or function in AutoDock Vina (`potentials.h`, `parse_pdbqt.cpp` and friends;
+Apache-2.0, Copyright (c) 2006–2010, The Scripps Research Institute) that the
+structure mirrors; the AutoDock 4 force field (GPL) is the reference for the AD4
+typing and terms. Those upstream sources are not distributed with this
+repository (see [`ARCHITECTURE.md`](ARCHITECTURE.md#what-is-not-in-the-tree)).
+The preparation layer follows the *behaviour* documented by Meeko (LGPL-2.1) but
+shares no code with it.
 
 ---
 
@@ -929,8 +931,8 @@ fields exist so that a flexible residue can rotate about an axis defined by
 
 **Vina equivalent.** The `pdbqt_initializer` / `parse_pdbqt.cpp` topology
 construction and Vina's branches; the `BRANCH a b` handling (including the
-"essentially empty branch" rule) is the direct reference, from AutoDock Vina's
-`parse_pdbqt.cpp` and `model.cpp`.
+"essentially empty branch" rule) is the direct reference, from `parse_pdbqt.cpp`
+and `model.cpp` in the upstream Apache-2.0 sources.
 
 ---
 

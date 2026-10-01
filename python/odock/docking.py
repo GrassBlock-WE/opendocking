@@ -108,6 +108,11 @@ class DockResult:
 
     poses: List[Pose]
     seed: int
+    #: The force field the run used (``"vina"``, ``"vinardo"`` or ``"ad4"``).
+    #: Reporters need it: a strain correction, an entropy estimate or a
+    #: consensus column all mean something different under a different
+    #: potential, and guessing it silently is not an option.
+    scoring: str = "vina"
     grid_mb: int = 0
     grid_points: int = 0
     num_tors: float = 0.0
@@ -315,6 +320,7 @@ def dock(
         receptor_pdbqt=receptor_text,
         ligand_pdbqt=ligand_text,
         energy_range=energy_range,
+        scoring=scoring,
     )
 
 
@@ -379,6 +385,7 @@ def result_from_engine(
     receptor_pdbqt: str,
     ligand_pdbqt: str,
     energy_range: float = 3.0,
+    scoring: Optional[str] = None,
 ) -> DockResult:
     """Convert a raw kernel result into a :class:`DockResult`."""
     poses = [
@@ -403,6 +410,7 @@ def result_from_engine(
     result = DockResult(
         poses=poses,
         seed=int(raw["seed"]),
+        scoring=str(scoring) if scoring is not None else str(engine.scoring),
         grid_mb=int(raw["grid_mb"]),
         grid_points=int(raw["grid_points"]),
         num_tors=float(raw["num_tors"]),

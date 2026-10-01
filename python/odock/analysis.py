@@ -28,8 +28,10 @@ element symbol ``H`` (or ``D``).
 from __future__ import annotations
 
 import math
+import os
 import xml.sax.saxutils as _saxutils
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -38,18 +40,32 @@ from .pocket import VDW_RADII
 
 __all__ = [
     "Cluster",
+    "FingerprintKey",
+    "FingerprintSchema",
+    "FingerprintSet",
     "Interaction",
+    "InteractionFingerprint",
     "INTERACTION_COLORS",
     "INTERACTION_LABELS",
+    "INTERACTION_KINDS",
     "COVALENT_RADII",
+    "PharmacophoreSummary",
     "VDW_RADII",
+    "WATER_KIND",
+    "WATER_RESNAMES",
     "cluster_poses",
+    "fingerprint_similarity",
     "interaction_diagram_svg",
+    "interaction_fingerprint",
     "interaction_summary",
     "interpolate_coords",
+    "pharmacophore_summary",
+    "pose_fingerprints",
     "profile_interactions",
+    "similarity_matrix",
     "symmetry_aware_rmsd",
     "symmetry_classes",
+    "water_mediated_contacts",
 ]
 
 
@@ -112,6 +128,7 @@ INTERACTION_COLORS: Dict[str, str] = {
     "cation_pi": "#ff9800",    # orange
     "hydrophobic": "#9e9e9e",  # grey
     "clash": "#ff1744",        # bright red
+    "water_bridge": "#3f51b5", # indigo, for the water-mediated case
 }
 
 #: Human-readable names for the legend.
@@ -122,7 +139,25 @@ INTERACTION_LABELS: Dict[str, str] = {
     "cation_pi": "Cation-pi",
     "hydrophobic": "Hydrophobic",
     "clash": "Steric clash",
+    "water_bridge": "Water-mediated",
 }
+
+#: The interaction kinds, best first.  ``clash`` is not a pharmacophore feature
+#: and is excluded from the fingerprints; the fingerprints add
+#: :data:`WATER_KIND` when water bridges are detected.
+INTERACTION_KINDS: Tuple[str, ...] = (
+    "hbond",
+    "salt_bridge",
+    "pi_pi",
+    "cation_pi",
+    "hydrophobic",
+)
+
+#: Residue names that are crystallographic water, for the water-bridge scan.
+WATER_RESNAMES = frozenset(("HOH", "WAT", "DOD", "H2O", "TIP", "TIP3", "SOL"))
+
+#: The interaction kind used for a water-mediated contact.
+WATER_KIND = "water_bridge"
 
 #: Order in which interactions are reported.
 _KIND_ORDER = {
@@ -224,6 +259,12 @@ class Interaction:
         ``"face-to-face"`` or ``"ASP189:OD1/OD2...LIG1:N1"``.
     subtype
         ``"face"`` or ``"edge"`` for ``pi_pi``, otherwise empty.
+    residue
+        ``(res_name, res_id, chain)`` of the **receptor** residue the contact
+        belongs to, filled in by :func:`profile_interactions` and
+        :func:`water_mediated_contacts`.  It is what makes an interaction
+        fingerprint possible without re-reading the receptor, and it is ``None``
+        for an interaction a caller built by hand.
     """
 
     kind: str
@@ -232,6 +273,7 @@ class Interaction:
     distance: float
     detail: str = ""
     subtype: str = ""
+    residue: Optional[Tuple[str, int, str]] = None
 
     def __str__(self) -> str:  # pragma: no cover - cosmetic
         return f"{self.kind}({self.a}, {self.b}, {self.distance:.2f} A) {self.detail}"
@@ -618,15 +660,41 @@ def _classify(atoms, coords, elements, adjacency, hydrogens, rings, bond_orders)
     return donors, acceptors, hydrophobic, cations, anions, has_h
 
 
+def _read_pdbqt(source) -> List["PoseAtom"]:
+    """Atoms of a PDBQT document given as text or as a path."""
+    from .consensus import pdbqt_atoms
+
+    raw = os.fspath(source) if isinstance(source, os.PathLike) else str(source)
+    if not raw.lstrip().startswith(("ATOM", "HETATM", "REMARK", "ROOT", "MODEL")):
+        path = Path(raw)
+        if path.exists() and path.is_file():
+            raw = path.read_text(encoding="utf-8", errors="replace")
+    atoms = pdbqt_atoms(raw)
+    if not atoms:
+        raise ValueError(
+            "the given text is neither PDBQT nor a path to a PDBQT/PDB file with "
+            "ATOM records"
+        )
+    return atoms
+
+
 def _structure(source) -> _Structure:
     """Normalise `source` into a :class:`_Structure`.
 
     Idempotent: passing a :class:`_Structure` back in returns it unchanged, so
     callers that profile many poses against one receptor normalise the receptor
     (and its bond perception) exactly once.
+
+    `source` may also be **PDBQT text** or a path to a PDBQT/PDB file; the
+    document is parsed with :func:`odock.consensus.pdbqt_atoms` (imported lazily,
+    because :mod:`odock.consensus` is the layer that owns the PDBQT plumbing and
+    it never imports this module back).
     """
     if isinstance(source, _Structure):
         return source
+
+    if isinstance(source, (str, os.PathLike)):
+        source = _read_pdbqt(source)
 
     bonds: List[Tuple[int, int]]
     orders: Optional[Dict[Tuple[int, int], float]]
@@ -1164,6 +1232,14 @@ def profile_interactions(
     out.extend(_clashes(rec, lig, float(clash_ratio), acceptered))
 
     out.sort(key=lambda item: (_KIND_ORDER[item.kind], item.distance))
+    # Cache the receptor residue on every interaction: the fingerprints and the
+    # report both need it, and re-deriving it per consumer means re-normalising
+    # the receptor's bond perception each time.
+    for item in out:
+        if item.residue is None and 0 <= item.a < len(rec.atoms):
+            atom = rec.atoms[item.a]
+            if atom.res_name:
+                item.residue = (atom.res_name, atom.res_id, atom.chain)
     return out
 
 
@@ -1400,6 +1476,638 @@ def interaction_summary(interactions, receptor, ligand, *, limit: int = 6) -> st
     ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
     selected = sorted(key for key, _ in ranked[: int(limit)])
     return ", ".join(f"{name}{res_id}" for name, res_id, _chain in selected)
+
+
+# ---------------------------------------------------------------------------
+# Interaction fingerprints (E.2 output -> a fixed-length vector per pose)
+# ---------------------------------------------------------------------------
+
+
+def _water_indices(structure: _Structure, names=WATER_RESNAMES) -> List[int]:
+    """Indices of the atoms whose residue name is a water."""
+    return [
+        i
+        for i, atom in enumerate(structure.atoms)
+        if atom.res_name.strip().upper() in names
+    ]
+
+
+def water_mediated_contacts(
+    receptor,
+    ligand,
+    *,
+    cutoff: float = 3.5,
+    water_names=WATER_RESNAMES,
+) -> List[Interaction]:
+    """Water bridges: a water that H-bonds the ligand *and* the receptor.
+
+    The geometric criterion is deliberately the simple, checkable one: a water
+    oxygen within `cutoff` Å of a polar ligand atom (a donor or an acceptor, as
+    :func:`profile_interactions` classifies them) **and** within `cutoff` Å of a
+    polar receptor atom.  No angle is tested and the water's own hydrogens are
+    not required, because a crystallographic water is usually an oxygen only --
+    the two-leg distance criterion is the standard first-pass definition and it
+    is stated here rather than implied.
+
+    Returns one :class:`Interaction` per (receptor atom, water, ligand atom)
+    triple, with ``kind="water_bridge"``, ``a`` the closest polar receptor atom,
+    ``b`` the closest polar ligand atom, ``distance`` the **shorter** of the two
+    legs, and ``detail`` naming all three (``"ASP189:OD2...HOH301...LIG1:N1"``).
+    The waters must be part of the receptor structure handed in; a receptor with
+    no waters yields an empty list, which is the correct answer for a structure
+    whose solvent was stripped.
+    """
+    if cutoff <= 0:
+        raise ValueError(f"cutoff must be positive, got {cutoff}")
+
+    rec = _structure(receptor)
+    lig = _structure(ligand)
+    if not rec.atoms or not lig.atoms:
+        return []
+
+    water_atoms = set(_water_indices(rec, water_names))
+    oxygens = [i for i in sorted(water_atoms) if rec.atoms[i].element.upper() == "O"]
+    if not oxygens:
+        return []
+
+    receptor_polar = sorted(
+        (set(rec.donors) | set(rec.acceptors)) - water_atoms
+    )
+    ligand_polar = sorted(set(lig.donors) | set(lig.acceptors))
+    if not receptor_polar or not ligand_polar:
+        return []
+
+    receptor_points = rec.coords[receptor_polar]
+    ligand_points = lig.coords[ligand_polar]
+
+    found: List[Interaction] = []
+    for water in oxygens:
+        centre = rec.coords[water]
+        to_receptor = np.linalg.norm(receptor_points - centre, axis=1)
+        to_ligand = np.linalg.norm(ligand_points - centre, axis=1)
+        if to_receptor.size == 0 or to_ligand.size == 0:
+            continue
+        receptor_best = int(np.argmin(to_receptor))
+        ligand_best = int(np.argmin(to_ligand))
+        if to_receptor[receptor_best] > cutoff or to_ligand[ligand_best] > cutoff:
+            continue
+        a = receptor_polar[receptor_best]
+        b = ligand_polar[ligand_best]
+        detail = f"{rec.label(a)}...{rec.label(water)}...{lig.label(b)}"
+        residue_atom = rec.atoms[a]
+        found.append(
+            Interaction(
+                kind=WATER_KIND,
+                a=int(a),
+                b=int(b),
+                distance=float(min(to_receptor[receptor_best], to_ligand[ligand_best])),
+                detail=detail,
+                residue=(
+                    (residue_atom.res_name, residue_atom.res_id, residue_atom.chain)
+                    if residue_atom.res_name
+                    else None
+                ),
+            )
+        )
+    found.sort(key=lambda item: (item.a, item.b, item.distance))
+    return found
+
+
+@dataclass(frozen=True)
+class FingerprintKey:
+    """One feature of an interaction fingerprint: a residue and a contact type.
+
+    ``hydrophobic``/``hbond``/... contacts with ``SER195`` are different
+    features even though they come from the same residue, which is what makes a
+    fingerprint comparable between poses: two poses that both touch ASP189 but
+    one by a salt bridge and the other by a hydrophobic contact are not the same
+    binding mode.
+    """
+
+    res_name: str
+    res_id: int
+    chain: str
+    kind: str
+
+    @property
+    def label(self) -> str:
+        """``"ASP189:hbond"``."""
+        residue = f"{self.res_name}{self.res_id}" if self.res_name else f"#{self.res_id}"
+        return f"{residue}:{self.kind}"
+
+    def __str__(self) -> str:  # pragma: no cover - cosmetic
+        return self.label
+
+
+@dataclass
+class FingerprintSchema:
+    """The fixed feature space a set of fingerprints is expressed in.
+
+    Two ways to build one:
+
+    * :meth:`observed` -- the union of the features a set of poses actually
+      presents.  Compact, and the right choice for comparing the poses of one
+      run against each other.
+    * :meth:`from_receptor` -- every residue the receptor has, crossed with
+      every interaction kind.  Truly fixed: the same schema can then be reused
+      for a different ligand, or for a second run on the same receptor, which is
+      what makes a cross-run fingerprint comparison possible.
+    """
+
+    keys: Tuple[FingerprintKey, ...]
+    #: ``key -> column``, built once so encoding many poses is O(features).
+    index: Dict[FingerprintKey, int] = field(default_factory=dict, repr=False)
+
+    def __post_init__(self) -> None:
+        self.keys = tuple(self.keys)
+        if not self.index:
+            self.index = {key: i for i, key in enumerate(self.keys)}
+
+    def __len__(self) -> int:
+        return len(self.keys)
+
+    def column(self, key: FingerprintKey) -> int:
+        """The column of `key`, or ``-1`` when it is not part of this schema."""
+        return self.index.get(key, -1)
+
+    @classmethod
+    def observed(
+        cls,
+        interactions,
+        *,
+        kinds: Sequence[str] = INTERACTION_KINDS,
+        include_water: bool = True,
+    ) -> "FingerprintSchema":
+        """The union of the features present in `interactions`.
+
+        `interactions` is either a single interaction list or an iterable of
+        lists (one per pose).  The keys are sorted, so the schema -- and
+        therefore every fingerprint built from it -- is deterministic.
+        """
+        allowed = set(kinds) | ({WATER_KIND} if include_water else set())
+        keys = set()
+        for group in _as_groups(interactions):
+            for item in group:
+                key = _fingerprint_key(item)
+                if key is not None and key.kind in allowed:
+                    keys.add(key)
+        return cls(keys=tuple(sorted(keys, key=_key_sort)))
+
+    @classmethod
+    def from_receptor(
+        cls,
+        receptor,
+        *,
+        kinds: Sequence[str] = INTERACTION_KINDS,
+        include_water: bool = False,
+    ) -> "FingerprintSchema":
+        """Every residue of `receptor` crossed with every interaction kind.
+
+        The result is independent of the ligand, so fingerprints from different
+        ligands or different runs land in the same vector space.  Waters are
+        excluded unless `include_water` is set, and the ``water_bridge`` feature
+        is a property of a *residue plus a bridging water*, so it is only added
+        when asked for.
+        """
+        structure = _structure(receptor)
+        kinds = tuple(kinds) + ((WATER_KIND,) if include_water else ())
+        residues = {}
+        waters = set(_water_indices(structure))
+        for i, atom in enumerate(structure.atoms):
+            if not atom.res_name or i in waters:
+                continue
+            residues[(atom.chain, atom.res_id, atom.res_name)] = None
+        keys = [
+            FingerprintKey(chain=chain, res_id=res_id, res_name=name, kind=kind)
+            for (chain, res_id, name) in residues
+            for kind in kinds
+        ]
+        return cls(keys=tuple(sorted(keys, key=_key_sort)))
+
+
+def _key_sort(key: FingerprintKey):
+    return (key.chain, key.res_id, key.res_name, _KIND_ORDER.get(key.kind, 99), key.kind)
+
+
+def _as_groups(interactions) -> List[List[Interaction]]:
+    """Normalise ``[interactions]`` / ``[[...], [...]]`` into a list of lists."""
+    if interactions is None:
+        return []
+    items = list(interactions)
+    if not items:
+        return []
+    if isinstance(items[0], Interaction):
+        return [items]
+    return [list(group) for group in items]
+
+
+def _fingerprint_key(item: Interaction) -> Optional[FingerprintKey]:
+    """The feature an interaction contributes, or ``None`` for a non-feature."""
+    if item.kind == "clash":
+        return None
+    residue = getattr(item, "residue", None)
+    if residue is None:
+        return None
+    return FingerprintKey(
+        res_name=residue[0], res_id=int(residue[1]), chain=str(residue[2]), kind=item.kind
+    )
+
+
+@dataclass
+class InteractionFingerprint:
+    """A pose's interactions as a fixed-length count vector.
+
+    Attributes
+    ----------
+    schema
+        The feature space the vector is expressed in.
+    counts
+        ``(K,)`` integer counts: how many contacts of each (residue, type) the
+        pose makes.  Counts rather than bits, because three hydrogen bonds to
+        one residue are not the same as one; :attr:`bits` gives the binary view.
+    labels
+        ``(K,)`` object array of the human-readable feature labels, in column
+        order, so a table can be written without consulting the schema.
+    """
+
+    schema: FingerprintSchema
+    counts: np.ndarray
+
+    def __post_init__(self) -> None:
+        self.counts = np.asarray(self.counts, dtype=float).ravel()
+        if self.counts.shape[0] != len(self.schema):
+            raise ValueError(
+                f"the fingerprint has {self.counts.shape[0]} values for a "
+                f"{len(self.schema)}-feature schema"
+            )
+
+    def __len__(self) -> int:
+        return int(self.counts.shape[0])
+
+    @property
+    def bits(self) -> np.ndarray:
+        """The binary view: 1 where the pose makes at least one such contact."""
+        return (self.counts > 0).astype(int)
+
+    @property
+    def labels(self) -> np.ndarray:
+        return np.array([key.label for key in self.schema.keys], dtype=object)
+
+    def present(self) -> List[FingerprintKey]:
+        """The features this pose actually presents, in schema order."""
+        return [key for key, value in zip(self.schema.keys, self.counts) if value > 0]
+
+    def to_dict(self, *, include_empty: bool = False) -> Dict[str, Any]:
+        """``{"labels": [...], "counts": [...], "bits": [...]}``.
+
+        With `include_empty` every column is written; without it only the
+        features the pose presents, which keeps a JSONL file of a large screen
+        readable.
+        """
+        pairs = [
+            (key.label, float(count))
+            for key, count in zip(self.schema.keys, self.counts)
+            if include_empty or count > 0
+        ]
+        return {
+            "labels": [label for label, _ in pairs],
+            "counts": [count for _, count in pairs],
+            "bits": [1 if count > 0 else 0 for _, count in pairs],
+        }
+
+    def __str__(self) -> str:  # pragma: no cover - cosmetic
+        return f"InteractionFingerprint({len(self)} features, {int((self.counts > 0).sum())} present)"
+
+
+def interaction_fingerprint(
+    interactions,
+    schema: FingerprintSchema,
+    *,
+    receptor=None,
+    ligand=None,
+) -> InteractionFingerprint:
+    """Encode one pose's interactions into `schema`.
+
+    `interactions` is the output of :func:`profile_interactions` for a single
+    pose (an iterable of lists is accepted and flattened only when it holds one
+    pose).  `receptor`/`ligand` are needed to resolve a contact back to its
+    residue when the interaction objects did not come from
+    :func:`profile_interactions`; the normal path does not need them because the
+    profiler attaches the residue key to every interaction it returns.
+    """
+    groups = _as_groups(interactions)
+    if len(groups) > 1:
+        raise ValueError(
+            "interaction_fingerprint encodes one pose; pass a single "
+            "interaction list, or use pose_fingerprints for a set"
+        )
+    items = groups[0] if groups else []
+    counts = np.zeros(len(schema), dtype=float)
+    for item in items:
+        key = _fingerprint_key(item)
+        if key is None and receptor is not None:
+            # An interaction built by hand carries no residue; resolve it from
+            # the receptor rather than dropping the contact silently.
+            key = _resolve_key(item, receptor, ligand)
+        if key is None:
+            continue
+        column = schema.column(key)
+        if column >= 0:
+            counts[column] += 1.0
+    return InteractionFingerprint(schema=schema, counts=counts)
+
+
+def _resolve_key(item, receptor, ligand) -> Optional[FingerprintKey]:
+    """The feature of an interaction that carries no residue key of its own."""
+    try:
+        rec = _structure(receptor)
+    except Exception:  # pragma: no cover - a receptor that cannot be read
+        return None
+    if not 0 <= item.a < len(rec.atoms):
+        return None
+    atom = rec.atoms[item.a]
+    if not atom.res_name:
+        return None
+    return FingerprintKey(atom.res_name, atom.res_id, atom.chain, item.kind)
+
+
+def fingerprint_similarity(a, b, *, metric: str = "tanimoto") -> float:
+    """Similarity of two fingerprints.
+
+    ``"tanimoto"`` (the default)
+        ``|A n B| / |A u B|`` over the **bit** vectors -- the standard
+        fingerprint Tanimoto.  ``1.0`` when the two poses make the same
+        contacts, ``0.0`` when they share none, ``nan`` when neither pose makes
+        any contact at all (the empty-versus-empty case is undefined, not 1.0).
+    ``"cosine"``
+        The cosine of the **count** vectors, so a pose that makes three
+        hydrogen bonds to a residue is closer to one that makes two than to one
+        that makes none.
+    ``"dice"``
+        ``2|A n B| / (|A| + |B|)`` over the bits -- Dice/Sørensen.
+    """
+    first = np.asarray(getattr(a, "counts", a), dtype=float).ravel()
+    second = np.asarray(getattr(b, "counts", b), dtype=float).ravel()
+    if first.shape != second.shape:
+        raise ValueError(
+            f"the two fingerprints must have the same length, got "
+            f"{first.shape[0]} and {second.shape[0]}"
+        )
+    if metric == "cosine":
+        denominator = float(np.linalg.norm(first) * np.linalg.norm(second))
+        if denominator <= 0.0:
+            return float("nan")
+        return float(np.dot(first, second) / denominator)
+    if metric not in ("tanimoto", "dice"):
+        raise ValueError(
+            f"unknown fingerprint metric {metric!r}; use 'tanimoto', 'cosine' or 'dice'"
+        )
+    bits_a = first > 0
+    bits_b = second > 0
+    shared = int(np.logical_and(bits_a, bits_b).sum())
+    union = int(np.logical_or(bits_a, bits_b).sum())
+    if metric == "dice":
+        total = int(bits_a.sum()) + int(bits_b.sum())
+        return float("nan") if total == 0 else 2.0 * shared / total
+    if union == 0:
+        return float("nan")
+    return shared / union
+
+
+def similarity_matrix(fingerprints, *, metric: str = "tanimoto") -> np.ndarray:
+    """The ``(M, M)`` pairwise similarity matrix, diagonal exactly 1.0.
+
+    The diagonal is set to 1.0 rather than computed, so a pose that makes no
+    contact at all still compares to itself as identical while its off-diagonal
+    Tanimoto stays ``nan``.
+    """
+    items = [np.asarray(getattr(fp, "counts", fp), dtype=float).ravel() for fp in fingerprints]
+    count = len(items)
+    out = np.full((count, count), np.nan, dtype=float)
+    for i in range(count):
+        out[i, i] = 1.0
+        for j in range(i + 1, count):
+            value = fingerprint_similarity(items[i], items[j], metric=metric)
+            out[i, j] = out[j, i] = value
+    return out
+
+
+@dataclass
+class PharmacophoreSummary:
+    """The contacts that recur across the best-ranked poses.
+
+    A feature that appears in every one of the top poses is the reproducible
+    part of the binding mode -- the part worth designing against -- while a
+    feature that appears in one pose only is as likely to be a scoring artefact
+    as a real contact.
+    """
+
+    keys: List[FingerprintKey] = field(default_factory=list)
+    counts: List[int] = field(default_factory=list)
+    frequency: List[float] = field(default_factory=list)
+    n_poses: int = 0
+    interaction_types: Dict[str, int] = field(default_factory=dict)
+
+    def table(self, limit: Optional[int] = None) -> str:
+        """A plain-text table: feature, how many poses present it, frequency."""
+        rows = list(zip(self.keys, self.counts, self.frequency))
+        if limit is not None:
+            rows = rows[: int(limit)]
+        if not rows:
+            return "no recurring interaction (the selected poses share no feature)"
+        width = max(len(key.label) for key, _c, _f in rows)
+        lines = [f"{'feature'.ljust(width)}  poses  fraction", "-" * (width + 15)]
+        for key, count, frequency in rows:
+            lines.append(
+                f"{key.label.ljust(width)}  {count:>5d}  {frequency:>8.2f}"
+            )
+        return "\n".join(lines)
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "n_poses": self.n_poses,
+            "features": [
+                {"label": key.label, "residue": f"{key.res_name}{key.res_id}",
+                 "chain": key.chain, "kind": key.kind, "poses": count,
+                 "frequency": frequency}
+                for key, count, frequency in zip(self.keys, self.counts, self.frequency)
+            ],
+            "interaction_types": dict(self.interaction_types),
+        }
+
+
+def pharmacophore_summary(fingerprints, *, min_frequency: float = 0.5) -> PharmacophoreSummary:
+    """Which (residue, interaction type) features recur across `fingerprints`.
+
+    Parameters
+    ----------
+    fingerprints
+        The fingerprints of the poses to summarise -- normally the top poses of
+        a consensus ranking, so that "recurring" means "recurring among the
+        poses the scoring function actually prefers".
+    min_frequency
+        Keep only features present in at least this fraction of the poses.
+        ``0.5`` (the default) keeps what a majority of the poses agree on.
+
+    Returns
+    -------
+    :class:`PharmacophoreSummary`, ordered by descending frequency and then by
+    the feature order, so it is deterministic.
+    """
+    items = [np.asarray(getattr(fp, "counts", fp), dtype=float).ravel() for fp in fingerprints]
+    total = len(items)
+    summary = PharmacophoreSummary(n_poses=total)
+    if total == 0:
+        return summary
+
+    ordered = list(fingerprints)
+    schema = getattr(ordered[0], "schema", None)
+    if schema is None:
+        raise TypeError("pharmacophore_summary needs InteractionFingerprint objects")
+
+    width = len(schema)
+    if any(item.shape[0] != width for item in items):
+        raise ValueError("the fingerprints do not share one schema")
+
+    stack = np.vstack(items)
+    present = (stack > 0).sum(axis=0)
+    threshold = float(min_frequency) * total
+    order = sorted(
+        (column for column in range(width) if present[column] >= threshold),
+        key=lambda column: (-int(present[column]), _key_sort(schema.keys[column])),
+    )
+    for column in order:
+        summary.keys.append(schema.keys[column])
+        summary.counts.append(int(present[column]))
+        summary.frequency.append(float(present[column]) / total)
+    for key in summary.keys:
+        summary.interaction_types[key.kind] = summary.interaction_types.get(key.kind, 0) + 1
+    return summary
+
+
+@dataclass
+class FingerprintSet:
+    """The fingerprints of a whole pose set, plus the matrices built from them."""
+
+    schema: FingerprintSchema
+    fingerprints: List[InteractionFingerprint]
+    #: The profiled interactions per pose, in the same order.
+    interactions: List[List[Interaction]] = field(default_factory=list)
+    #: Water bridges per pose, when the scan was asked for.
+    water_bridges: List[List[Interaction]] = field(default_factory=list)
+    receptor: Any = None
+    ligands: List[Any] = field(default_factory=list)
+
+    def __len__(self) -> int:
+        return len(self.fingerprints)
+
+    @property
+    def matrix(self) -> np.ndarray:
+        """The ``(M, K)`` count matrix, one row per pose."""
+        if not self.fingerprints:
+            return np.zeros((0, len(self.schema)), dtype=float)
+        return np.vstack([fp.counts for fp in self.fingerprints])
+
+    @property
+    def bits(self) -> np.ndarray:
+        """The ``(M, K)`` binary matrix."""
+        return (self.matrix > 0).astype(int)
+
+    def similarity(self, *, metric: str = "tanimoto") -> np.ndarray:
+        """The ``(M, M)`` similarity matrix across the poses."""
+        return similarity_matrix(self.fingerprints, metric=metric)
+
+    def pharmacophore(self, *, top: Optional[int] = None, min_frequency: float = 0.5):
+        """The recurring features, optionally restricted to the first `top` poses."""
+        chosen = self.fingerprints if top is None else self.fingerprints[: int(top)]
+        return pharmacophore_summary(chosen, min_frequency=min_frequency)
+
+    def labels(self) -> List[str]:
+        """The schema labels, in column order (a header row for the matrix)."""
+        return [key.label for key in self.schema.keys]
+
+
+def pose_fingerprints(
+    receptor,
+    ligands,
+    *,
+    include_water: bool = True,
+    kinds: Sequence[str] = INTERACTION_KINDS,
+    schema: Optional[FingerprintSchema] = None,
+    water_cutoff: float = 3.5,
+    **cutoffs,
+) -> FingerprintSet:
+    """Profile every ligand against one receptor and fingerprint the results.
+
+    Parameters
+    ----------
+    receptor
+        The receptor, in any form :func:`profile_interactions` accepts.  Waters
+        in it are **not** reported as interacting residues: a water is not a
+        pharmacophore feature.  They are used for the water-bridge scan instead
+        (pass ``include_water=False`` to skip it).
+    ligands
+        One entry per pose: an RDKit molecule or a sequence of Atom-like
+        objects, in any order.
+    kinds
+        The feature kinds the schema spans.
+    schema
+        An explicit feature space, e.g. :meth:`FingerprintSchema.from_receptor`
+        when fingerprints from several ligands must be comparable.  By default
+        the union of the features these poses present is used.
+    **cutoffs
+        Passed through to :func:`profile_interactions` (``hbond``, ``salt``,
+        ``pi``, ``cation_pi``, ``hydrophobic``, ``clash_ratio``).
+
+    Returns
+    -------
+    :class:`FingerprintSet`.  Clashes are never part of a fingerprint: a clash
+    is a defect, not a contact, and counting one would make two poses look
+    similar because both are bad.
+    """
+    receptor_structure = _structure(receptor)
+    water_atoms = set(_water_indices(receptor_structure))
+
+    interactions_per_pose: List[List[Interaction]] = []
+    bridges_per_pose: List[List[Interaction]] = []
+    for ligand in ligands:
+        ligand_structure = _structure(ligand)
+        contacts = [
+            item
+            for item in profile_interactions(
+                receptor_structure, ligand_structure, **cutoffs
+            )
+            if item.kind != "clash" and item.a not in water_atoms
+        ]
+        interactions_per_pose.append(contacts)
+        if include_water:
+            bridges_per_pose.append(
+                water_mediated_contacts(
+                    receptor_structure, ligand_structure, cutoff=water_cutoff
+                )
+            )
+        else:
+            bridges_per_pose.append([])
+
+    if schema is None:
+        schema = FingerprintSchema.observed(
+            interactions_per_pose + bridges_per_pose,
+            kinds=tuple(kinds),
+            include_water=include_water,
+        )
+
+    fingerprints = [
+        interaction_fingerprint(list(contacts) + list(bridges), schema)
+        for contacts, bridges in zip(interactions_per_pose, bridges_per_pose)
+    ]
+    return FingerprintSet(
+        schema=schema,
+        fingerprints=fingerprints,
+        interactions=interactions_per_pose,
+        water_bridges=bridges_per_pose,
+        receptor=receptor,
+        ligands=list(ligands),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1640,7 +2348,7 @@ def interaction_diagram_svg(
         )
 
     # Legend.
-    kinds = [k for k in ("hbond", "salt_bridge", "pi_pi", "cation_pi", "hydrophobic", "clash")]
+    kinds = list(INTERACTION_KINDS) + ["clash", WATER_KIND]
     legend_w, legend_h = 236.0, 34.0 + 22.0 * len(kinds)
     body.append(
         f'<rect x="16" y="16" width="{legend_w}" height="{legend_h}" rx="8" ry="8" '
