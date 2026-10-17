@@ -1023,7 +1023,15 @@ class StandardiseReport:
         if csv_path is not None:
             path = Path(csv_path)
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(self.to_csv(), encoding="utf-8", newline="")
+            # `Path.write_text(..., newline=...)` is **Python 3.10+** and this package
+            # declares `requires-python = ">=3.9"`, so the keyword version raised
+            # `TypeError: write_text() got an unexpected keyword argument 'newline'`
+            # there. The local interpreter is 3.10, which is why no developer machine
+            # could see it: the CI matrix runs 3.9, and that is the only place the
+            # declared floor is actually tested. `csv` needs `newline=""` so Windows
+            # does not turn the line endings into CRLF, so it is opened explicitly.
+            with path.open("w", encoding="utf-8", newline="") as handle:
+                handle.write(self.to_csv())
             written.append(path)
         if json_path is not None:
             path = Path(json_path)

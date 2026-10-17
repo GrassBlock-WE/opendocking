@@ -4,6 +4,68 @@ All notable changes to OpenDocking are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.3.7 — 2026-10-18
+
+Two defects that only the CI matrix could find, because each depends on something a
+developer machine does not have: a **different interpreter version**, and a **missing
+optional dependency**.
+
+### Fixed
+
+* **`odock standardise --audit` crashed on Python 3.9**, the declared floor.
+  `standardise.py` wrote its CSV with
+
+  ```python
+  path.write_text(self.to_csv(), encoding="utf-8", newline="")
+  ```
+
+  and `Path.write_text(..., newline=...)` is **Python 3.10+**, so the CSV was never
+  written there: `TypeError: write_text() got an unexpected keyword argument 'newline'`.
+  The local interpreter is 3.10, which is exactly why no developer machine could see it —
+  the 3.9 leg of the CI matrix is the only place `requires-python = ">=3.9"` is actually
+  exercised. The file is opened explicitly now, which is the pattern the rest of the
+  codebase already used for `newline=""`.
+
+* **The `analysis` extra did not exist, but the error message told users to install it.**
+  `cavity.py` raises
+
+  > the cavity analysis needs scipy ... `pip install scipy` (or
+  > `pip install opendocking[analysis]`)
+
+  and `pyproject.toml` declared no `analysis` extra at all — so the one instruction a
+  user got for fixing the ImportError was to install a name that is not in the metadata.
+  The eleven cavity tests failed on every CI leg with that same message, which is how it
+  surfaced: **the advice had never been executable.** `analysis = ["scipy>=1.10"]` is now
+  declared, and the CI installs `--extras=dev,gui,analysis`.
+
+### Added
+
+* **`tests/test_python_floor.py`** — the declared floor has to be true in the code, not
+  only in `pyproject.toml`. Four static checks: no shipped source calls
+  `write_text(..., newline=)` (3.10+) or `read_text(..., newline=)` (3.13+), the floor is
+  still `>=3.9` so relaxing it forces a re-read of the traps, every shipped source parses,
+  and **every extra named in an error message is actually declared**. The first check is
+  parsed with `ast` rather than searched with a regex, because the comment documenting the
+  trap quotes the offending call and a text search flags its own explanation — which it
+  did, on the first attempt.
+
+### Verified
+
+`test_python_floor` + `test_standardise` + `test_cavity` + `test_cli_surface` →
+**122 passed**; the AST check was shown to catch an injected offender; full suite in a
+clean environment → **2205 passed, 1 skipped, 0 failed**.
+
+### Still open
+
+The Windows legs still fail a `DID NOT WARN` in `test_read_sdf_skips_a_broken_record_with_a_warning`,
+`found.shape >= measured - 0.02` in the overlay test, one numeric comparison that came out
+equal where the test wants strictly smaller, and one count assertion; some viewport tests
+still reach a `None` renderer through paths other than the guarded assertions
+(`pick_atom`, `receptor_count`, `render_image`). The Linux legs are still blocked by
+`tests/test_project.py::reproducible_project` (one distinct pose from `exhaustiveness=8,
+seed=42` on Linux against at least two on Windows), which needs a Linux machine to
+diagnose.
+
 ## 0.3.6 — 2026-10-18
 
 ### Fixed

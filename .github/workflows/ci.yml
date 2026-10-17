@@ -166,9 +166,9 @@ jobs:
       # pytest/rdkit/openpyxl/ruff/pre-commit, `[gui]` is PyQt6 + ModernGL: the
       # workbench tests importorskip both, so without the extra they would vanish
       # from the run instead of failing (--require-gui catches that).
-      - name: maturin develop --release --extras=dev,gui
+      - name: maturin develop --release --extras=dev,gui,analysis
         shell: bash
-        run: maturin develop --release --extras=dev,gui
+        run: maturin develop --release --extras=dev,gui,analysis
 
       # demo/ is generated and .gitignore keeps it out of the repository, so a
       # fresh checkout has none of it and the accuracy tests would *skip*.  A

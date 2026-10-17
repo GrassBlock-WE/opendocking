@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "opendocking"
-version = "0.3.6"
+version = "0.3.7"
 description = "odock — a modern, open-source molecular docking toolchain (Rust core + Python workbench)"
 readme = "README.md"
 # PEP 639: an SPDX expression plus the files that carry the licence text.  The
@@ -49,6 +49,11 @@ dependencies = [
 [project.optional-dependencies]
 # Chemical perception, PDBQT preparation and the ligand/receptor pre-processing.
 chem = ["rdkit>=2022.9"]
+# Cavity classification: scipy supplies the connected-component labelling and the
+# Euclidean distance transform. `cavity.py` already tells a caller to run
+# `pip install opendocking[analysis]` when it is missing, and until now that extra
+# did not exist -- advice pointing at a name that is not in the metadata.
+analysis = ["scipy>=1.10"]
 # The PyQt6 + ModernGL 3D workbench.
 gui = ["PyQt6>=6.5", "moderngl>=5.8", "numpy>=1.22"]
 # Everything the test suite and the lint gate need, so `pip install ".[dev]"`
