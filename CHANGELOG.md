@@ -4,6 +4,45 @@ All notable changes to OpenDocking are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.3.11 — 2026-10-18
+
+### Fixed
+
+* **"Is this record a molecule?" was decided by RDKit's failure mode, which is a version
+  detail.** `test_read_sdf_skips_a_broken_record_with_a_warning` appends junk to a valid SDF
+  and expects a `UserWarning` naming the problem. It passed on the machine it was written
+  on and failed on **both** CI platforms with
+
+  ```
+  Failed: DID NOT WARN. No warnings of type (<class 'UserWarning'>,) were emitted.
+  Emitted warnings: [].
+  ```
+
+  The reader classified a dropped record by checking whether `SDMolSupplier[index]` returned
+  `None`. Junk text can equally come back as a **0-atom molecule**, and on the CI legs it
+  did — so the record was appended to the results as if it were a ligand and no note was
+  recorded at all. The rule is now structural and version-independent:
+  **a record with zero atoms is not a molecule**, and it is reported as a problem like any
+  other unparseable record.
+
+  `tests/test_chem_ligand.py` gained a test that forces the 0-atom branch through a stubbed
+  supplier, because no local RDKit build reaches it — the branch existed only on machines
+  whose RDKit behaved differently, which is exactly why it went unnoticed.
+
+### Verified
+
+`test_chem_ligand` + `test_standardise` → **165 passed** (with the new test); full suite in a
+clean environment → **2206 passed, 1 skipped, 0 failed**.
+
+### Still open
+
+Four CI failures remain, all Windows-leg-only:
+`test_the_search_reaches_the_chemical_superposition[...fluorobenzamidine]`,
+`test_enrichment_on_the_labelled_demo_set` (`0.9697` against `0.9545 ± 0.002`),
+`test_submit_poll_fetch_in_process` (`0 == 2`) and
+`test_an_unreadable_sdf_record_is_an_invalid_audit_entry` (`1 == 2`). The Linux legs are
+still blocked by `tests/test_project.py::reproducible_project`, which needs a Linux machine.
+
 ## 0.3.10 — 2026-10-18
 
 ### Fixed

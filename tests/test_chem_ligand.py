@@ -903,3 +903,40 @@ def test_a_smiles_library_round_trips_through_the_writer_convention(tmp_path: Pa
     assert [Chem.MolToSmiles(mol) for mol in again] == [
         Chem.MolToSmiles(mol) for mol in source
     ]
+
+def test_a_record_that_parses_to_no_atoms_is_a_problem_not_a_molecule(tmp_path, monkeypatch):
+    """RDKit's choice of failure mode is a version detail; the atom count is not.
+
+    Whether a junk SDF block comes back as `None` or as a 0-atom molecule differs between
+    RDKit builds -- measured on the CI legs, where the same garbage parsed into an empty
+    molecule, so the reader recorded no note, emitted no warning, and
+    `test_read_sdf_skips_a_broken_record_with_a_warning` failed on **both** platforms with
+    "DID NOT WARN. Emitted warnings: []" while passing on the machine it was written on.
+
+    So the classification is now structural: a record with zero atoms is a problem. This
+    test forces the 0-atom branch, which no local RDKit build reaches.
+    """
+    from rdkit import Chem
+    from odock.chem import ligand as ligand_module
+
+    good = Chem.MolFromSmiles("CCO")
+    good.SetProp("_Name", "good")
+    empty = Chem.MolFromSmiles("")  # 0 atoms, and not None
+    assert empty is not None and empty.GetNumAtoms() == 0
+
+    class _Supplier:
+        def __len__(self):
+            return 2
+
+        def __getitem__(self, index):
+            return good if index == 0 else empty
+
+    monkeypatch.setattr(
+        ligand_module.Chem, "SDMolSupplier", lambda *a, **k: _Supplier(), raising=True
+    )
+    path = tmp_path / "empty_record.sdf"
+    path.write_text("$$$$\n$$$$\n", encoding="utf-8")
+    mols, notes = ligand_module._collect(str(path), "sdf")
+    assert [m.GetProp("_Name") for m in mols] == ["good"]
+    assert any("0 atoms" in note for note in notes), notes
+    assert any(ligand_module._is_problem_note(note) for note in notes)

@@ -451,6 +451,16 @@ def _read_file(path: Path, kind: str) -> Tuple[List[object], List[str]]:
             if mol is None:
                 notes.append(f"record {index + 1}: RDKit could not parse it")
                 continue
+            # A record that parses into **no atoms** is not a molecule, and whether RDKit
+            # returns `None` or an empty mol for junk text is a version detail: measured
+            # on the CI legs, the same garbage block came back as a 0-atom molecule, so no
+            # note was recorded, no warning was emitted, and
+            # `test_read_sdf_skips_a_broken_record_with_a_warning` failed with
+            # "DID NOT WARN. Emitted warnings: []" on **both** platforms while passing on
+            # the machine it was written on. The atom count is the objective test.
+            if mol.GetNumAtoms() == 0:
+                notes.append(f"record {index + 1}: RDKit could not parse it (0 atoms)")
+                continue
             mols.append(mol)
         return mols, notes
 
