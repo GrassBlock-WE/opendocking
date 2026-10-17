@@ -63,6 +63,18 @@ jobs:
       - name: Check the leak rules (tools/inspect_dist.py --self-test)
         run: python tools/inspect_dist.py --self-test
 
+      # `pyproject.toml`'s `[tool.maturin] exclude` filters the **sdist**; the wheel
+      # copies `python-source` as-is, so any `__pycache__` this job created while
+      # importing its own tooling ships inside the wheel.  Measured on the 0.3.2
+      # release run: the wheel asserted to contain no bytecode contained
+      # `odock/__pycache__/*.cpython-311.pyc` for **every** module.  A wheel is
+      # importable code, not the build residue of the machine that made it, so the
+      # residue is removed before packaging rather than excluded afterwards.
+      #
+      # Written in Python, not `find`, because this runs on windows runners too.
+      - name: Remove bytecode residue before packaging
+        run: python tools/clean_bytecode.py
+
       - name: maturin build --release (wheel)
         run: maturin build --release --out dist
 
@@ -114,11 +126,13 @@ jobs:
         shell: bash
         run: |
           python -m venv wheel-test
-          if [ -d wheel-test/Scripts ]; then
-            echo "$PWD/wheel-test/Scripts" >> "$GITHUB_PATH"
-          else
-            echo "$PWD/wheel-test/bin" >> "$GITHUB_PATH"
-          fi
+          # Native path, from Python: `$PWD` is POSIX-style under Git Bash on a Windows
+          # runner and Actions does not translate GITHUB_PATH entries, so the venv was
+          # never on PATH there and the next step's `python` was the system one --
+          # `ModuleNotFoundError: No module named 'odock'` after a successful install.
+          VENV_BIN="$(python -c "import os;print(os.path.join(os.getcwd(),'wheel-test','Scripts' if os.name=='nt' else 'bin'))")"
+          echo "venv bin: $VENV_BIN"
+          echo "$VENV_BIN" >> "$GITHUB_PATH"
       - name: pip install the wheel
         shell: bash
         run: |

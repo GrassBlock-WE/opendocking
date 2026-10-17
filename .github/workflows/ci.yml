@@ -128,12 +128,18 @@ jobs:
         shell: bash
         run: |
           python -m venv .venv
-          if [ -d .venv/Scripts ]; then
-            echo "$PWD/.venv/Scripts" >> "$GITHUB_PATH"
-          else
-            echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
-          fi
-          echo "VIRTUAL_ENV=$PWD/.venv" >> "$GITHUB_ENV"
+          # Native paths, produced by *Python*: a Git Bash `$PWD` is POSIX-style even on
+          # a Windows runner (`/d/a/repo/repo`), and GitHub Actions does not translate
+          # entries written into GITHUB_PATH/GITHUB_ENV.  So on Windows the venv was
+          # never on PATH, `maturin develop` and the test run used different
+          # interpreters, and every Windows leg failed with
+          # `ModuleNotFoundError: No module named 'numpy'` -- while numpy is a declared
+          # runtime dependency and the same tree was fine on Linux.
+          VENV_BIN="$(python -c "import os;print(os.path.join(os.getcwd(),'.venv','Scripts' if os.name=='nt' else 'bin'))")"
+          VENV_ROOT="$(python -c "import os;print(os.path.join(os.getcwd(),'.venv'))")"
+          echo "venv bin: $VENV_BIN"
+          echo "$VENV_BIN" >> "$GITHUB_PATH"
+          echo "VIRTUAL_ENV=$VENV_ROOT" >> "$GITHUB_ENV"
 
       # The Qt/GL libraries the head-less workbench needs, and a font set, only on
       # Linux: the actions/ubuntu image is minimal.  Installing fonts does not

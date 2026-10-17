@@ -4,6 +4,54 @@ All notable changes to OpenDocking are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.3.3 — 2026-10-17
+
+The CI matrix had **never been green** — not on 0.3.2, not on 0.3.1, not on any 0.2.x
+commit. Turning it on exposed two long-standing defects and two workflow bugs, and this
+patch fixes what could be verified locally.
+
+### Fixed
+
+* **A recorded command kept the other platform's interpreter path.**
+  `benchmark.portable_command` normalised a leading interpreter only when it contained
+  the *running* platform's separator, so `C:\Users\...\python.exe` survived on Linux
+  and `/opt/venv/bin/python` survived on Windows — both of which a baseline is supposed
+  to redact, because a baseline is a published document. It now checks **both**
+  separators. Found by the CI matrix, which is the only place both platforms meet; the
+  existing test already asserted both forms and had been failing on Linux all along.
+
+* **The CI virtual environment was never on `PATH` on Windows.** The workflows wrote
+  `"$PWD/.venv/Scripts"` into `GITHUB_PATH`, and under Git Bash `$PWD` is POSIX-style
+  even on a Windows runner (`/d/a/repo/repo`); GitHub Actions does not translate those
+  entries. The venv therefore never appeared on `PATH`, `maturin develop` and the test
+  run used different interpreters, and every Windows leg failed with
+
+  ```
+  ModuleNotFoundError: No module named 'numpy'
+  ```
+
+  even though `numpy` is a declared runtime dependency and the same tree passed on
+  Linux. The path is now produced by **Python** (`os.path.join` with `os.name`), which
+  is native on both runners. The same bug in the Wheels workflow made the
+  install-and-run job report `ModuleNotFoundError: No module named 'odock'` after a
+  successful install.
+
+* **The wheel shipped bytecode.** `[tool.maturin] exclude` filters the **sdist**; a
+  wheel copies `python-source` as-is, so every `__pycache__` created while running the
+  build job shipped inside it — the wheel asserted to contain no bytecode contained
+  `odock/__pycache__/*.cpython-311.pyc` for **every** module. `tools/clean_bytecode.py`
+  now removes the residue **before** packaging and does it through `_fs.remove_tree`,
+  because a plain `shutil.rmtree` raised `PermissionError: [WinError 5]` on a read-only
+  `__pycache__` on the first attempt — the same platform quirk this project already had
+  one implementation of.
+
+### Verified
+
+`tests/test_benchmark.py` → **29 passed**; the interpreter normalisation now handles
+Windows, POSIX and mixed-separator forms, and a baseline built from a Windows-style
+command no longer carries `someone` in it. Full suite and CI status are reported with
+the release.
+
 ## 0.3.2 — 2026-10-17
 
 **The published source tree could not be built, and all eight CI jobs were red.**

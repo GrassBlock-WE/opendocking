@@ -96,15 +96,122 @@ ranking it would change), and one seed unless `--seeds` says otherwise. Waters
 are dropped; ions, cofactors and modified residues are kept, because they are
 part of the site.
 
-<!-- BOX-TABLE -->
+Measured with `python -m odock.panel --out runs/panel` on 2026-10-17, one seed
+(42), exhaustiveness 1, no per-pose refinement. 49 dockings, **59 minutes** on a
+16-core Windows machine (the machine was one process at a time, as a panel should
+be: the whole point is that every cell comes from the same protocol).
+
+| receptor | reference | box size (Å) | volume (Å³) | receptor atoms in box | grid points |
+|---|---|---|---|---|---|
+| 1HXW | RIT | 31.1 × 26.3 × 27.7 | **22 629** | 783 | 453 600 |
+| 1HVR | XK2 | 26.0 × 23.5 × 33.1 | 20 168 | **786** | 408 960 |
+| 3ERT | OHT | 26.4 × 22.8 × 26.7 | 16 062 | 683 | 325 872 |
+| 1M17 | AQ4 | 31.7 × 20.7 × 23.1 | 15 150 | 550 | 308 826 |
+| 1STP | BTN | 22.5 × 22.0 × 23.5 | 11 667 | 480 | 238 080 |
+| 1ERE_A | EST | 21.2 × 24.7 × 21.4 | 11 197 | 606 | 229 274 |
+| 3PTB | BEN | 17.9 × 20.0 × 20.5 | **7 319** | **335** | 150 920 |
+
+The table is the caveat, not decoration. The seven boxes span **7 319 to
+22 629 Å³** — a factor of **3.1** — and the number of receptor atoms inside them
+spans **335 to 786**. 1HXW's box is three times the volume of 3PTB's and holds
+twice the atoms; a ligand that scores better in 1HXW than in 3PTB is, on this
+evidence alone, as likely to have been given more room as to have found a better
+fit. Every cell below is read against this table.
 
 ## 2. The matrix
 
-<!-- MATRIX -->
+```
+ligand         3PTB         1STP         3ERT         1M17         1HVR       1ERE_A         1HXW
+-------------------------------------------------------------------------------------------------
+BEN           -5.71        -5.96        -5.38        -5.32        -4.96        -5.89        -4.95
+BTN           -5.30        -6.96        -6.21        -5.96        -6.54        -6.85        -6.07
+EST           -6.07        -7.78       -10.10        -8.96        -8.78       -11.20        -8.33
+AQ4           -6.45        -6.66        -6.14        -6.85        -7.25        -5.41        -7.55
+OHT           -6.55        -7.03        -7.76        -7.68        -8.50        -4.05        -8.32
+XK2           -8.80        -8.78       -10.42       -11.32       -14.55       +14.70       -10.90
+RIT           -7.51        -7.46        -8.91        -8.38        -9.47        -2.60        -8.38
+```
 
-## 3. The selectivity profile and the hit rate
+kcal/mol, the best pose of each campaign; more negative is better.
 
-<!-- HIT-RATE -->
+```
+ligand best      affinity second       gap  <=  home rank  reading
+------------------------------------------------------------------
+BEN    1STP         -5.96 1ERE_A     +0.08   5    no    3    5 of 7 receptors within 1 kcal/mol of 1STP: a preference, not selectivity
+BTN    1STP         -6.96 1ERE_A     +0.10   6   yes    1    6 of 7 receptors within 1 kcal/mol of 1STP: a preference, not selectivity
+EST    1ERE_A      -11.20 3ERT       +1.10   1   yes    1    selective for 1ERE_A by 1.10 kcal/mol
+AQ4    1HXW         -7.55 1HVR       +0.30   4    no    3    4 of 7 receptors within 1 kcal/mol of 1HXW: a preference, not selectivity
+OHT    1HVR         -8.50 1HXW       +0.18   4    no    7    4 of 7 receptors within 1 kcal/mol of 1HVR: a preference, not selectivity
+XK2    1HVR        -14.55 1M17       +3.22   1   yes    1    selective for 1HVR by 3.22 kcal/mol
+RIT    1HVR         -9.47 3ERT       +0.56   2    no    3    2 of 7 receptors within 1 kcal/mol of 1HVR: a preference, not selectivity
+```
+
+`<=` is the number of receptors within 1 kcal/mol of the best; `home` asks
+whether the best target is the protein family the ligand was crystallised
+against; `rank` is that family's best-placed structure. **One seed**, so there is
+no spread and every figure is a point estimate — §4 measures what that costs.
+
+```
+hit rate: 3/7 ligands prefer their own protein family (strict, exact co-crystallised structure: 3/7)
+  miss BEN (benzamidine): best 1STP — promiscuous: 3PTB is within 1 kcal/mol of 1STP (+0.25 kcal/mol)
+  miss AQ4 (erlotinib):   best 1HXW — promiscuous: 1M17 is within 1 kcal/mol of 1HXW (+0.71 kcal/mol)
+  miss OHT (tamoxifen):   best 1HVR — box: 1HVR's box is 1.80x the volume of 1ERE_A's
+  miss RIT (ritonavir):   best 1HVR — score: 1HXW is +1.09 kcal/mol behind 1HVR with comparable boxes
+```
+
+The matrix already contains the headline, and it is not flattering:
+
+* **Only two ligands separate their target from everything else** — XK263
+  (3.22 kcal/mol clear of the runner-up) and estradiol (1.10 kcal/mol clear) —
+  and only those two arrive at their own protein at rank 1.
+* **Four ligands do not distinguish their target at all**: benzamidine has five
+  receptors within 1 kcal/mol of its best, biotin six, erlotinib four, tamoxifen
+  four. A ranking that puts the right protein first by 0.08 kcal/mol is not a
+  selectivity result; it is a tie broken by noise.
+* **One cell is a hard clash, not a weak binder**: XK263 in the estradiol site of
+  1ERE_A reports **+14.70 kcal/mol**. That is the scoring function saying "this
+  46-atom ligand does not fit in this closed pocket", and it is the correct
+  answer — 1ERE_A has the fewest receptor atoms in the smallest box of the two
+  ERα structures. It is left in the table rather than filtered out, because
+  hiding it would hide the evidence that the pocket really is smaller.
+* **The values are weaker than the redocking benchmark** (benzamidine −5.71 here
+  against −6.21 at exhaustiveness 16): this is a screening-effort protocol with
+  no per-pose refinement, and it should not be quoted as an affinity.
+
+### The hit rate: 3 of 7
+
+Of the seven co-crystallised ligands, **three arrive at their own protein family
+at rank 1** — biotin at streptavidin, estradiol at the ERα pair, XK263 at HIV-1
+protease — and the strict count (the exact structure the ligand was crystallised
+in) is also **3 of 7**, because estradiol's best cell is 1ERE_A, the structure it
+came from. Four miss, and each miss is a different story (table below).
+
+That number is the reason the module exists. It is falsifiable, it is checkable
+by hand against the matrix, and it is not 7/7: at a screening-effort search in a
+panel this small, an empirical scoring function gets the *own* target first three
+times out of seven, and the four failures are not one failure repeated.
+
+| ligand | best | own protein | home rank | classified | what actually happened |
+|---|---|---|---|---|---|
+| benzamidine | 1STP (−5.96) | 3PTB (−5.71) | 3 | promiscuous | 0.25 kcal/mol apart: a two-atom-wide amidine does not encode enough shape to pick trypsin out of a panel this small |
+| erlotinib | 1HXW (−7.55) | 1M17 (−6.85) | 3 | promiscuous | 0.71 kcal/mol apart — inside the noise of a screening-effort search |
+| tamoxifen | 1HVR (−8.50) | 1ERE_A (−4.05) | 7 | box | 1HVR's box is 1.8× the volume of 1ERE_A's, and 1ERE_A's pocket is the smaller, closed (estradiol-bound) conformation — tamoxifen's basic side chain needs the antagonist conformation that 3ERT, its *other* family member, does provide |
+| ritonavir | 1HVR (−9.47) | 1HXW (−8.38) | 3 | score | 1.09 kcal/mol behind, comparable boxes: the two HIV-1 protease structures are different conformations and ritonavir prefers the other one |
+
+The tamoxifen row is the one worth reading twice. Its *family* is ERα and both
+ERα structures are in the panel: 3ERT scores it −7.76 (rank 2) while 1ERE_A
+scores it −4.05 (rank 7). That is not a scoring bug and not a box effect alone —
+it is the well-known fact that 4-hydroxytamoxifen binds the **antagonist**
+conformation of ERα, whose helix-12 position estradiol's structure does not have.
+A panel built from one arbitrary structure per family would have reported either
+"tamoxifen prefers nothing" or "tamoxifen is selective for ERα", depending on
+which structure happened to be included. Two structures per family turned that
+into an answer.
+
+The estradiol row is the mirror image: it scores −11.20 at 1ERE_A and −10.10 at
+3ERT, the top two cells of its row, with the gap (1.10) sitting just above the
+window. The ER pair is the one family where the panel reproduces the expected
+order cleanly.
 
 ## 4. Uncertainty: what one seed is worth
 

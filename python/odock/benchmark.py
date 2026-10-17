@@ -812,7 +812,13 @@ def portable_command(text: str) -> str:
             # is what `sys.argv[0]` is under `python -m`) becomes the module form,
             # so the recorded command can actually be copied and run.
             tokens[0] = "python -m odock.benchmark"
-        elif "python" in first and (os.sep in tokens[0] or "/" in tokens[0]):
+        elif "python" in first and ("\\" in tokens[0] or "/" in tokens[0]):
+            # Both separators, not `os.sep`: a recorded command may have been written
+            # on the *other* platform, because a baseline is a published document.
+            # Testing only the running platform's separator meant
+            # `C:\Users\...\python.exe` survived on Linux and `/opt/venv/bin/python`
+            # survived on Windows -- seen at last because the CI matrix runs both, and
+            # that check had never been green.
             tokens[0] = "python"
     return " ".join(tokens)
 
