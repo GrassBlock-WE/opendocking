@@ -1247,7 +1247,7 @@ def test_the_interaction_dashes_are_visible_not_hairlines(qapp):
     window.resize(800, 560)
     window.show()
     qapp.processEvents()
-    assert window.viewport.renderer is not None
+    _require_gl(window.viewport)
     window.set_pose(2)
     qapp.processEvents()
     window._annotate_interactions(quiet=True)
@@ -1300,7 +1300,7 @@ def test_the_emphasis_suppresses_the_base_spheres_it_replaces(qapp):
     window.show()
     qapp.processEvents()
     renderer = window.viewport.renderer
-    assert renderer is not None
+    _require_gl(window.viewport)
     window._annotate_interactions(quiet=True)
     qapp.processEvents()
     assert window.scene.interaction_focus, "Show interactions must set the focus"
@@ -1381,7 +1381,7 @@ def test_every_pose_draws_the_same_protein(qapp):
     window.resize(640, 480)
     window.show()
     qapp.processEvents()
-    assert window.viewport.renderer is not None
+    _require_gl(window.viewport)
     assert len(window.pose_models) == 2
 
     states = []

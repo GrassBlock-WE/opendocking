@@ -1496,10 +1496,13 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let canceller = {
             let token = token.clone();
+            let counter = std::sync::Arc::clone(&counter);
             std::thread::spawn(move || {
                 std::thread::sleep(Duration::from_millis(40));
                 token.cancel();
-                let _ = tx.send(Instant::now());
+                // Read the count *after* the request, so the difference measures the
+                // work done between "you were asked to stop" and "I stopped".
+                let _ = tx.send((Instant::now(), counter_value(&counter)));
             })
         };
 
@@ -1511,8 +1514,9 @@ mod tests {
             1,
             Some(&token),
         );
-        let cancel_at = rx.recv().expect("the canceller must report back");
+        let (cancel_at, at_cancel) = rx.recv().expect("the canceller must report back");
         let latency = cancel_at.elapsed();
+        let evaluated_after = counter_value(&counter).saturating_sub(at_cancel);
         canceller.join().unwrap();
 
         assert!(!poses.is_empty(), "a cancelled run must still report a pose");
@@ -1520,9 +1524,29 @@ mod tests {
             poses[0].energy.is_finite(),
             "the fallback pose has a bogus energy"
         );
+        // The contract is **work**, not wall clock. The search is documented to notice
+        // the request at its next Monte-Carlo step, so what has to be small is how many
+        // evaluations happen afterwards -- not how many milliseconds they take.
+        //
+        // The bound is the per-step work: `exhaustiveness = 2` workers each finishing
+        // its current local minimisation (`local_steps = 20`), plus margin. A full run
+        // is ~2 x 400 global steps x 21 evaluations, so anything here is two orders of
+        // magnitude short of running to completion.
         assert!(
-            latency < Duration::from_millis(100),
-            "cancellation took {latency:?}"
+            evaluated_after <= 64,
+            "the search kept evaluating {evaluated_after} time(s) after the cancel \
+             request; it is documented to stop at the next Monte-Carlo step"
+        );
+        // A **hang detector**, not a latency contract. This assertion used to demand
+        // `latency < 100 ms`, which is not portable: one evaluation sleeps 200 us by
+        // construction, so on a loaded runner the scheduler can stretch a single step
+        // far past that and the test fails for a reason unrelated to cancellation --
+        // measured on the CI ubuntu runner, where it was the only Rust failure. Real
+        // promptness is the evaluation bound above; this only catches a search that
+        // never returns.
+        assert!(
+            latency < Duration::from_secs(10),
+            "cancellation hung for {latency:?}"
         );
     }
 

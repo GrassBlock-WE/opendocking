@@ -4,6 +4,48 @@ All notable changes to OpenDocking are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.3.6 — 2026-10-18
+
+### Fixed
+
+* **A cancellation test asserted wall clock where the contract is work.**
+  `search::tests::a_cancelled_run_returns_promptly_with_a_valid_pose` demanded
+  `latency < 100 ms`, but one evaluation sleeps 200 µs *by construction* — so on a loaded
+  runner the scheduler can stretch a single step far past 100 ms and the test fails for a
+  reason that has nothing to do with cancellation. Measured on the CI ubuntu runner, where
+  it was the only Rust failure.
+
+  The assertion is now what the documentation actually promises: the search notices the
+  request **at its next Monte-Carlo step**, so the number that must be small is the
+  **evaluation count afterwards**, not the milliseconds. The bound is derived from the
+  per-step work (`exhaustiveness = 2` workers each finishing a `local_steps = 20`
+  minimisation, plus margin → 64), against a full run of ~2 × 400 × 21 evaluations, so it
+  is two orders of magnitude short of running to completion. The remaining time bound is
+  a documented **hang detector** (10 s), not a latency contract.
+
+* **Three more viewport assertions were capability-critical.** `0.3.5` converted the nine
+  that carried a `no GL context:` message; these three read
+  `assert window.viewport.renderer is not None` (and one `assert renderer is not None`)
+  and were missed by the exact-match replacement, so the windows-latest legs still failed
+  on them. All twelve now go through `_require_gl()`, which skips with the driver's own
+  error text and still escalates to a failure under `--require-gui`.
+
+### Verified
+
+`cargo test -p dock-core --lib` → **116 passed, 0 failed**;
+`cargo clippy -p dock-core --all-targets -- -D warnings` → clean;
+`test_gui_viewport` and the five GUI-adjacent modules → **256 passed, 1 skipped**; full
+Python suite in a clean environment → **2201 passed, 1 skipped, 0 failed**.
+
+### Still open
+
+The Windows legs still fail `cmd_standardise` returning non-zero,
+`found.shape >= measured - 0.02` in the overlay test, and one count assertion. The Linux
+legs are still blocked by `tests/test_project.py::reproducible_project` (a single distinct
+pose from `exhaustiveness=8, seed=42` on Linux against at least two on Windows), which
+needs a Linux machine to diagnose — changing the assertion from here would be a guess.
+Both are named in the CI log rather than absorbed into it.
+
 ## 0.3.5 — 2026-10-17
 
 ### Fixed
