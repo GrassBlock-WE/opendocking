@@ -1154,6 +1154,9 @@ def test_the_box_fill_never_paints_over_an_atom_in_front_of_it(qapp):
     window.resize(640, 480)
     window.show()
     qapp.processEvents()
+    # The renderer is created on the first paint, so this is the earliest
+    # honest point to ask whether this machine can make a GL context.
+    require_gl(window.viewport)
     assert window.load_receptor(str(receptor)) is True
     window.load_ligand(str(ligand))  # fits the box to the ligand
     qapp.processEvents()
@@ -1324,6 +1327,9 @@ def test_loading_a_ligand_does_not_wash_out_the_receptor(qapp):
     window.resize(640, 480)
     window.show()
     qapp.processEvents()
+    # The renderer is created on the first paint, so this is the earliest
+    # honest point to ask whether this machine can make a GL context.
+    require_gl(window.viewport)
     assert window.load_receptor(RECEPTOR_PDBQT) is True
     window.load_ligand(LIGAND_PDBQT)  # frames the ligand, close to the box
     qapp.processEvents()

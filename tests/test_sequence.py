@@ -438,6 +438,12 @@ def window(qapp):
     workbench.resize(1200, 800)
     workbench.show()
     qapp.processEvents()
+    # Guarded once, in the fixture, rather than at each assertion: twelve tests in
+    # this module reach the renderer by different routes, so a per-assertion guard
+    # left eleven of them failing with `'NoneType' object has no attribute ...` on a
+    # runner with no GL context. A fixture-level skip is also the honest statement --
+    # every test here needs a working viewport, so if there is none, none of them ran.
+    require_gl(workbench.viewport)
     yield workbench
     i18n.set_language("en")
     workbench.close()

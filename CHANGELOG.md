@@ -4,6 +4,51 @@ All notable changes to OpenDocking are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.3.9 — 2026-10-18
+
+### Fixed
+
+* **The GL guard was placed at the assertion, and the renderer is reached eleven other
+  ways.** `0.3.8` put `require_gl()` at one call site per module; the CI run then failed
+  with `AttributeError: 'NoneType' object has no attribute 'receptor_count'` from **eleven
+  other tests** in `test_sequence.py`. The guard belongs where the window is built, so
+  `test_sequence.py`'s `window` fixture calls it once and a machine without a GL context
+  skips the module instead of failing eleven times. Two tests in `test_gui_viewport.py`
+  build their own window inline and are guarded immediately after the first paint, which is
+  the earliest honest moment to ask.
+
+* **`require_gl()` now distinguishes two states, because it conflated them.** The first
+  version skipped whenever `renderer` was `None`. Put in `test_surface.py`'s fixture, where
+  the renderer is created **lazily on first paint**, that converted **five passing tests
+  into skips** — a green run that did not run, which is precisely the failure mode this
+  whole exercise is about. It now:
+  * **no renderer + a recorded GL error** → skip (the machine cannot make a context);
+  * **no renderer + no error** → **fail**, because a missing context always leaves an error
+    behind, so no error means the renderer was never asked for — a defect in the test or
+    the workbench, not a capability limit.
+
+  The `test_surface.py` fixture guard was reverted accordingly; the renderer's lazy creation
+  is normal there and the existing per-assertion guard is the right place.
+
+### Verified
+
+The guard's three branches were driven directly: a stubbed viewport with
+`_gl_error = "wglCreateContextAttribsARB not found"` raises `Skipped`, a stubbed viewport
+with no error raises `Failed`, and a working context passes through.
+`test_gui_viewport` + `test_sequence` + `test_surface` + `test_dashboard` + `test_i18n` →
+**286 passed, 1 skipped**, with no unwanted skips. Full suite in a clean environment →
+**2205 passed, 1 skipped, 0 failed**.
+
+### Still open
+
+Four non-GL CI failures remain, all on the Windows legs:
+`test_read_sdf_skips_a_broken_record_with_a_warning` (`DID NOT WARN`),
+`test_the_search_reaches_the_chemical_superposition[...fluorobenzamidine]`,
+`test_enrichment_on_the_labelled_demo_set` (`0.9697` against `0.9545 ± 0.002`),
+`test_submit_poll_fetch_in_process` (`0 == 2`) and
+`test_an_unreadable_sdf_record_is_an_invalid_audit_entry` (`1 == 2`). The Linux legs are
+still blocked by `tests/test_project.py::reproducible_project`, which needs a Linux machine.
+
 ## 0.3.8 — 2026-10-18
 
 ### Fixed

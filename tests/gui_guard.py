@@ -24,15 +24,27 @@ __all__ = ["require_gl"]
 
 
 def require_gl(viewport) -> None:
-    """Skip unless ``viewport`` managed to create an OpenGL renderer.
+    """Skip when the machine cannot make a GL context; fail when one was never asked for.
+
+    The distinction matters and cost five passing tests the first time it was missed: with
+    no renderer **and** a recorded GL error the machine cannot make a context (skip); with
+    no renderer **and no error** the renderer was simply never created, which is a defect
+    in the test or the workbench (fail). Treating the second as a skip turns a green run
+    into a green run that did not run.
 
     Args:
-        viewport: anything with a ``renderer`` attribute (``None`` when GL failed) and a
-            ``_gl_error`` string carrying the driver's own message.
+        viewport: anything with a ``renderer`` attribute (``None`` until a context exists)
+            and a ``_gl_error`` string recording why creation failed.
     """
     if getattr(viewport, "renderer", None) is not None:
         return
-    reason = getattr(viewport, "_gl_error", None) or "no details from the driver"
+    reason = (getattr(viewport, "_gl_error", None) or "").strip()
+    if not reason:
+        pytest.fail(
+            "the viewport has no renderer and recorded no GL error: the renderer was "
+            "never created. That is a defect in the test or the workbench, not a machine "
+            "without OpenGL -- a missing context always leaves an error behind."
+        )
     pytest.skip(
         f"moderngl/PyQt6 cannot create an OpenGL context on this machine: {reason}"
     )
