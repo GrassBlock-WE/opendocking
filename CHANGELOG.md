@@ -4,6 +4,47 @@ All notable changes to OpenDocking are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.3.5 — 2026-10-17
+
+### Fixed
+
+* **A missing OpenGL context is a capability, not a defect — and the tests now say so.**
+  Nine assertions in `tests/test_gui_viewport.py` read
+
+  ```python
+  assert renderer is not None, f"no GL context: {viewport._gl_error}"
+  ```
+
+  which turned "this runner has no GL driver" into six failures per CI leg — measured on
+  the windows-latest runner, where every viewport test failed with
+  `wglCreateContextAttribsARB not found`. `pytest.importorskip("moderngl")` cannot catch
+  it: the module imports fine and it is the *context* that cannot be created.
+
+  They are now a single `_require_gl()` helper that **skips** with the driver's own error
+  text. The skip message names `moderngl`/`PyQt6`, so `--require-gui` still escalates it
+  to a failure — on a machine that declared the GUI extra a missing context *is* the
+  defect, and that flag exists to surface it. This is the same distinction the rest of the
+  suite already makes: a skip is a statement about the machine, a failure is a statement
+  about the code, and conflating them is how a capability limit becomes an alarm nobody
+  reads.
+
+### Verified
+
+`test_gui_viewport` + `test_viewport_interactions` + `test_sequence` + `test_dashboard` +
+`test_output_encoding` + `test_cli_surface` → **256 passed, 1 skipped**. The change is
+confined to one test module, so the Python package is untouched.
+
+### Still open
+
+The Windows legs still have failures that are **not** the GL class:
+`test_the_command_writes_the_library_and_the_audit` (`cmd_standardise(args)` returns
+non-zero), `test_the_overlay_enriches_the_amidine_series_in_the_bundled_library`
+(`found.shape >= measured - 0.02`), one count assertion, and
+`cargo test -p dock-core --lib` on the Windows runner. The Linux legs are still blocked by
+`tests/test_project.py::reproducible_project` (a single distinct pose from
+`exhaustiveness=8, seed=42` on Linux against at least two on Windows), which needs a Linux
+machine to diagnose. Each is named in the CI log rather than absorbed.
+
 ## 0.3.4 — 2026-10-17
 
 The three blockers the CI matrix exposed once 0.3.3 put the tests on PATH — and all three
