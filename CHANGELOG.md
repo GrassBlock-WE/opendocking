@@ -4,6 +4,52 @@ All notable changes to OpenDocking are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.3.10 — 2026-10-18
+
+### Fixed
+
+* **The last two GL-dependent tests in `test_sequence.py` had no guard at all**, and they
+  failed for two *different* reasons — which is why one blanket fix could not cover them:
+
+  * `test_loading_a_ligand_keeps_the_receptor_in_view` reached
+    `window.viewport.renderer.receptor_count` and raised
+    `AttributeError: 'NoneType' object has no attribute 'receptor_count'`. The renderer
+    appears only once there is geometry to draw, so the guard belongs immediately before
+    the first line that dereferences it — not after the first `processEvents()`, which is
+    what the previous attempt assumed and why that attempt made things worse rather than
+    better.
+  * `test_the_first_pose_load_frames_the_pocket_once` failed with
+    `AssertionError: the first pose load frames the pocket`, because framing happens when
+    the pose is **drawn**. The guard goes right after the pose load, where the drawing is
+    meant to have happened.
+
+  Both now call `require_gl()` and both are green locally.
+
+### Verified
+
+`test_sequence.py` → **53 passed**; full suite in a clean environment →
+**2205 passed, 1 skipped, 0 failed**.
+
+### Note on the previous attempt
+
+`0.3.9`'s follow-up work tried to place these guards with a script that matched
+`DockingWorkbench(` and inserted after the first `processEvents()`. It over-applied (adding
+guards to tests that never touch the renderer, which then *failed* under the stricter
+`require_gl`), it under-applied (it removed a guard that was needed), and it left orphaned
+comments. The fix was reverted to the published state rather than shipped, and this release
+does it by reading each test and putting the guard where *that* test's renderer actually
+comes into existence. **A pattern that fits one test is not a pattern that fits the file.**
+
+### Still open
+
+Four non-GL CI failures remain, all Windows-leg-only:
+`test_read_sdf_skips_a_broken_record_with_a_warning` (`DID NOT WARN`),
+`test_the_search_reaches_the_chemical_superposition[...fluorobenzamidine]`,
+`test_enrichment_on_the_labelled_demo_set` (`0.9697` against `0.9545 ± 0.002`),
+`test_submit_poll_fetch_in_process` (`0 == 2`) and
+`test_an_unreadable_sdf_record_is_an_invalid_audit_entry` (`1 == 2`). The Linux legs are
+still blocked by `tests/test_project.py::reproducible_project`, which needs a Linux machine.
+
 ## 0.3.9 — 2026-10-18
 
 ### Fixed

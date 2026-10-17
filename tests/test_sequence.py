@@ -998,6 +998,9 @@ def test_the_first_pose_load_frames_the_pocket_once(qapp):
 
         window.load_poses((DEMO / "poses.pdbqt").read_text(encoding="utf-8"))
         qapp.processEvents()
+        # Framing happens when the pose is drawn, so this machine needs a working
+        # context before the assertion below means anything.
+        require_gl(viewport)
         assert viewport.camera.distance < whole, "the first pose load frames the pocket"
         # Framing is automatic; the cut-away is not. Only the explicit action
         # below clips, so nothing a pose does can change the protein's cut plane.
@@ -1318,6 +1321,9 @@ def test_loading_a_ligand_keeps_the_receptor_in_view(qapp):
             f"camera {window.viewport.camera.distance:.2f} A is inside the "
             f"{size[0]:.1f}x{size[1]:.1f}x{size[2]:.1f} A box"
         )
+        # The renderer appears once there is geometry to draw: this is the first
+        # line that dereferences it, so it is the first point worth asking about.
+        require_gl(window.viewport)
         assert window.viewport.renderer.receptor_count > 100
         frame = _rendered_frame(window)
         painted = int((np.abs(frame - frame[0, 0]).sum(axis=2) > 12).sum())
