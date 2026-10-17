@@ -102,6 +102,23 @@ stagings of the same tree can be compared without trusting either one.
 | **pytest suite** | `python -m pytest tests -q` | everything else |
 | **test order** | `tools/check_test_order.py` — the suite twice, in two file orders | a suite whose result depends on file order is not a gate. It reads three verdicts: *both orders agree and pass*, *reproducibly red* (the same tests fail either way — a property of the tests), and *order-dependent candidate* (the outcome changed with the order) |
 
+### The skip budget and the collapse floor
+
+The suite gate does not stop at the pass/fail line, because a green run can be
+green for the wrong reason. Two budgets are enforced in the **full** run:
+
+| budget | what it catches | measured argument |
+|---|---|---|
+| **`EXPECTED_SKIPS`** | the skip count moving in **either** direction | when `demo/` was reorganised, one workstream's integration file went from **15 passed to 16 skipped in 1.8 s** and the run still looked green. More skips means assertions became skips (a moved dataset, a missing fixture, a guard taking the quiet path); fewer means a skip disappeared, so either a defect was fixed or a `require()` guard stopped firing. Both need a human, and no pass/fail gate can see either. |
+| **`MIN_SUITE_SECONDS`** (20 s) | a suite that **never ran** | 1.8 s against 337 s for the same file is the contrast that made this visible. It is a collapse detector, not a performance gate: it only applies to a run reporting ≥ 100 passes, so a small constructed case is not mistaken for a collapse. |
+
+Both live in `python/odock/release.py` as named constants **with the reason beside
+each entry**, so changing one is an edit somebody has to review rather than a
+number that drifts silently. `--quick` is exempt from the skip budget because it
+*deselects* slow tests rather than skipping them, and its skip count has never
+been measured — asserting a number there would be a guess dressed as a gate.
+
+
 The order gate is an **instrument, not a fix**, and it says so: the two orders run
 at different times, so a test whose outcome depends on machine state (a GUI test
 under load, a timing-sensitive assertion) can change between them without file order

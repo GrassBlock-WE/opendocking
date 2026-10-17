@@ -70,7 +70,7 @@ from __future__ import annotations
 import math
 import os
 from dataclasses import asdict, dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -933,6 +933,19 @@ def ligand_strain(
         work, atoms, supplied=mol is not None, preparation=preparation
     )
     note_parts.extend(reliability_notes)
+    if receptor is None:
+        # **A flag that says "trust this number" must be false when the number is
+        # not there.**  `strain` is `intra(pose) - intra(relaxed)`, and the kernel's
+        # intra term needs a receptor; without one the strain is `nan`, and
+        # reporting `reliable=True` beside it is a claim about a number that does
+        # not exist -- measured: the documented recipe returned `strain=nan,
+        # reliable=True` when called without a receptor.  `force_field_strain` is
+        # finite in that case, and the note says which field to read.
+        result.reliable = False
+        note_parts.append(
+            "no receptor was supplied, so `strain` cannot be computed and reliable "
+            "is False; `force_field_strain` holds the finite intramolecular value"
+        )
     if require_reliable and not result.reliable:
         raise ValueError(
             "ligand_strain cannot produce a reliable force-field strain here: "
@@ -1002,6 +1015,18 @@ def ligand_strain(
         "strain is intra(pose) - intra(relaxed) in the same force field; the "
         "relaxation is local (from the pose geometry) and uses " + (used or force_field)
     )
+    # Safety net for every other path that can leave `strain` undefined: the flag
+    # follows the number, not the optimism.
+    if not math.isfinite(result.strain) and result.reliable:
+        result.reliable = False
+        note_parts.append(
+            "reliable is False because `strain` is not finite here"
+            + (
+                "; `force_field_strain` holds the finite intramolecular value"
+                if math.isfinite(result.force_field_strain)
+                else ""
+            )
+        )
     result.note = "; ".join(note_parts)
     return result
 

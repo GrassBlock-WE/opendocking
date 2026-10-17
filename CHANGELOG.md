@@ -4,6 +4,108 @@ All notable changes to OpenDocking are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.3.1 — 2026-10-17
+
+A patch release, and most of it is defects found by running the suite rather than
+reading it: 0.3.0 shipped six failing *slow* tests because the release gate's
+quick mode **deselects** slow tests, so they appeared in neither the pass/fail
+line nor the skip count. That mechanism is now closed.
+
+### Added
+
+* **`odock covalent` — covalent docking**, the capability this toolchain lacked.
+  Seven named warheads plus two documented catch-alls, each naming the
+  electrophilic atom and its angle window (Michael 70-150 deg at 107, SN2 140-180
+  at 180); nucleophile perception by residue/atom name with a geometric fallback
+  that says so; classification as **bonded** (<= 2.0 A), **near_attack** (<= 4.0 A)
+  or **non_productive** with the failing criterion named. The scoring term is
+  continuous and that is measured, not claimed: halving the sample spacing halves
+  the largest step (distance ratio **2.00**, angle **1.97**), so a pose cannot be
+  rewarded for landing on a threshold. On three poses with identical non-covalent
+  affinity the reactive pose moves **rank 3 to 1** while the same-distance,
+  wrong-angle pose moves **2 to 3**. Adducts are built and relaxed through the
+  project's own minimiser; the measured adduct has C-S **1.820 to 1.825 A** and
+  S-C-C **107.0 to 112.2 deg**, both inside the documented ranges. The doc states
+  the two limits plainly: strain of 263-389 kcal/mol beside a truncated cysteine is
+  a **clash, not chemistry**, and the bundled 1M17 construct has six cysteines
+  **none of which is C797**, so perception by name is not identification.
+* **Cavity classification in the workbench and in the export** (`View > Surface >
+  Cavities`). The surface is repainted by class through a nearest-neighbour query
+  (geometry untouched), the legend becomes one swatch per class with pocket count
+  and volume, and each bottleneck is a translucent sphere of the **measured** neck
+  radius. Measured: 3PTB **9 pockets**, largest neck **3.28 A**; 1M17 **12
+  pockets**, **4.48 A**. A through-tunnel that only qualified because
+  `min_directions` was lowered is its own **channel** class, so a bore and an ATP
+  site cannot look the same. PyMOL and ChimeraX get one marker per aperture at the
+  measured radius, a selection of the bottleneck residues, and the criterion in the
+  header - including "RELAXED to 4 of six" when it was.
+* The release gate now enforces a **skip budget** (`EXPECTED_SKIPS`, failing when the
+  count moves in *either* direction) and a **collapse floor** (`MIN_SUITE_SECONDS`,
+  20 s, because a suite that never ran finishes fast), and a **quick run declares how
+  many tests it never executed**.
+* `python/odock/_fs.py` - one implementation of read-only-safe tree removal, used by
+  `tutorial`, `docs`, `release` and `screen` instead of four copies of a platform
+  quirk.
+* Five documents are filed under an audience (`COVALENT`, `COUPLING`, `ENDPOINT`,
+  `FRAGMENTS`, `PROTOCOLS`) rather than falling into "More documents".
+
+### Fixed
+
+* **`odock tutorial` and `odock docs check` crashed** with `PermissionError:
+  [WinError 5]` on a stale scratch directory carrying the read-only attribute -
+  which is exactly what an interrupted run leaves behind. Both failed before doing
+  any work, and the traceback named neither the directory nor a remedy. `os.walk`
+  also yields only the root's *children*, so an empty read-only directory was
+  missed twice: once by the original code and once by the first attempt at the fix.
+* **`project reproduce` now PASSES**, and the last defect was a pairing assumption
+  in `report._ligand_atoms`: it zipped the ligand PDBQT's atom records with
+  `pose.coords` **by index**, on a docstring claim that the orders always match -
+  true for an engine-built result, false for an archive rebuilt from a pose file.
+  The stored column turned out to be **right** and the fresh one was **dropping real
+  contacts**: ASP189 OD1...ligand H17 at **2.10 A** (a hydrogen bond) and VAL213
+  CG1...C4 at **3.72 A** (hydrophobic) were both missing from an index-paired
+  analysis. Pairing is now by **name**, through one `report.atom_permutation()`, and
+  a test reverses `coords` and `ligand_atom_order` together and requires identical
+  contacts.
+* **The unexplained 0.571 A `top_pose_rmsd` was not non-determinism.** On a re-run
+  with bit-identical affinities the archive's `ligand_atom_order` differed from the
+  fresh dock's (`C7 C6 C5 C4...` against `C7 C6 C8 C5...`) and the coordinate arrays
+  were compared index-by-index; a symmetry-aware RMSD cannot undo an arbitrary
+  permutation. After name alignment it is **5.1e-4 A** - the PDBQT's own three-decimal
+  quantisation - and the default `--rmsd-tolerance` now inherits that precision,
+  because a zero tolerance against a quantised archive cannot be satisfied.
+* **`project save --poses` was silently ignored** when `--dock-json` was also given,
+  so the archive was built from a source that stores no coordinates - and a PDBQT
+  `REMARK VINA RESULT` is *rendered* text at three decimals. The exact JSON values
+  now win: `max_affinity_delta` **4.37e-4 to 0.0**.
+* **`pdbqt.write_ligand_pdbqt(return_order=True)` reported serial order, not file
+  order.** A `BRANCH` record names its parent, so a serial is assigned before that
+  atom's line is written; for a thioether the seventh atom in the file is `S` (RDKit
+  index 4) while the reported order said `3` (`O C N H C C S H` against
+  `O C N C C C S`). The documented `ligand_strain` recipe then raised *"atom order
+  does not match the pose PDBQT"* on an ordinary ligand. The writer now records each
+  index as it writes the atom, so the order is true **by construction**.
+* **`sasa.burial` can no longer be misused the way it was.** `reference_total` for
+  `reference="free"` is the **sum of each residue measured in isolation** (224
+  residues, **58 377.1 A^2** against an intact receptor's **9 274.9 A^2**, a factor of
+  **6.29**), so subtracting it produced a **-357 kcal/mol** nonpolar term. The name
+  invited that, so `buried_area` and `buried_fraction` now return **`None`** for that
+  reference - a caller gets a `TypeError` instead - `interface_area`'s docstring
+  answers "how much area did the partner bury" outright, and it agrees with
+  `burial(reference="unbound")` to 1e-12.
+* **A document and its test agreed with each other and neither with the run.** The
+  overlay docstring said the shape-only ranking puts *one* amidine in the top three
+  and the assertion tested for exactly one; the measured count is **two** (against
+  three with the electrostatic term). Both now come from the run, and the assertion
+  pins the **pair** so a drift says which side moved.
+* **Cavity bottleneck spheres were drawn but invisible** inside the opaque surface
+  (4 markers, 0 pixels) - now drawn without the depth test, with the state restored
+  in a `finally`. The **neck residue list was unbounded**: a 1.3 A neck reported
+  **70 residues** straight into an exported selection, now within `neck + 3 A` and
+  capped at 12 (measured 5-12).
+* The notebook's expected reproduction line still read `tolerance 0 kcal/mol, 0 A`;
+  it is now `0.001 A`, the archive precision.
+
 ## 0.3.0 — 2026-10-01
 
 The largest step since the first release: five new workflows, a documentation

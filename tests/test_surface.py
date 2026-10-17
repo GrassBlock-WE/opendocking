@@ -1200,3 +1200,172 @@ def test_the_per_atom_export_values_land_on_the_right_atoms(workbench):
     assert all(abs(value - neutral) < 1e-9 for value in untouched)
     assert any(abs(value - neutral) > 1e-9 for value in covered)
 
+
+# ---------------------------------------------------------------------------
+# the cavity-class painting
+# ---------------------------------------------------------------------------
+
+
+def _sphere_shell(radius: float, count: int = 90):
+    from odock.sasa import sphere_points
+
+    return [
+        atom(
+            "C",
+            float(point[0] * radius),
+            float(point[1] * radius),
+            float(point[2] * radius),
+            res_name="SHE",
+            res_id=1,
+        )
+        for point in sphere_points(count)
+    ]
+
+
+def _bowl_shell(radius: float, count: int = 90):
+    """Half a shell: an open bowl, which is what a pocket looks like."""
+    return [item for item in _sphere_shell(radius, count) if item.z > -1.0]
+
+
+def test_painting_by_cavity_class_names_every_vertex_and_builds_the_legend():
+    """A repaint, not a rebuild: the geometry must be untouched."""
+    from odock import cavity
+    from odock.gui import surface as surface_module
+
+    atoms = _bowl_shell(7.0)
+    surface = surface_module.build_surface(
+        atoms, surface_module.SurfaceSettings(mode="sas", spacing=1.1)
+    )
+    vertices = surface.vertices.copy()
+    report = cavity.analyse_cavities(atoms, cavity.CavitySettings(spacing=0.8))
+    counts = surface_module.paint_by_cavity_class(surface, report)
+
+    assert counts, "nothing was painted"
+    assert sum(counts.values()) == surface.vertices_count
+    assert set(counts) <= set(surface_module.CAVITY_PALETTE)
+    # The geometry and the atom mapping are the same objects, unchanged.
+    assert (surface.vertices == vertices).all()
+    assert surface.property_name == "cavity"
+    assert surface.palette == "cavity"
+    # One swatch per class present, in the documented order, each with a colour
+    # from the palette; ``bulk`` is last.
+    names = [name for name, _colour in surface.class_legend]
+    assert names == [
+        name for name in surface_module.CAVITY_CLASSES if counts.get(name)
+    ]
+    for name, colour in surface.class_legend:
+        assert tuple(colour) == surface_module.CAVITY_PALETTE[name]
+    # Every vertex has a class label, and its colour is that class's colour.
+    assert len(surface.class_labels) == surface.vertices_count
+    for index in range(0, surface.vertices_count, 397):
+        name = str(surface.class_labels[index])
+        assert tuple(surface.colors[index]) == surface_module.CAVITY_PALETTE[name]
+    # The summary counts pockets, not vertices, and only for names that exist.
+    for name, (pockets, volume) in surface.class_summary.items():
+        assert pockets >= 0 and volume >= 0.0
+    assert "bulk" in surface.class_summary
+
+
+def test_the_class_palette_cannot_be_mistaken_for_a_contact_colour():
+    """The same rule as the search box: a class is not chemistry.
+
+    A user who reads a green patch as a hydrophobic contact would read a story
+    that is not in the data, so every class colour stays clear of every
+    interaction colour.
+    """
+    from odock.gui import surface as surface_module
+    from odock.gui.viewport import INTERACTION_COLORS
+
+    def distance(first, second):
+        return float(
+            np.linalg.norm(
+                np.asarray(first[:3], dtype=float) - np.asarray(second[:3], dtype=float)
+            )
+        )
+
+    for name, colour in surface_module.CAVITY_PALETTE.items():
+        for kind, contact in INTERACTION_COLORS.items():
+            gap = distance(colour, contact)
+            assert gap >= 0.25, f"the {name} class is {gap:.2f} from the {kind} colour"
+    # And the classes are distinguishable from each other: a legend of five
+    # similar greys would be worse than no legend.
+    names = list(surface_module.CAVITY_PALETTE)
+    for index, first in enumerate(names):
+        for second in names[index + 1 :]:
+            gap = distance(
+                surface_module.CAVITY_PALETTE[first], surface_module.CAVITY_PALETTE[second]
+            )
+            assert gap >= 0.25, f"{first} and {second} are {gap:.2f} apart"
+
+
+def test_bottleneck_annotations_carry_a_radius_and_no_annotation_without_one():
+    """An enclosed void has no aperture, so it must have no marker."""
+    from odock import cavity
+    from odock.gui import surface as surface_module
+
+    atoms = _bowl_shell(7.0)
+    report = cavity.analyse_cavities(atoms, cavity.CavitySettings(spacing=0.8))
+    annotations = surface_module.cavity_bottleneck_annotations(report)
+    with_neck = [pocket for pocket in report.pockets if pocket.bottleneck_radius is not None]
+    assert len(annotations) == len(with_neck)
+    for item in annotations:
+        assert float(item["radius"]) > 0.0
+        assert len(item["point"]) == 3
+        assert isinstance(item["channel"], bool)
+        assert item["kind"] in ("open", "shallow", "channel")
+    # An enclosed void is never annotated: there is nothing to point at.
+    only_enclosed = type(report)()
+    from odock.cavity import Pocket
+
+    only_enclosed.pockets = [
+        Pocket(
+            label="P1",
+            kind="enclosed",
+            volume=100.0,
+            points=10,
+            centre=(0.0, 0.0, 0.0),
+            extent=(1.0, 1.0, 1.0),
+            openings=0,
+            bottleneck_radius=None,
+        )
+    ]
+    assert surface_module.cavity_bottleneck_annotations(only_enclosed) == []
+
+
+def test_a_channel_is_painted_as_a_channel_not_as_a_pocket():
+    """The legend has to be able to tell a bore from an ATP site."""
+    import math
+
+    from odock import cavity
+    from odock.gui import surface as surface_module
+
+    atoms = []
+    wall = 5.0
+    for level in range(9):
+        z = -13.0 + 26.0 * level / 8.0
+        for index in range(10):
+            angle = 2.0 * math.pi * index / 10.0
+            atoms.append(
+                atom(
+                    "C",
+                    wall * math.cos(angle),
+                    wall * math.sin(angle),
+                    z,
+                    res_name="TUB",
+                    res_id=1,
+                )
+            )
+    surface = surface_module.build_surface(
+        atoms, surface_module.SurfaceSettings(mode="sas", spacing=1.0)
+    )
+    report = cavity.analyse_cavities(
+        atoms, cavity.CavitySettings(spacing=0.8, min_directions=4)
+    )
+    assert any(pocket.channel for pocket in report.pockets), report.table()
+    counts = surface_module.paint_by_cavity_class(surface, report)
+    assert counts.get("channel"), f"the bore was painted as {counts}"
+    names = [name for name, _colour in surface.class_legend]
+    assert "channel" in names
+    # And the bulk of a hollow tube is the bore itself, so 'bulk' can appear too;
+    # what matters is that the channel class exists in the legend at all.
+

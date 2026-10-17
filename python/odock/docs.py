@@ -46,6 +46,7 @@ from . import htmlreport as _htmlreport
 from . import project as _project
 from . import release as _release
 from .doctor import Finding
+from ._fs import remove_tree as _remove_tree
 
 __all__ = [
     "AUDIENCE_GROUPS",
@@ -111,6 +112,8 @@ DOC_AUDIENCE: Dict[str, str] = {
     "docs_ensemble": "science",
     "docs_generated_ensembles": "science",
     "docs_waters": "science",
+    "docs_coupling": "science",
+    "docs_endpoint": "science",
     "docs_project": "workbench",
     "docs_projects": "workbench",
     "docs_studies": "workbench",
@@ -120,6 +123,9 @@ DOC_AUDIENCE: Dict[str, str] = {
     "docs_cheminformatics": "workbench",
     "docs_lbvs": "workbench",
     "docs_pharmacophore": "workbench",
+    "docs_covalent": "workbench",
+    "docs_fragments": "workbench",
+    "docs_protocols": "workbench",
     "docs_architecture": "engineering",
     "docs_release": "engineering",
     "docs_docs": "engineering",
@@ -1274,7 +1280,7 @@ def build_site(root, out=None, *, title: str = "OpenDocking documentation") -> S
     anchors: Dict[str, set] = {}
 
     if destination.exists():
-        shutil.rmtree(destination)
+        _remove_tree(destination)
     (destination / "assets").mkdir(parents=True, exist_ok=True)
 
     # Render every markdown page first: links can only be checked once every page's

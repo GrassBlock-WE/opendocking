@@ -640,10 +640,53 @@ half-blocked tube is still a channel; a tube sealed at both ends has no aperture
 and is classified enclosed; the auto-margin guarantee and the safe-failure
 contract; and the heuristic's arithmetic.
 
-**Not yet wired**: the workbench action that colours a surface by cavity class and
-annotates a bottleneck, and the PyMOL/ChimeraX export of the classification. The
-module, the report tool, the tests and this section are in; those two halves are
-listed as remaining rather than half-done.
+**Wired in the workbench** (`View ▸ Surface ▸ Cavities`):
+
+* *Colour by cavity class* — repaints the surface that is already built (a
+  nearest-neighbour query, not a rebuild) with `CAVITY_PALETTE`, and the HUD
+  legend switches from a colour bar to **one swatch per class** with its pocket
+  count and volume. A channel is its own class and its legend line says it needs
+  the relaxed criterion.
+* *Cavity report…* — the table above, plus the criterion in force, the
+  safe-failure notice when the box is too tight, the "not a druggability score"
+  line and the "number of mouths not reported" line. The log gets one line per
+  pocket with its neck radius and the residues lining it.
+* **Bottleneck markers** — a translucent sphere of the *measured* neck radius at
+  each pocket's centre, drawn through the same instanced overlay as the
+  interaction endpoint markers. It is drawn **without the depth test** on
+  purpose: the neck is inside the pocket, and with the depth test on an opaque
+  surface the marker is invisible (measured: four markers drawn, none visible).
+
+Reuse rather than a parallel path: the bottleneck spheres go through
+`Renderer._overlay_draw` (the interaction-marker path), the legend through the
+same HUD painter as the colour bar, and the export through `SceneState.cavities`
+— one implementation of each, so there is no second thing to keep in step. The
+class palette is held to the same colour rule as the search box: at least 0.25
+RGB from every interaction colour and between any two classes, asserted by a
+test that has already rejected two earlier choices (a green 0.21 from π–π and an
+amber 0.21 from cation–π).
+
+**In the export** (`SceneState.cavities`, PyMOL and ChimeraX): one
+**pseudoatom/marker per aperture with the marker's radius set to the measured
+neck radius**, so the aperture survives the trip as a size and not as a sentence;
+a selection of the bottleneck residues; and a header stating the criterion that
+produced them. If `min_directions` was lowered, the header says *"the criterion
+was RELAXED to 4 of six, so channels open at both ends are included"* — a user
+who exports an ATP site and a bore can tell them apart from the file alone.
+
+Measured through the workbench path (`tools/render_cavity_previews.py`, grid
+0.7 Å): 3PTB **9 pockets (0 enclosed, 3 open, 6 shallow)**, largest neck
+**3.28 Å**, lining Gly38/Tyr39/His40/Phe41, painted 229 800 vertices = 181 733
+bulk + 27 713 open + 20 354 shallow, analysis 4.9 s; 1M17 EGFR **12 pockets
+(0 enclosed, 8 open, 4 shallow)**, largest neck **4.48 Å**, painted 440 028
+vertices = 316 119 bulk + 81 472 open + 42 437 shallow, analysis 16.3 s. The
+neck residue list is capped at :data:`odock.cavity.MAX_NECK_RESIDUES` (12) —
+without the cap a 1.3 Å neck reported seventy residues, which then went into an
+exported selection.
+
+**Not cached**: the class painting is a per-vertex repaint of an existing
+surface, so "back to the property map" rebuilds rather than blending back. The
+geometry is never duplicated, but the original colours are not stored either.
 
 ---
 

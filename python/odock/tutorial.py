@@ -164,6 +164,30 @@ def _report_numbers(report: Any, limit: int = 8) -> Dict[str, Any]:
     return numbers
 
 
+def _remove_tree(path: Path) -> None:
+    """Clear the previous run directory, with the tutorial's own error type.
+
+    The Windows read-only-attribute behaviour lives in
+    :func:`odock._fs.remove_tree`, which every other scratch-directory call site
+    uses -- ``odock docs check`` and ``odock release stage`` hit the same thing on
+    a stale ``out/`` subtree.  This wrapper only translates the failure into
+    ``TutorialError`` so the CLI can report it as a tutorial problem rather than
+    letting a bare ``PermissionError`` escape.
+
+    Measured before the shared helper existed: a stale ``out/tutorial`` carrying
+    the read-only attribute made ``odock tutorial`` -- and the two documentation
+    tests that run it -- exit 1 before doing any work.
+    """
+    from ._fs import remove_tree
+
+    try:
+        remove_tree(path)
+    except OSError as exc:
+        raise TutorialError(
+            f"cannot clear the previous run directory {path}: {exc}"
+        ) from exc
+
+
 def run_tutorial(root=None, *, workdir=None, quiet: bool = True) -> TutorialRecord:
     """Run the chain on the bundled data and return the measured record.
 
@@ -186,9 +210,7 @@ def run_tutorial(root=None, *, workdir=None, quiet: bool = True) -> TutorialReco
 
     run_dir = Path(workdir).resolve() if workdir is not None else base / "out" / "tutorial"
     if run_dir.exists():
-        import shutil
-
-        shutil.rmtree(run_dir)
+        _remove_tree(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
 
     record = TutorialRecord(demo="3PTB", run_dir=str(run_dir))

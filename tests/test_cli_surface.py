@@ -29,6 +29,7 @@ EXPECTED_SUBCOMMANDS = frozenset(
         "box",
         "cluster",
         "conformers",
+        "covalent",
         "decoys",
         "diagram",
         "diverse",

@@ -587,34 +587,14 @@ def place_fragment(
         dtype=float,
     )
     best = None
-    # **Put the physics in the search, not after it.**  A penalty applied to the winning
-    # pose cannot change which pose is found — measured, the amidine's score moved
-    # 0.999 -> 0.749 while its placement stayed 20.61 A — so with `physics_enabled` the
-    # objective the search maximises *is* the desolvation-plus-repulsion score.
-    search = None
-    if physics_enabled:
-        elements_all = [
-            atom.GetSymbol() for atom in prepared.mol.GetAtoms() if atom.GetAtomicNum() > 1
-        ]
-        polarity = _physics.polarity_per_atom(
-            elements_all, np.asarray(prepared.charges, dtype=float)[: len(elements_all)]
-        )
-        search = _physics.search_objective(polarity)
-    for conformer in prepared.conformers:
-        score = _pocket_score.place_and_score(
-            conformer, prepared.charges, pocket, radii=radii, samples=samples,
-            levels=levels, population=population, restarts=restarts, seed=seed,
-            objective=search,
-        )
-        if best is None or score.combined > best[0].combined:
-            best = (score, conformer)
-    score, coords = best
-    # **The charges a small charged fragment actually needs.**  A 3-heavy-atom amidine
-    # scored ~0.50, which is exactly `0.5 x shape`: the electrostatic term was clamped to
-    # zero, so the placement was shape-only and a fragment carries almost no shape to
-    # discriminate with.  `can_represent_formal_charge` is the predicate written for
-    # exactly this case, and `correct_formal_charges` is the fix it points at — the same
-    # pair task-32 built, reused here rather than a second path being invented.
+    # **The charges first, then the search.**  This ordering is the whole point and it was
+    # wrong until task-49's finding: a desolvation penalty is a *counterweight* to the
+    # interaction that burial buys (`dG = dE_interaction + dG_desolv`), so with the
+    # interaction term **clamped to zero** the objective reduces to `-desolvation` — and
+    # maximising that maximises solvent exposure, which is exactly what put the found pose
+    # 20.61 A away, fully exposed.  Correcting the charges *before* the search gives
+    # `esp_term` a non-zero value for the counterweight to balance (task-32 measured
+    # `esp_term_used=True` once the formal charge is restored).
     notes = list(prepared.notes)
     charges = np.asarray(prepared.charges, dtype=float)
     capability = _protonation.can_represent_formal_charge(prepared.mol, charges)
@@ -623,11 +603,39 @@ def place_fragment(
         if shifted:
             charges = corrected
             notes.append(
-                "formal-charge correction applied for placement: "
+                "formal-charge correction applied BEFORE the search: "
                 + "; ".join(shifted)
-                + ".  Without it the electrostatic term is clamped to zero and the "
-                "placement is shape-only (docs/PROTONATION.md)"
+                + ".  Applied after, it cannot un-clamp the term the search optimises "
+                "(docs/FRAGMENTS.md 1.2, docs/PROTONATION.md)"
             )
+    elements_all = [
+        atom.GetSymbol() for atom in prepared.mol.GetAtoms() if atom.GetAtomicNum() > 1
+    ]
+    # **The balanced objective**: the interaction term is the counterweight, and the
+    # penalties are bounded.  The search-time desolvation stays the cheap field-based
+    # burial proxy (a per-pose complex SASA would cost a full surface calculation for
+    # every candidate pose); the explicit atom-atom overlap term of `score_physics` is
+    # used for the offline re-score instead, because it measured **0.000 at the correct
+    # pose and 0.000 at the wrong one** — flat, so leaving it out of the objective cannot
+    # change a ranking, and the hook has no receptor coordinates to build it from.
+    search = None
+    if physics_enabled:
+        polarity = _physics.polarity_per_atom(
+            elements_all, np.asarray(charges, dtype=float)[: len(elements_all)]
+        )
+        search = _physics.search_objective(polarity)
+    for conformer in prepared.conformers:
+        score = _pocket_score.place_and_score(
+            conformer, charges, pocket, radii=radii, samples=samples,
+            levels=levels, population=population, restarts=restarts, seed=seed,
+            objective=search,
+        )
+        if best is None or score.combined > best[0].combined:
+            best = (score, conformer)
+    score, coords = best
+    # The charge correction already ran, before the search (see above).  It is *not*
+    # repeated here: applying it twice would shift the group's charges twice and the
+    # second shift would be invisible in the report.
     # Re-score the winning pose with the corrected charges, so the pose the caller keeps
     # is the pose those charges actually score.
     corrected_score = _pocket_score.pocket_score(

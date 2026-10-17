@@ -235,8 +235,14 @@ def test_the_fragment_placement_failure_is_pinned():
         "the corrected amidine saturates the electrostatic term: "
         f"score {amidine.score:.3f}"
     )
-    assert any("SHAPE ALONE" in note or "clamped" in note for note in amidine.notes), (
-        "the placement must say the term was clamped or shape-decided"
+    # The re-ordering is now recorded, and it is the thing that changed: the
+    # formal-charge correction runs **before** the search, which `docs/FRAGMENTS.md`
+    # §1.2 argues is the only way a desolvation term can have a counterweight.  The
+    # placement nevertheless still fails (the RMSD assertions above remain the pin),
+    # so what this note documents is *where* the correction happens, not a success.
+    assert any("before the search" in note.lower() for note in amidine.notes), (
+        "the placement must record that the formal-charge correction ran before "
+        f"the search; notes were {amidine.notes!r}"
     )
 
 

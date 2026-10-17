@@ -567,8 +567,10 @@ def test_the_overlay_enriches_the_amidine_series_in_the_bundled_library(molecule
     as an *enrichment* (mean amidine rank 4.2 of 17, against 9.0 for a random
     ranking), not the pharmacophore model's 1-5 sweep: a shape Tanimoto normalised
     by self-overlap is nearly blind to one extra atom on a shared ring.  With the
-    electrostatic term off the same run puts one amidine in the top three instead
-    of three, which is why the term is on by default.
+    electrostatic term off the same run puts **two** amidines in the top three
+    instead of three, which is why the term is on by default.  (This docstring said
+    "one" until the figure was measured: the assertion below had been written from
+    the same guess, and it failed.  Both numbers now come from the run.)
     """
     names = [mol.GetProp("_Name") for mol in molecules]
     amidine_names = {mol.GetProp("_Name") for mol in actives}
@@ -589,5 +591,19 @@ def test_the_overlay_enriches_the_amidine_series_in_the_bundled_library(molecule
         molecules, actives, conformers=4, names=names, electrostatic=False
     )
     top_three = shape_only.names[:3]
-    assert sum(1 for name in top_three if name in amidine_names) == 1
-    assert sum(1 for name in result.names[:3] if name in amidine_names) == 3
+    shape_amidines = sum(1 for name in top_three if name in amidine_names)
+    esp_amidines = sum(1 for name in result.names[:3] if name in amidine_names)
+    # Both figures are measured, and the *comparison* is the claim: the electrostatic
+    # term earns its default by putting more of the series on top.  The assertion
+    # here used to read ``== 1`` against a docstring that said the same thing, so the
+    # guess and the test agreed with each other and neither agreed with the run --
+    # the measured count is **2**.  Pinning the pair, not one number, means a drift
+    # says *which* side moved.
+    assert (shape_amidines, esp_amidines) == (2, 3), (
+        f"shape-only top three holds {shape_amidines} amidine(s) and the full score "
+        f"{esp_amidines}; the documented values are 2 and 3"
+    )
+    assert shape_amidines < esp_amidines, (
+        "the electrostatic term no longer improves the top three, so it would not "
+        "earn being on by default"
+    )

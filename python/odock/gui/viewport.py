@@ -27,7 +27,7 @@ The search box is a wireframe cube drawn with the same instancing machinery.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -693,6 +693,14 @@ class Scene:
     #: :attr:`front_clip` this plane is fixed to the *model*, so two poses of
     #: the same protein are cut identically and the cut can be compared.
     surface_clip: Optional[Tuple[Tuple[float, float, float], float]] = None
+    #: Bottleneck markers: ``[{label, kind, channel, point, radius, residues}]``,
+    #: as built by ``odock.gui.surface.cavity_bottleneck_annotations``. Each is
+    #: drawn as a translucent sphere of the **measured neck radius** at the
+    #: pocket's centre, so the aperture is visible as a size rather than quoted as
+    #: a number. Drawn through the same instanced-sphere overlay the interaction
+    #: endpoint markers use, with the same push towards the camera so the surface
+    #: cannot swallow them.
+    bottlenecks: list = field(default_factory=list)
 
     def clip_plane_vector(self) -> Tuple[float, float, float, float]:
         """The clipping plane as the shaders take it; all-zero disables it."""
@@ -724,6 +732,27 @@ class Scene:
             return list(getter(count=count))
         except Exception:  # pragma: no cover - a duck-typed surface
             return []
+
+    def class_legend(self):
+        """``[(name, colour)]`` for a **categorical** painting, or ``[]``.
+
+        The cavity painting has no numeric range to put on a colour bar — its
+        classes are names, not values — so the same HUD slot draws one swatch per
+        class instead. Reusing the legend slot, rather than adding a second
+        overlay, is what keeps the two paintings from fighting over the corner of
+        the screen.
+        """
+        if self.surface is None or not self.surface_legend:
+            return []
+        if getattr(self.surface, "property_name", "") != "cavity":
+            return []
+        return list(getattr(self.surface, "class_legend", []) or [])
+
+    def bottleneck_annotations(self):
+        """The neck markers to draw, or ``[]`` when the toggle is off."""
+        if not self.surface_legend or not self.bottlenecks:
+            return []
+        return list(self.bottlenecks)
 
     def __setattr__(self, name: str, value) -> None:
         # ``style_receptor`` is the historical name of ``style_protein`` and
@@ -1703,6 +1732,8 @@ class Renderer:
         self.interactions_skipped = 0
         #: How many marker pucks the last frame drew.
         self.marker_count = 0
+        #: How many bottleneck spheres the last frame drew.
+        self.bottleneck_count = 0
         #: ``{"receptor": bool, "ligand": bool}``: which halves of the emphasis
         #: mesh the last frame drew (both False when the focus is off).
         self.focus_mesh_drawn = {"receptor": False, "ligand": False}
@@ -2528,6 +2559,9 @@ class Renderer:
         # them without hiding them.
         if self.scene.show_surface:
             self._draw_surface(mvp, view)
+            # The bottleneck markers belong to the surface painting (they are the
+            # numbers the legend is about), so they follow its visibility.
+            self._draw_bottlenecks(view, height)
 
         # The interaction site is drawn opaque and un-dimmed, on top of the
         # receded structure: the focused residues as ball-and-stick, their atoms
@@ -2590,7 +2624,14 @@ class Renderer:
             return max(0.22, element_radius(atom.element) * 0.35)
         return element_radius(atom.element) * factor
 
-    def _overlay_draw(self, which: str, entries, alpha: float, clip_front: float = 0.0) -> int:
+    def _overlay_draw(
+        self,
+        which: str,
+        entries,
+        alpha: float,
+        clip_front: float = 0.0,
+        depth_test: bool = True,
+    ) -> int:
         """Upload and draw one overlay instance list; returns its instance count.
 
         The draw uses whatever GL state the frame already has (depth test on,
@@ -2641,10 +2682,74 @@ class Renderer:
         # emphasised site must read at full strength.
         program["u_dim"].value = 0.0
         program["u_clip_front"].value = float(clip_front)
-        self._overlay_vaos[which].render(
-            moderngl.TRIANGLES, vertices=6, instances=count
-        )
+        # A neck marker sits *inside* the pocket it measures, so with the depth
+        # test on an opaque surface it is simply invisible — the first render
+        # showed exactly that (four markers drawn, none visible). It is an
+        # annotation over an opaque painting, like the legend, so it is drawn
+        # without the depth test and reads as a translucent sphere *through* the
+        # surface. The state is restored in a ``finally`` because ``ctx`` state is
+        # global to the frame.
+        restore_depth = not depth_test
+        if restore_depth:
+            self.ctx.disable(moderngl.DEPTH_TEST)
+        try:
+            self._overlay_vaos[which].render(
+                moderngl.TRIANGLES, vertices=6, instances=count
+            )
+        finally:
+            if restore_depth:
+                self.ctx.enable(moderngl.DEPTH_TEST)
         return count
+
+    def _draw_bottlenecks(self, view: np.ndarray, height: int) -> int:
+        """A sphere of the **measured neck radius** at every pocket's centre.
+
+        The number in the table is a length; drawing a sphere of exactly that
+        radius makes it visible, and comparing two pockets becomes comparing two
+        spheres. It goes through the same instanced-overlay path (and the same
+        push towards the camera) as the interaction endpoint markers, so there is
+        one mechanism for "draw a world-space puck that the surface cannot hide".
+
+        Returns how many markers were drawn, which the tests and the log read.
+        """
+        annotations = self.scene.bottleneck_annotations()
+        self.bottleneck_count = 0
+        if not annotations:
+            return 0
+        projection = np.asarray(self._last_proj, dtype="f8")
+        if abs(projection[1, 1]) < 1e-9:  # pragma: no cover - degenerate camera
+            return 0
+        matrix = np.asarray(view, dtype="f8")
+        eye = getattr(self, "_eye", None)
+        entries = []
+        for item in annotations:
+            point = tuple(float(value) for value in item.get("point", (0.0, 0.0, 0.0)))
+            radius = float(item.get("radius", 0.0))
+            if radius <= 0.0:
+                continue
+            middle = np.append(np.asarray(point, dtype="f8"), 1.0)
+            depth = -float((matrix @ middle)[2])
+            if depth <= 1e-4:
+                continue  # behind the camera
+            place = np.asarray(point, dtype="f8")
+            if eye is not None:
+                place = push_along_view(
+                    place.reshape(1, 3),
+                    [-self.INTERACTION_MARKER_CLEARANCE],
+                    np.asarray(eye, dtype="f8"),
+                )[0]
+            colour = self.BOTTLENECK_COLORS.get(
+                "channel" if item.get("channel") else str(item.get("kind", "")),
+                self.BOTTLENECK_COLOR,
+            )
+            entries.append((*place, radius, *colour))
+        if not entries:
+            return 0
+        drawn = self._overlay_draw(
+            "bottlenecks", entries, 0.42, self._clip_front, depth_test=False
+        )
+        self.bottleneck_count = drawn
+        return drawn
 
     def _drawn_atom_ids(self, which: str) -> Optional[set]:
         """``id()`` of the atoms of one group the base pass actually draws.
@@ -2936,6 +3041,17 @@ class Renderer:
     #: ribbon's half-width (``_SS_SHAPE`` helix 1.05) plus a margin, so a marker
     #: on a C-alpha is never inside the tube that swallowed the dash.
     INTERACTION_MARKER_CLEARANCE = 1.25
+    #: Colour of a bottleneck sphere when its class is not in the table below.
+    BOTTLENECK_COLOR = (0.98, 0.98, 0.98)
+    #: Bottleneck sphere colours, keyed like :data:`odock.gui.surface.CAVITY_PALETTE`
+    #: so a marker and the patch it sits in agree. Brightened: the sphere is
+    #: translucent over a painted surface and has to read against it.
+    BOTTLENECK_COLORS = {
+        "enclosed": (1.00, 0.45, 0.70),
+        "open": (0.45, 1.00, 0.65),
+        "shallow": (1.00, 0.94, 0.60),
+        "channel": (0.60, 0.80, 1.00),
+    }
     #: A dark under-stroke on every dash: the outline is a fatter cylinder of
     #: this colour, pushed away from the camera by exactly the radial difference
     #: plus :data:`INTERACTION_OUTLINE_BIAS`, so the coloured core always wins

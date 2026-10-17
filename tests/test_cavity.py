@@ -307,22 +307,59 @@ def test_a_through_tunnel_needs_a_lower_direction_threshold():
 
     A bore open at *both* ends has protein on four of the six scan directions,
     so the five-of-six pocket rule does not call it a pocket — it is a channel,
-    not a pocket. Lowering `min_directions` to four finds it, at the price of
-    more false positives everywhere else; both halves are asserted so the
-    trade-off cannot drift.
+    not a pocket. Lowering `min_directions` to four finds it, and the pocket then
+    says so: ``channel`` is True, which is what the legend and the export read so
+    that a picture of an ATP site and a picture of a bore cannot be confused.
     """
     wall = 5.0
-    atoms = tube(wall, 14.0)
+    atoms = tube(wall, 26.0)
     strict = cavity.analyse_cavities(
-        atoms, cavity.CavitySettings(spacing=0.6, min_directions=5)
+        atoms, cavity.CavitySettings(spacing=0.7, min_directions=5)
     )
     relaxed = cavity.analyse_cavities(
-        atoms, cavity.CavitySettings(spacing=0.6, min_directions=4)
+        atoms, cavity.CavitySettings(spacing=0.7, min_directions=4)
     )
-    names = {pocket.kind for pocket in strict.pockets}
-    assert "open" not in names, strict.table()
-    assert relaxed.pockets, "the relaxed rule found nothing in a tube"
-    assert any(pocket.kind in ("open", "shallow") for pocket in relaxed.pockets)
+    assert not any(pocket.channel for pocket in strict.pockets)
+    assert all(pocket.kind != "open" for pocket in strict.pockets), strict.table()
+    channels = [pocket for pocket in relaxed.pockets if pocket.channel]
+    assert channels, "the relaxed rule did not flag the bore as a channel"
+    assert channels[0].kind == "open"
+    assert channels[0].bottleneck_radius is not None
+    assert channels[0].as_dict()["channel"] is True
+
+
+def test_the_channel_flag_is_off_unless_the_threshold_was_lowered():
+    """At the default criterion nothing is called a channel, ever."""
+    atoms = shell(8.0, 90)
+    report = cavity.analyse_cavities(atoms, cavity.CavitySettings(spacing=0.7))
+    assert report.pockets
+    assert not any(pocket.channel for pocket in report.pockets)
+
+
+def test_classify_points_says_which_pocket_a_point_lines():
+    """The query the surface painting and the export are built on."""
+    atoms = shell(8.0, 90)
+    report = cavity.analyse_cavities(atoms, cavity.CavitySettings(spacing=0.7))
+    assert report.pocket_cells, "the report kept no cells to classify against"
+    centres = np.array([pocket.centre for pocket in report.pockets], dtype=float)
+    found = cavity.classify_points(centres, report)
+    for index, (label, kind) in enumerate(found):
+        # A pocket's own centre must classify as that pocket, not as bulk.
+        assert label is not None, f"pocket {index} centre came back as bulk"
+        assert kind == report.pockets[index].kind
+        assert label == report.pockets[index].label
+    # Anything far away is bulk, and an empty query is an empty answer.
+    assert cavity.classify_points(np.array([[500.0, 500.0, 500.0]]), report) == [
+        (None, "bulk")
+    ]
+    assert cavity.classify_points([], report) == []
+    # The stored cells are world coordinates, not grid indices: an index array
+    # would be small integers, and a pocket's cells must sit around its centre.
+    _label, _kind, cells = report.pocket_cells[0]
+    assert cells.shape[1] == 3
+    assert float(np.abs(cells).max()) > 3.0
+    centre = np.asarray(report.pockets[0].centre, dtype=float)
+    assert float(np.min(np.linalg.norm(cells - centre, axis=1))) < 1.0
 
 
 # ---------------------------------------------------------------------------

@@ -229,6 +229,18 @@ class SceneState:
     viewer_measurements: Sequence = ()
     property_name: str = ""
     property_unit: str = ""
+    #: Cavities and channels, from ``odock.gui.surface.cavity_bottleneck_annotations``
+    #: (plus the class painting's per-class summary): ``{"label", "kind",
+    #: "channel", "point", "radius", "residues", "volume"}`` per pocket that has
+    #: an aperture. Written as **named pseudoatoms at the neck** — the radius as
+    #: the marker's radius, so the aperture is a size in the other viewer too, not
+    #: a sentence in a comment — with a selection of the bottleneck residues and
+    #: the criterion stated in the header.
+    cavities: Sequence = ()
+    #: ``{"min_directions", "enclosure_radius", "probe", "spacing",
+    #: "grid_points", "seconds", "kinds": {class: count}}``, so the export says
+    #: which criterion produced the classifications above.
+    cavity_criterion: Optional[dict] = None
     property_range: Optional[Tuple[float, float]] = None
     #: Surface display state.
     show_surface: bool = False
@@ -780,6 +792,66 @@ def pymol_script(state: SceneState) -> str:
     if labels:
         lines.append("")
 
+    # -- cavities and channels ---------------------------------------------
+    if state.cavities:
+        criterion = dict(state.cavity_criterion or {})
+        lines.append("# cavities: geometric classification, not a druggability score")
+        if criterion:
+            lines.append(
+                "#   criterion: protein within %.0f A on %s of six axis directions, "
+                "probe %.2f A, grid %.2f A"
+                % (
+                    float(criterion.get("enclosure_radius", 10.0)),
+                    criterion.get("min_directions", 5),
+                    float(criterion.get("probe", 1.4)),
+                    float(criterion.get("spacing", 0.6)),
+                )
+            )
+            if int(criterion.get("min_directions", 5)) < 5:
+                # The caveat that makes a bore distinguishable from a pocket in
+                # the export itself, not only in the documentation.
+                lines.append(
+                    "#   the criterion was RELAXED to %s of six, so channels open "
+                    "at both ends are included; the channel marker below is one, "
+                    "and the relaxed rule also admits surface grooves"
+                    % criterion.get("min_directions")
+                )
+            kinds = criterion.get("kinds") or {}
+            if kinds:
+                lines.append(
+                    "#   "
+                    + ", ".join(f"{name} {int(count)}" for name, count in kinds.items())
+                )
+        for index, cavity in enumerate(state.cavities, start=1):
+            point = list(cavity.get("point") or (0.0, 0.0, 0.0))
+            radius = float(cavity.get("radius") or 0.0)
+            label = str(cavity.get("label", f"P{index}"))
+            name = f"cavity_{index}"
+            kind = "channel" if cavity.get("channel") else str(cavity.get("kind", "open"))
+            red, green, blue = CAVITY_EXPORT_COLORS.get(
+                kind, CAVITY_EXPORT_COLORS["open"]
+            )
+            lines.append(
+                f'pseudoatom {name}, pos=[{point[0]:.3f}, {point[1]:.3f}, {point[2]:.3f}]'
+            )
+            lines.append(
+                "set_color %s_color, [%.3f, %.3f, %.3f]" % (name, red, green, blue)
+            )
+            lines.append(f"color {name}_color, {name}")
+            lines.append(f"show spheres, {name}")
+            # The marker's *radius* is the measurement: a 3.3 A neck is visibly
+            # bigger than a 1.6 A one, which a sentence cannot convey.
+            lines.append(f"set sphere_scale, {max(0.05, radius):.3f}, {name}")
+            text = f"{label} {kind} {float(cavity.get('volume') or 0.0):.0f} A3 neck {radius:.2f} A"
+            lines.append(f'label {name}, "{_escape_pymol(text)}"')
+            lines.append(f"set label_color, {name}_color, {name}")
+            residues = list(cavity.get("residues") or ())
+            selection = _residue_selection(residues)
+            if selection:
+                lines.append(f"select neck_{index}, {selection}")
+                lines.append(f"color {name}_color, neck_{index} and name CA")
+        lines.append("")
+
     # The search box, as eight corner markers: cheap, and unmistakable.
     if state.box is not None:
         center, size = state.box
@@ -984,6 +1056,61 @@ def chimerax_script(state: SceneState) -> str:
         )
         lines.append('label #70%d text "%s"' % (index % 10, str(text).replace('"', "'")))
 
+    # Cavities and channels: one marker per aperture, at its measured radius, so
+    # the size survives the trip into ChimeraX as a size and not as a sentence.
+    if state.cavities:
+        criterion = dict(state.cavity_criterion or {})
+        lines.append("# cavities: geometric classification, not a druggability score")
+        if criterion:
+            lines.append(
+                "#   criterion: protein within %.0f A on %s of six axis directions, "
+                "probe %.2f A, grid %.2f A"
+                % (
+                    float(criterion.get("enclosure_radius", 10.0)),
+                    criterion.get("min_directions", 5),
+                    float(criterion.get("probe", 1.4)),
+                    float(criterion.get("spacing", 0.6)),
+                )
+            )
+            if int(criterion.get("min_directions", 5)) < 5:
+                lines.append(
+                    "#   the criterion was RELAXED to %s of six, so channels open at "
+                    "both ends are included; a marker labelled 'channel' is one, and "
+                    "the relaxed rule also admits surface grooves"
+                    % criterion.get("min_directions")
+                )
+        for index, cavity in enumerate(state.cavities, start=1):
+            point = list(cavity.get("point") or (0.0, 0.0, 0.0))
+            radius = float(cavity.get("radius") or 0.0)
+            label = str(cavity.get("label", f"P{index}"))
+            kind = "channel" if cavity.get("channel") else str(cavity.get("kind", "open"))
+            red, green, blue = CAVITY_EXPORT_COLORS.get(
+                kind, CAVITY_EXPORT_COLORS["open"]
+            )
+            colour = "#%02x%02x%02x" % (
+                int(round(red * 255)),
+                int(round(green * 255)),
+                int(round(blue * 255)),
+            )
+            lines.append(
+                "marker #80%d position %.3f,%.3f,%.3f radius %.3f color %s"
+                % (index % 10, point[0], point[1], point[2], max(0.05, radius), colour)
+            )
+            lines.append(
+                'label #80%d text "%s %s %.0f A3 neck %.2f A"'
+                % (
+                    index % 10,
+                    label,
+                    kind,
+                    float(cavity.get("volume") or 0.0),
+                    radius,
+                )
+            )
+            residues = list(cavity.get("residues") or ())
+            selection = _chimerax_residue_selection(residues)
+            if selection:
+                lines.append(f"# neck_{index} lining: {selection}")
+
     if state.box is not None:
         center, size = state.box
         lines.append(
@@ -1046,6 +1173,74 @@ def write_chimerax_script(path, state: SceneState) -> Path:
 # ---------------------------------------------------------------------------
 # the surface mesh as OBJ
 # ---------------------------------------------------------------------------
+
+
+#: Cavity-class colours for the export, matching
+#: ``odock.gui.surface.CAVITY_PALETTE`` so a picture exported from the workbench
+#: and a picture rendered in PyMOL agree about what the classes are.
+CAVITY_EXPORT_COLORS: Dict[str, Tuple[float, float, float]] = {
+    "enclosed": (0.85, 0.28, 0.55),
+    "open": (0.25, 0.72, 0.45),
+    "shallow": (0.95, 0.76, 0.28),
+    "channel": (0.35, 0.55, 0.95),
+}
+
+
+def _residue_selection(residues: Sequence[str]) -> str:
+    """``"A/GLY38+A/ASP189"`` (PyMOL ``resi`` syntax) from ``["A/GLY38", ...]``.
+
+    The residue labels come from :func:`odock.sasa.residue_key`, which formats a
+    residue as ``CHAIN/NAME+ID``. A label that does not parse is skipped rather
+    than guessed: a wrong selection in an exported script is a wrong picture, and
+    silently selecting the wrong residue is worse than selecting none.
+    """
+    parts: List[str] = []
+    for label in residues:
+        text = str(label).strip()
+        if not text:
+            continue
+        chain, _slash, rest = text.partition("/")
+        digits = ""
+        name = ""
+        for character in reversed(rest or chain):
+            if character.isdigit():
+                digits = character + digits
+            else:
+                name = character + name
+        del name
+        if not digits:
+            continue
+        prefix = f"{chain}/" if _slash and chain else ""
+        parts.append(f"{prefix}{digits}")
+    if not parts:
+        return ""
+    return "+".join(parts)
+
+
+def _chimerax_residue_selection(residues: Sequence[str]) -> str:
+    """``"/A:38,189"`` (ChimeraX atom spec) from ``["A/GLY38", "A/ASP189"]``."""
+    by_chain: Dict[str, List[str]] = {}
+    for label in residues:
+        text = str(label).strip()
+        if not text:
+            continue
+        chain, _slash, rest = text.partition("/")
+        digits = ""
+        for character in reversed(rest or chain):
+            if character.isdigit():
+                digits = character + digits
+            else:
+                break
+        if not digits:
+            continue
+        by_chain.setdefault(chain or "", []).append(digits)
+    if not by_chain:
+        return ""
+    pieces = []
+    for chain, ids in by_chain.items():
+        joined = ",".join(dict.fromkeys(ids))
+        pieces.append(f"/{chain}:{joined}" if chain else f":{joined}")
+    return " ".join(pieces)
 
 
 def surface_obj_text(surface) -> str:

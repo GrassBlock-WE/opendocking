@@ -797,6 +797,51 @@ EN: Dict[str, str] = {
     "action.surface_dielectric_distance": "Distance (ε=4r)",
     "action.surface_dielectric_uniform": "Uniform (ε=4)",
     "action.surface_esp_breakdown": "Potential breakdown…",
+    # Cavities: the classification, its legend, and the report dialog.
+    "action.surface_cavities": "Colour by cavity class",
+    "action.surface_cavities_report": "Cavity report…",
+    "action.surface_cavities_clear": "Back to property map",
+    "menu.surface_cavities": "Cavities",
+    "dialog.cavity_report": "Cavities and channels",
+    "cavity.header": "Cavities, channels and apertures — geometric classification",
+    "cavity.model": (
+        "probe {probe} Å over Bondi radii; a place is inside a pocket when the "
+        "protein is within {reach} Å on at least {directions} of the six axis "
+        "directions; smallest pocket {volume} Å³, grid {spacing} Å"
+    ),
+    "cavity.model_channel": (
+        "criterion relaxed to {directions} of six so that channels open at both "
+        "ends are found — pockets and channels are then told apart by the "
+        "channel column, and the relaxed criterion also admits surface grooves"
+    ),
+    "cavity.not_druggability": (
+        "The score column is a stated weighted mean of enclosure, volume and "
+        "lining hydrophobicity. It is a sorting heuristic, NOT a druggability "
+        "score: it was not trained on anything and does not predict binding."
+    ),
+    "cavity.no_mouths": (
+        "The number of separate mouths is not reported: a band at the critical "
+        "radius cannot tell a mouth from a surface dimple."
+    ),
+    "cavity.table_header": "pocket  class  volume Å³  neck Å  score  lining",
+    "cavity.summary": (
+        "{total} pockets: {enclosed} enclosed, {channel} channel, {open} open, "
+        "{shallow} shallow — {seconds} s on a {points}-point grid"
+    ),
+    "cavity.box_too_tight": (
+        "the analysis box could not be shown to contain a solvent layer, so "
+        "nothing is labelled enclosed"
+    ),
+    "cavity.neck_line": "{label}: neck {radius} Å, lined by {residues}",
+    "cavity.no_bottleneck": "{label}: no aperture (sealed at every radius tried)",
+    "legend.bottleneck": "neck {radius} Å",
+    "log.cavity_report": (
+        "cavities: {total} pockets ({enclosed} enclosed, {channel} channel, "
+        "{open} open, {shallow} shallow) in {seconds} s"
+    ),
+    "log.cavity_painted": (
+        "surface painted by cavity class: {counts} vertices, {pockets} pockets"
+    ),
     "esp.header": "Electrostatic potential at the surface, by residue",
     "esp.model": "model: point charges, dielectric {dielectric}, ε = {epsilon}",
     "esp.charges": (
@@ -834,6 +879,17 @@ EN: Dict[str, str] = {
     "legend.unit.electrostatic": "kcal/(mol·e)",
     "legend.scale": "{length:.0f} Å",
     "legend.charge_warning": "charges: may not carry formal charge",
+    # The cavity-class legend: a swatch per class, with how many pockets of that
+    # class and how much space they hold. A channel (open at both ends) is named
+    # separately from a pocket, and its line says it needs the relaxed criterion.
+    "legend.cavity_title": "cavity class (geometric)",
+    "legend.cavity.enclosed": "enclosed — sealed cavity",
+    "legend.cavity.channel": "channel — open at both ends",
+    "legend.cavity.open": "open — pocket",
+    "legend.cavity.shallow": "shallow — surface dent",
+    "legend.cavity.bulk": "bulk solvent",
+    "legend.cavity_count": "{name}: {count} × {volume} Å³",
+    "legend.cavity.channel_count": "channel: {count} × {volume} Å³ (needs 4-of-6)",
     "log.surface_charge_warning": "charge column: {detail}",
     "log.surface_building": "building the {mode} surface for {atoms} atoms…",
     "log.surface_built": (
@@ -885,6 +941,14 @@ EN: Dict[str, str] = {
     "sasa.reference.free": "reference: every residue measured on its own",
     "sasa.reference.unbound": "reference: the same structure without the ligand",
     "sasa.total": "total SASA {total} Å², reference {reference} Å², buried {buried} Å² ({share})",
+    # Shown with the "free" reference, where there is no single buried total: the
+    # reference is the sum of every residue measured in isolation, so the row
+    # reports that sum and the per-residue buried sum under their own names.
+    "sasa.total.free": (
+        "total SASA {total} Å² · each residue measured alone sums to {isolated} Å² "
+        "(not the intact area) · Σ per-residue buried {summed} Å² — use the "
+        "interface area for what a partner buried"
+    ),
     "sasa.ligand": (
         "ligand: {free} Å² free, {exposed} Å² in the complex, {buried} Å² buried "
         "({share} of its surface)"
@@ -1712,6 +1776,43 @@ ZH: Dict[str, str] = {
     "action.surface_dielectric_distance": "距离依赖 (ε=4r)",
     "action.surface_dielectric_uniform": "固定介电 (ε=4)",
     "action.surface_esp_breakdown": "电势分解…",
+    "action.surface_cavities": "按空腔类别着色",
+    "action.surface_cavities_report": "空腔报告…",
+    "action.surface_cavities_clear": "回到性质彩图",
+    "menu.surface_cavities": "空腔",
+    "dialog.cavity_report": "空腔与通道",
+    "cavity.header": "空腔、通道与开口 —— 几何分类",
+    "cavity.model": (
+        "探针 {probe} Å，Bondi 半径；若在六个体轴方向中至少有 {directions} 个方向"
+        "在 {reach} Å 内遇到蛋白质，该点即位于口袋内；最小口袋 {volume} Å³，网格 {spacing} Å"
+    ),
+    "cavity.model_channel": (
+        "判据放宽到六方向中的 {directions} 个，以便找出两端开口的通道 —— 之后的"
+        "「通道」列用于区分口袋与通道；放宽的判据同时也会纳入表面沟槽"
+    ),
+    "cavity.not_druggability": (
+        "评分列是封闭度、体积与内衬疏水性的加权平均，权重为人为设定。它只是排序用的"
+        "启发式指标，不是成药性评分：未经训练，也不能预测结合。"
+    ),
+    "cavity.no_mouths": (
+        "不报告独立开口的数量：在临界半径处的薄层无法区分真正的开口与表面凹陷。"
+    ),
+    "cavity.table_header": "编号  类别  体积 Å³  颈部 Å  评分  内衬",
+    "cavity.summary": (
+        "共 {total} 个空腔：封闭 {enclosed}、通道 {channel}、开放 {open}、浅表 {shallow}"
+        " —— 用时 {seconds} 秒，网格 {points} 点"
+    ),
+    "cavity.box_too_tight": "分析盒无法保证包含溶剂层，因此不会标记任何封闭空腔",
+    "cavity.neck_line": "{label}：颈部 {radius} Å，由 {residues} 构成",
+    "cavity.no_bottleneck": "{label}：无开口（在尝试的所有半径下均为封闭）",
+    "legend.bottleneck": "颈部 {radius} Å",
+    "log.cavity_report": (
+        "空腔：共 {total} 个（封闭 {enclosed}、通道 {channel}、开放 {open}、"
+        "浅表 {shallow}），用时 {seconds} 秒"
+    ),
+    "log.cavity_painted": (
+        "已按空腔类别为表面着色：{counts} 个顶点，{pockets} 个空腔"
+    ),
     "esp.header": "表面静电势的残基分解",
     "esp.model": "模型：点电荷，介电 {dielectric}，ε = {epsilon}",
     "esp.charges": (
@@ -1743,6 +1844,14 @@ ZH: Dict[str, str] = {
     "legend.unit.electrostatic": "kcal/(mol·e)",
     "legend.scale": "{length:.0f} Å",
     "legend.charge_warning": "电荷：可能未体现形式电荷",
+    "legend.cavity_title": "空腔类别（几何判据）",
+    "legend.cavity.enclosed": "封闭——不可进入的空腔",
+    "legend.cavity.channel": "通道——两端开口",
+    "legend.cavity.open": "开放——口袋",
+    "legend.cavity.shallow": "浅表——表面凹陷",
+    "legend.cavity.bulk": "体相溶剂",
+    "legend.cavity_count": "{name}：{count} 个 × {volume} Å³",
+    "legend.cavity.channel_count": "通道：{count} 个 × {volume} Å³（需 4/6 判据）",
     "log.surface_charge_warning": "电荷列：{detail}",
     "log.surface_building": "正在为 {atoms} 个原子构建 {mode} 表面…",
     "log.surface_built": (
@@ -1794,6 +1903,10 @@ ZH: Dict[str, str] = {
     "sasa.reference.free": "参考态：每个残基单独测量",
     "sasa.reference.unbound": "参考态：不含配体的同一结构",
     "sasa.total": "总 SASA {total} Å²，参考 {reference} Å²，包埋 {buried} Å²（{share}）",
+    "sasa.total.free": (
+        "总 SASA {total} Å² · 各残基单独测量之和为 {isolated} Å²（并非完整结构面积）· "
+        "各残基包埋面积之和 {summed} Å² —— 要了解配体包埋了多少面积，请使用界面面积"
+    ),
     "sasa.ligand": "配体：游离 {free} Å²，复合物中 {exposed} Å²，包埋 {buried} Å²（占其表面 {share}）",
     "sasa.interface": "受体界面：{atoms} 个原子共包埋 {buried} Å²",
     "sasa.poses": "构象  亲和力  包埋 Å²  包埋 %",

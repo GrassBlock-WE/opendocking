@@ -208,7 +208,31 @@ PROPERTY_LABELS: Dict[str, Tuple[str, str]] = {
     "hydrophobicity": ("hydrophobicity", "0 polar →1 apolar"),
     "electrostatic": ("electrostatic potential", "kcal/(mol·e)"),
     "element": ("element", ""),
+    # A **categorical** property: no colour bar, no numeric range. The legend
+    # draws one swatch per class instead (see :data:`CAVITY_PALETTE`).
+    "cavity": ("cavity class", ""),
 }
+
+#: ``class -> colour`` for the cavity-class painting, and the legend's order.
+#:
+#: The hues are chosen to be distinguishable from each other *and* from the six
+#: interaction colours (the same rule as the search box, see
+#: ``viewport.BOX_COLOR``): at least 0.25 RGB between a class and any contact, and
+#: between any two classes. Both are asserted, and the test has already rejected
+#: two earlier choices — a green that was 0.21 from π–π and an amber that was 0.21
+#: from cation–π. A user who reads a class patch as a contact would read chemistry
+#: that is not there.
+CAVITY_PALETTE: Dict[str, Tuple[float, float, float]] = {
+    "enclosed": (0.85, 0.28, 0.55),
+    "open": (0.16, 0.60, 0.42),
+    "shallow": (0.93, 0.85, 0.45),
+    "channel": (0.35, 0.55, 0.95),
+    "bulk": (0.78, 0.78, 0.80),
+}
+
+#: The order the legend and the tables list the classes in: most interesting
+#: first, and ``bulk`` last because it is the answer for most of the surface.
+CAVITY_CLASSES: Tuple[str, ...] = ("enclosed", "channel", "open", "shallow", "bulk")
 
 
 def _residue_name(atom) -> str:
@@ -1835,6 +1859,16 @@ class Surface:
     #: potential map that is wrong-signed looks exactly like one that is right,
     #: so the caveat travels with the surface rather than being printed once.
     charge_warning: Optional[str] = None
+    #: Set by :func:`paint_by_cavity_class`: the class of the pocket each vertex
+    #: lines (``enclosed``/``channel``/``open``/``shallow``/``bulk``), with the
+    #: counts, the categorical legend the viewport draws instead of a colour bar,
+    #: and a per-class ``(pockets, volume Å³)`` summary for the log and the export.
+    class_labels: Optional[np.ndarray] = None
+    class_counts: Dict[str, int] = field(default_factory=dict)
+    class_legend: List[Tuple[str, Tuple[float, float, float]]] = field(
+        default_factory=list
+    )
+    class_summary: Dict[str, Tuple[int, float]] = field(default_factory=dict)
     #: Triangles and vertices that are rim lids rather than molecular surface.
     #: They are excluded from ``area`` and from the property legend, so a capped
     #: figure still reports the surface it is a figure *of*.
@@ -1974,6 +2008,118 @@ def _progress(progress, phase: str, fraction: float) -> None:
         progress(phase, float(fraction))
     except Exception:  # pragma: no cover - a host callback must never break a build
         pass
+
+
+def paint_by_cavity_class(
+    surface: "Surface",
+    report,
+    *,
+    tolerance: float = 2.5,
+) -> Dict[str, int]:
+    """Repaint a built surface by the cavity class of the pocket it lines.
+
+    ``report`` is an :class:`odock.cavity.CavityReport`. Every surface vertex is
+    asked which pocket it belongs to — the nearest pocket *cell* within
+    ``tolerance`` Å, via :func:`odock.cavity.classify_points` — and takes that
+    pocket's class from :data:`CAVITY_PALETTE`. A vertex that lines no pocket is
+    ``bulk``, which is most of the surface and is why the palette's grey is quiet.
+
+    This is a **repaint, not a rebuild**: the geometry, the normals and the atom
+    mapping are untouched, so the action costs a nearest-neighbour query rather
+    than a march. It replaces ``property_name``/``palette`` with the categorical
+    ``"cavity"`` one and stores:
+
+    * ``class_labels`` — per-vertex class name, for the interop export;
+    * ``class_counts`` — ``{class: vertices}``, returned;
+    * ``class_legend`` — ``[(name, colour)]`` in :data:`CAVITY_CLASSES` order,
+      which is what the viewport draws instead of a colour bar;
+    * ``class_summary`` — ``{class: (pockets, volume Å³)}`` for the log and the
+      exported header, from the report rather than from the vertex count.
+
+    A **channel** is shown as ``channel`` rather than ``open``: it is open at both
+    ends, it is only found when ``min_directions`` was lowered, and the legend
+    says so, so a picture of a bore cannot be read as a picture of an ATP site.
+    """
+    from .. import cavity as cavity_module
+
+    if surface.vertices_count == 0:
+        return {}
+    found = cavity_module.classify_points(
+        surface.vertices, report, tolerance=float(tolerance)
+    )
+    # Pocket label -> class, with a channel overriding its "open" kind.
+    class_of_pocket: Dict[str, str] = {}
+    for pocket in getattr(report, "pockets", []):
+        class_of_pocket[pocket.label] = (
+            "channel" if (pocket.channel and pocket.kind == "open") else pocket.kind
+        )
+    vertices = len(found)
+    labels = np.empty(vertices, dtype=object)
+    colours = np.empty((vertices, 3), dtype=float)
+    counts: Dict[str, int] = {}
+    for index, (label, kind) in enumerate(found):
+        if label is None:
+            name = "bulk"
+        else:
+            name = class_of_pocket.get(label, kind)
+        if name not in CAVITY_PALETTE:  # pragma: no cover - defensive
+            name = "bulk"
+        labels[index] = name
+        colours[index] = CAVITY_PALETTE[name]
+        counts[name] = counts.get(name, 0) + 1
+
+    surface.colors = colours
+    surface.property_name = "cavity"
+    surface.palette = "cavity"
+    surface.class_labels = labels
+    surface.class_counts = dict(counts)
+    surface.class_legend = [
+        (name, CAVITY_PALETTE[name]) for name in CAVITY_CLASSES if counts.get(name)
+    ]
+    summary: Dict[str, Tuple[int, float]] = {}
+    for name in CAVITY_CLASSES:
+        members = [
+            pocket
+            for pocket in getattr(report, "pockets", [])
+            if class_of_pocket.get(pocket.label) == name
+        ]
+        if members or name == "bulk":
+            summary[name] = (
+                len(members),
+                float(sum(pocket.volume for pocket in members)),
+            )
+    surface.class_summary = summary
+    # The value column is no longer a property: a numeric legend would be a lie.
+    surface.values = np.zeros(vertices, dtype=float)
+    surface.value_range = (0.0, 1.0)
+    return dict(counts)
+
+
+def cavity_bottleneck_annotations(report) -> List[Dict[str, object]]:
+    """``[{label, kind, point, radius, residues, channel}]`` for the renderer.
+
+    One annotation per pocket that has a bottleneck: the point is the pocket's
+    own centre, the radius is the measured bottleneck radius in Å — drawn as a
+    sphere of that radius, so the number is *visible* rather than quoted — and
+    the residues are the ones the neck cells touch. An enclosed void has no
+    bottleneck and so no annotation: there is no opening to point at.
+    """
+    out: List[Dict[str, object]] = []
+    for pocket in getattr(report, "pockets", []):
+        if pocket.bottleneck_radius is None:
+            continue
+        out.append(
+            {
+                "label": pocket.label,
+                "kind": pocket.kind,
+                "channel": bool(pocket.channel),
+                "point": tuple(float(value) for value in pocket.centre),
+                "radius": float(pocket.bottleneck_radius),
+                "residues": list(pocket.bottleneck_residues),
+                "volume": float(pocket.volume),
+            }
+        )
+    return out
 
 
 def build_surface(

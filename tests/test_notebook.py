@@ -239,7 +239,12 @@ def test_every_code_cell_executes_in_process_against_the_project(written_noteboo
     assert "interaction kinds:" in text
     assert "embedded image:" in text
     assert "figures: 2" in text
-    assert "PASS (tolerance 0 kcal/mol, 0 Å" in text
+    # The RMSD tolerance is no longer 0: it inherits the archive's own coordinate
+    # precision (POSE_COORDINATE_PRECISION = 1e-3 Å), because an archive written from
+    # a pose file cannot be finer than the PDBQT's three decimals -- the same
+    # reasoning as storing the unrounded affinity.  A zero tolerance against a
+    # quantised archive is a claim that can never be satisfied.
+    assert "PASS (tolerance 0 kcal/mol, 0.001 Å" in text
     assert "wrote reproduced-3ptb.odockproj" in text
     assert "do not prove that a file is correct" in text
     # The reproduction cell really wrote a project next to the notebook.

@@ -801,14 +801,23 @@ class ViewportWidget(QtWidgets.QWidget):
     LEGEND_BAR_HEIGHT = 104
 
     def _paint_legend(self, painter: QtGui.QPainter, width: int, height: int) -> None:
-        """The surface colour bar, its title and its tick labels.
+        """The surface legend: a colour bar, or a swatch list for a class painting.
 
         The stops come from the surface itself (``Scene.legend_stops``), which
         is what keeps the bar honest: it shows the range the *builder* used, not
         the range the caller thought it asked for. The labels are numbers only —
         the unit is in the title — and the whole block sits on a translucent
         panel so it stays readable over bright geometry.
+
+        The **cavity-class** painting is categorical, so the same slot draws one
+        swatch per class (``Scene.class_legend``) with its name and, where the
+        class has pockets, how many and their total volume. A colour bar over a
+        set of names would be a picture of an ordering that does not exist.
         """
+        classes = self.scene.class_legend()
+        if classes:
+            self._paint_class_legend(painter, width, height, classes)
+            return
         stops = self.scene.legend_stops(count=5)
         if not stops or width < 120 or height < 160:
             return
@@ -900,10 +909,103 @@ class ViewportWidget(QtWidgets.QWidget):
         finally:
             painter.restore()
 
+    def _paint_class_legend(self, painter, width, height, classes) -> None:
+        """One swatch per cavity class, with its pocket count and volume.
+
+        The numbers come from ``surface.class_summary`` — the *report* — not from
+        the vertex counts: how many vertices a class owns is a rendering fact, and
+        the question the legend answers is how many pockets of that class exist
+        and how much space they hold.
+        """
+        surface = self.scene.surface
+        summary = dict(getattr(surface, "class_summary", {}) or {})
+        if width < 140 or height < 160:
+            return
+        rows = list(classes)
+        metrics = painter.fontMetrics()
+        line = float(metrics.height()) + 3.0
+        left = 16.0
+        swatch = 11.0
+        widest = max(
+            [float(metrics.horizontalAdvance(self._class_legend_line(name, summary))) for name, _colour in rows]
+            + [float(metrics.horizontalAdvance(self._legend_title()))]
+        )
+        panel_width = min(
+            float(width) - 24.0, max(190.0, widest + swatch + 26.0)
+        )
+        top = float(height) - 22.0 - line * (len(rows) + 1) - 8.0
+        painter.save()
+        try:
+            painter.setFont(QtGui.QFont("Segoe UI", 8))
+            background = QtGui.QColor(10, 14, 20, 150)
+            if self._light_canvas:
+                background = QtGui.QColor(250, 252, 255, 190)
+            painter.setPen(QtCore.Qt.PenStyle.NoPen)
+            painter.setBrush(background)
+            painter.drawRoundedRect(
+                QtCore.QRectF(left - 5.0, top - line, panel_width, line * (len(rows) + 1) + 8.0),
+                5.0,
+                5.0,
+            )
+            painter.setPen(self._hud_ink())
+            painter.drawText(
+                QtCore.QRectF(left, top - line, panel_width, line),
+                int(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter),
+                self._legend_title(),
+            )
+            for index, (name, colour) in enumerate(rows):
+                y = top + line * index
+                painter.setPen(QtCore.Qt.PenStyle.NoPen)
+                painter.setBrush(
+                    QtGui.QBrush(
+                        QtGui.QColor(
+                            int(float(colour[0]) * 255),
+                            int(float(colour[1]) * 255),
+                            int(float(colour[2]) * 255),
+                        )
+                    )
+                )
+                painter.drawRect(
+                    QtCore.QRectF(left, y + 2.0, swatch, swatch)
+                )
+                painter.setPen(self._hud_ink())
+                painter.drawText(
+                    QtCore.QRectF(left + swatch + 6.0, y, panel_width, line),
+                    int(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter),
+                    self._class_legend_line(name, summary),
+                )
+        finally:
+            painter.restore()
+
+    def _class_legend_line(self, name: str, summary) -> str:
+        """``open — 4 pockets, 611 Å³`` (or just the name for the bulk class)."""
+        entry = summary.get(name)
+        if not entry:
+            return tr(f"legend.cavity.{name}")
+        pockets, volume = entry
+        if not pockets:
+            return tr(f"legend.cavity.{name}")
+        if name == "channel":
+            return tr(
+                "legend.cavity.channel_count",
+                count=int(pockets),
+                volume=f"{float(volume):.0f}",
+            )
+        return tr(
+            "legend.cavity_count",
+            name=tr(f"legend.cavity.{name}"),
+            count=int(pockets),
+            volume=f"{float(volume):.0f}",
+        )
+
     def _legend_title(self) -> str:
         """``hydrophobicity (0 polar → 1 apolar)`` as one line."""
         surface = self.scene.surface
         name = str(getattr(surface, "property_name", "") or "")
+        if name == "cavity":
+            # A class painting has no unit; the classes are named below it, and
+            # the caveat that matters travels with the title.
+            return tr("legend.cavity_title")
         try:
             import odock.gui.surface as _surface
 
@@ -1715,6 +1817,10 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         self._surface_clip = None
         self._pocket_only = False
         self._highlight_pocket = False
+        #: The cavity report the current painting was built from, so the export
+        #: and the table read the *same* answer the surface shows rather than
+        #: recomputing it (and possibly disagreeing).
+        self._cavity_report_value = None
         #: How wide a shell "pocket lining only" builds. Wide enough to hold a
         #: probe around the lining, which is what makes the shell the answer
         #: rather than an approximation of it.
@@ -6448,6 +6554,14 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         )
         self._act(menu, tr("action.surface_esp_breakdown"), self._potential_breakdown)
         menu.addSeparator()
+        # Cavities: a categorical painting of the surface plus the neck markers.
+        # It *repaints* the surface that is already built (see
+        # ``surface.paint_by_cavity_class``), and "back to the property map"
+        # rebuilds it, so the two cannot drift: the geometry is never duplicated.
+        cavities = menu.addMenu(tr("menu.surface_cavities"))
+        self._act(cavities, tr("action.surface_cavities"), self._paint_cavities)
+        self._act(cavities, tr("action.surface_cavities_report"), self._cavity_report)
+        self._act(cavities, tr("action.surface_cavities_clear"), self._clear_cavities)
         self.pocket_action = self._act(
             menu, tr("action.surface_pocket"), self._toggle_pocket_lining, checkable=True
         )
@@ -7018,6 +7132,164 @@ class DockingWorkbench(QtWidgets.QMainWindow):
                 )
             )
 
+    # -- cavities and channels -----------------------------------------------
+
+    def _cavity_analysis(self, on_done) -> None:
+        """Run the cavity analysis off the UI thread and hand the report back.
+
+        One place runs it, whether the caller wants the painting or the table, so
+        the two can never disagree about the answer: the report a user reads is
+        the report the surface was painted from.
+        """
+        from odock import cavity as cavity_module
+
+        atoms = list(self.scene.visible_receptor() or self.scene.receptor)
+        if not atoms:
+            self._report_error(tr("log.surface_failed"), True)
+            return
+        # The grid follows the surface: analysing at a spacing much finer than
+        # the mesh that will be painted gains nothing and costs seconds.
+        spacing = max(0.5, min(0.9, float(getattr(self.surface_settings, "spacing", 0.65))))
+
+        def work():
+            return cavity_module.analyse_cavities(
+                atoms, cavity_module.CavitySettings(spacing=spacing)
+            )
+
+        def done(report):
+            self._cavity_report_value = report
+            on_done(report)
+
+        self._run_background(work, done, label=tr("action.surface_cavities"))
+
+    def _cavity_summary_line(self, report) -> str:
+        kinds = {name: len(report.of_kind(name)) for name in ("enclosed", "open", "shallow")}
+        channels = sum(1 for pocket in report.pockets if pocket.channel)
+        return tr(
+            "cavity.summary",
+            total=len(report.pockets),
+            enclosed=kinds["enclosed"],
+            channel=channels,
+            open=kinds["open"],
+            shallow=kinds["shallow"],
+            seconds=f"{report.seconds:.1f}",
+            points=int(report.grid_points),
+        )
+
+    def _paint_cavities(self) -> None:
+        """Colour the surface by cavity class and mark each bottleneck."""
+        surface = self.scene.surface
+        if surface is None:
+            self._report_error(tr("log.surface_failed"), True)
+            return
+
+        def apply(report) -> None:
+            import odock.gui.surface as surface_module
+
+            counts = surface_module.paint_by_cavity_class(surface, report)
+            self.scene.bottlenecks = surface_module.cavity_bottleneck_annotations(report)
+            self.scene.show_surface = True
+            self.scene.surface_legend = True
+            self._set_action_checked(self.surface_action, True)
+            self._set_action_checked(self.legend_action, True)
+            self.viewport.upload_surface(self.scene.surface)
+            self.viewport.refresh()
+            painted = ", ".join(
+                f"{name} {count}" for name, count in sorted(counts.items())
+            )
+            self._log(
+                tr(
+                    "log.cavity_painted",
+                    counts=painted,
+                    pockets=len(report.pockets),
+                )
+            )
+            self._log(self._cavity_summary_line(report))
+            for pocket in report.pockets:
+                if pocket.bottleneck_radius is None:
+                    self._log(tr("cavity.no_bottleneck", label=pocket.label))
+                else:
+                    self._log(
+                        tr(
+                            "cavity.neck_line",
+                            label=pocket.label,
+                            radius=f"{pocket.bottleneck_radius:.2f}",
+                            residues=", ".join(pocket.bottleneck_residues[:6]),
+                        )
+                    )
+
+        self._cavity_analysis(apply)
+
+    def _clear_cavities(self) -> None:
+        """Drop the class painting by rebuilding the surface from its properties."""
+        self.scene.bottlenecks = []
+        self._cavity_report_value = None
+        self._rebuild_surface()
+
+    def _cavity_report(self) -> None:
+        """The classification as a table, with the criterion that produced it."""
+        from odock import cavity as cavity_module
+
+        options = cavity_module.CavitySettings()
+        spacing = max(
+            0.5, min(0.9, float(getattr(self.surface_settings, "spacing", 0.65)))
+        )
+
+        def work():
+            atoms = list(self.scene.visible_receptor() or self.scene.receptor)
+            return cavity_module.analyse_cavities(
+                atoms, cavity_module.CavitySettings(spacing=spacing)
+            )
+
+        def done(report) -> None:
+            self._cavity_report_value = report
+            lines = [tr("cavity.header"), ""]
+            lines.append(
+                tr(
+                    "cavity.model",
+                    probe=f"{report.probe:.2f}",
+                    reach=f"{options.enclosure_radius:.0f}",
+                    directions=int(options.min_directions),
+                    volume=f"{options.min_volume:.0f}",
+                    spacing=f"{report.spacing:.2f}",
+                )
+            )
+            if int(options.min_directions) < cavity_module.DEFAULT_MIN_DIRECTIONS:
+                lines.append(
+                    tr("cavity.model_channel", directions=int(options.min_directions))
+                )
+            lines.append("")
+            lines.append(tr("cavity.table_header"))
+            for pocket in report.pockets:
+                neck = "  —  " if pocket.bottleneck_radius is None else f"{pocket.bottleneck_radius:5.2f}"
+                kind = "channel" if pocket.channel else pocket.kind
+                lines.append(
+                    f"{pocket.label:<7} {kind:<8} {pocket.volume:8.1f} {neck:>7} "
+                    f"{pocket.geometric_score:5.2f}  "
+                    + ", ".join(pocket.lining_residues[:5])
+                )
+            lines.append("")
+            if report.box_too_tight:
+                lines.append(tr("cavity.box_too_tight"))
+            lines.append(tr("cavity.not_druggability"))
+            lines.append(tr("cavity.no_mouths"))
+            lines.append("")
+            lines.append(self._cavity_summary_line(report))
+            self._show_report(tr("dialog.cavity_report"), "\n".join(lines))
+            self._log(
+                tr(
+                    "log.cavity_report",
+                    total=len(report.pockets),
+                    enclosed=len(report.of_kind("enclosed")),
+                    channel=sum(1 for pocket in report.pockets if pocket.channel),
+                    open=len(report.of_kind("open")),
+                    shallow=len(report.of_kind("shallow")),
+                    seconds=f"{report.seconds:.1f}",
+                )
+            )
+
+        self._run_background(work, done, label=tr("action.surface_cavities_report"))
+
     # -- SASA, burial and the interop exports --------------------------------
 
     def _show_report(self, title: str, text: str, svg: Optional[str] = None) -> None:
@@ -7267,7 +7539,48 @@ class DockingWorkbench(QtWidgets.QMainWindow):
                 "fov": float(self.viewport.camera.fov),
             },
             title=tr("app.title"),
+            cavities=self._export_cavities(),
+            cavity_criterion=self._export_cavity_criterion(),
         )
+
+    def _export_cavities(self) -> list:
+        """The cavities of the *current* painting, in the export's shape.
+
+        Taken from the report the surface was painted with, so the exported
+        markers and the colours on screen cannot disagree. An empty list when no
+        cavity analysis has been run, which the exporter turns into no marker
+        section at all rather than an empty one.
+        """
+        report = self._cavity_report_value
+        if report is None:
+            return []
+        import odock.gui.surface as surface_module
+
+        return surface_module.cavity_bottleneck_annotations(report)
+
+    def _export_cavity_criterion(self) -> dict:
+        """Which criterion produced the classifications, for the export header."""
+        report = self._cavity_report_value
+        if report is None:
+            return {}
+        from odock import cavity as cavity_module
+
+        kinds = {
+            name: len(report.of_kind(name))
+            for name in ("enclosed", "open", "shallow")
+        }
+        channels = sum(1 for pocket in report.pockets if pocket.channel)
+        if channels:
+            kinds["channel"] = channels
+        return {
+            "min_directions": int(cavity_module.DEFAULT_MIN_DIRECTIONS),
+            "enclosure_radius": float(cavity_module.CavitySettings().enclosure_radius),
+            "probe": float(report.probe),
+            "spacing": float(report.spacing),
+            "grid_points": int(report.grid_points),
+            "seconds": float(report.seconds),
+            "kinds": kinds,
+        }
 
     def _surface_values_per_atom(self, surface):
         """A per-receptor-atom property array from a per-vertex surface.

@@ -1732,3 +1732,123 @@ def test_a_modified_residue_survives_no_hetero_and_is_named(tmp_path, capsys, da
     assert names.count("CSO") == 18, "the 18 CSO atoms must survive"
     assert "XK2" not in names, "the ligand it was told to strip must be gone"
     assert "ASP" in names
+
+
+# ---------------------------------------------------------------------------
+# `report.atom_order` must be the order of the file, not of the serials
+# ---------------------------------------------------------------------------
+
+
+def test_the_atom_order_reports_the_file_order(data_dir):
+    """MEASURED DEFECT (task-53): `atom_order` disagreed with the PDBQT it described.
+
+    `write_ligand_pdbqt(return_order=True)` returned `flatten_tree(tree)` -- the
+    *serial* order -- while the kernel reads the `ATOM` lines in *file* order, and a
+    `BRANCH` names its parent, so a serial can be assigned before that atom's line
+    is emitted.  For the thioether `O=C(CCS)NCCc1ccccc1` the two disagreed from
+    position 6: the file's seventh atom is `S` (RDKit index 4) and the reported
+    order said 3.  Every atom name is `X<rdkit index + 1>`, so the file order is
+    checkable directly, which is what this asserts for two hydrogen-rich ligands.
+    """
+    from odock.prepare import prepare_ligand
+
+    for smiles in ("O=C(CCS)NCCc1ccccc1", "CC(C)Cc1ccc(cc1)C(C)C(=O)O"):
+        _mol, text, report = prepare_ligand(smiles, smiles=smiles)
+        written = [
+            line.split()[2]
+            for line in text.splitlines()
+            if line.startswith(("ATOM", "HETATM"))
+        ]
+        assert written, smiles
+        implied = [int(name[1:]) - 1 for name in written if name[1:].isdigit()]
+        assert len(implied) == len(written), smiles
+        assert list(report.atom_order) == implied, (
+            smiles, list(report.atom_order), implied,
+        )
+        # The mapping must also be a genuine permutation of the molecule's atoms.
+        assert sorted(int(index) for index in report.atom_order) == list(
+            range(len(implied))
+        ), smiles
+
+
+def test_the_documented_strain_recipe_does_not_refuse_an_ordinary_ligand(data_dir):
+    """The failure this cannot have: `reliable=True` on a path that raises.
+
+    `metrics.ligand_strain`'s documented recipe is `mol=mol` plus
+    `atom_order=report.atom_order`, and it advertises `reliable=True`.  Before the
+    writer fix that recipe raised `the supplied molecule's atom order does not match
+    the pose PDBQT` for the thioether while working for acetanilide, so an ordinary
+    ligand was refused by the recipe that exists to be the reliable one.  This test
+    drives the recipe for the thioether and for ibuprofen (hydrogen-rich, several
+    torsions) and requires a finite `StrainResult` back.
+    """
+    import math
+
+    from odock import metrics
+    from odock.prepare import prepare_ligand, prepare_receptor
+
+    _receptor_mol, receptor_text, _report = prepare_receptor(
+        str(data_dir / "3PTB.pdb"), None, strip=["BEN"]
+    )
+    for smiles in ("O=C(CCS)NCCc1ccccc1", "CC(C)Cc1ccc(cc1)C(C)C(=O)O"):
+        mol, text, report = prepare_ligand(smiles, smiles=smiles)
+        strain = metrics.ligand_strain(
+            text, receptor=receptor_text, mol=mol, atom_order=report.atom_order
+        )
+        assert strain.reliable is True, (smiles, strain.note)
+        assert math.isfinite(float(strain.strain)), (smiles, strain.strain, strain.note)
+        assert math.isfinite(float(strain.force_field_strain)), smiles
+
+
+def test_reliable_is_false_when_the_strain_is_not_there(data_dir):
+    """A flag that says "trust this number" must be false when it is not a number.
+
+    `strain` is `intra(pose) - intra(relaxed)` and the kernel's intra term needs a
+    receptor, so without one the strain is `nan`.  MEASURED before this rule: the
+    documented recipe returned `strain=nan, reliable=True` when called without a
+    receptor, which is a claim about a number that does not exist -- a caller who
+    checks `reliable` and then formats `strain` gets `nan` in a table.  The finite
+    intramolecular value lives in `force_field_strain`, and the note says so.
+    """
+    import math
+
+    from odock import metrics
+    from odock.prepare import prepare_ligand
+
+    mol, text, report = prepare_ligand(
+        "O=C(CCS)NCCc1ccccc1", smiles="O=C(CCS)NCCc1ccccc1"
+    )
+    strain = metrics.ligand_strain(text, mol=mol, atom_order=report.atom_order)
+    assert math.isnan(float(strain.strain)), strain.strain
+    assert strain.reliable is False
+    assert math.isfinite(float(strain.force_field_strain)), strain.force_field_strain
+    assert "force_field_strain" in strain.note, strain.note
+    # ... and a caller who insisted on reliability is told before any work is done.
+    try:
+        metrics.ligand_strain(
+            text, mol=mol, atom_order=report.atom_order, require_reliable=True
+        )
+    except ValueError as exc:
+        assert "no receptor" in str(exc), str(exc)
+    else:  # pragma: no cover - the raise is the point
+        raise AssertionError("require_reliable=True accepted a result with no strain")
+
+
+def test_reliable_is_true_when_the_documented_recipe_produces_a_strain(data_dir):
+    """The documented recipe, with a receptor: a finite number and a true flag."""
+    import math
+
+    from odock import metrics
+    from odock.prepare import prepare_ligand, prepare_receptor
+
+    _mol, receptor_text, _report = prepare_receptor(
+        str(data_dir / "3PTB.pdb"), None, strip=["BEN"]
+    )
+    for smiles in ("O=C(CCS)NCCc1ccccc1", "CC(C)Cc1ccc(cc1)C(C)C(=O)O"):
+        mol, text, report = prepare_ligand(smiles, smiles=smiles)
+        strain = metrics.ligand_strain(
+            text, receptor=receptor_text, mol=mol, atom_order=report.atom_order
+        )
+        assert strain.reliable is True, (smiles, strain.note)
+        assert math.isfinite(float(strain.strain)), (smiles, strain.strain)
+        assert math.isfinite(float(strain.force_field_strain)), smiles

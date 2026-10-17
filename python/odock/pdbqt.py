@@ -584,6 +584,16 @@ def write_ligand_pdbqt(
     # tree, which is *not* the RDKit index order, so the serials must be
     # recorded rather than assumed: a `BRANCH a b` record refers to serials.
     serial_of: Dict[int, int] = {}
+    # The RDKit indices of the *atom records*, in the order they are written.
+    # This is what `return_order` must report: the kernel reads the ATOM lines in
+    # file order, and a serial can be assigned before its line is emitted (a
+    # BRANCH names its parent), so serial order and line order are not the same
+    # thing.  Returning `flatten_tree(tree)` instead -- the serial order -- made
+    # `report.atom_order` disagree with the file for any molecule whose hydrogen
+    # merge reordered atoms, which is why the documented `ligand_strain` recipe
+    # refused an ordinary thioether with "the supplied molecule's atom order does
+    # not match the pose PDBQT".
+    emitted: List[int] = []
 
     def serial_for(idx: int) -> int:
         if idx not in serial_of:
@@ -595,6 +605,7 @@ def write_ligand_pdbqt(
         n = serial_for(idx)
         p = conf.GetAtomPosition(idx)
         res_name, chain, res_seq = _residue_info(mol, idx)
+        emitted.append(idx)
         lines.append(
             format_atom_line(
                 n,
@@ -622,6 +633,7 @@ def write_ligand_pdbqt(
             parent_serial = serial_for(parent_atom)
             child_serial = serial_for(child_atom)
             lines.append(f"BRANCH {parent_serial:>4d} {child_serial:>4d}")
+            emitted.append(child_atom)
             lines.append(
                 format_atom_line(
                     child_serial,
@@ -654,7 +666,7 @@ def write_ligand_pdbqt(
     lines.append(f"TORSDOF {tree.num_torsions}")
     text = "\n".join(lines) + "\n"
     if return_order:
-        return text, flatten_tree(tree)
+        return text, emitted
     return text
 
 

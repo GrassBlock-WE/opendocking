@@ -247,13 +247,45 @@ def _receptor_source(receptor, result):
     return parse_pdbqt_atoms(text) or None
 
 
-def _ligand_atoms(result, pose) -> List[_Atom]:
-    """The ligand of one pose, in the kernel's atom order.
+def atom_permutation(
+    source_names: Sequence[str], target_names: Sequence[str]
+) -> Optional[List[int]]:
+    """The index map taking an array ordered by `source_names` into `target_names`.
 
-    ``ligand_pdbqt`` is written in exactly the order the kernel flattens the
-    kinematic tree, which is the order ``pose.coords`` uses (see
-    ``docs/DATA_STRUCTURES.md``), so the file's atom records can be paired with
-    the pose coordinates one to one.
+    **An array index is not an atom identity.**  Returning ``None`` when the names
+    are not permutations of one another (an unknown atom, a count mismatch) is
+    deliberate: guessing a mapping would silently move atoms, and a contact list
+    computed on moved atoms reports interactions that do not exist.  Duplicate
+    names are resolved by order of appearance, which is what a writer that reorders
+    branches does.
+    """
+    if not source_names or not target_names or len(source_names) != len(target_names):
+        return None
+    remaining: Dict[str, List[int]] = {}
+    for position, name in enumerate(source_names):
+        remaining.setdefault(str(name), []).append(position)
+    permutation: List[int] = []
+    for name in target_names:
+        candidates = remaining.get(str(name))
+        if not candidates:
+            return None
+        permutation.append(candidates.pop(0))
+    if any(remaining.values()):
+        return None
+    return permutation
+
+
+def _ligand_atoms(result, pose) -> List[_Atom]:
+    """The ligand of one pose, with that pose's coordinates on the right atoms.
+
+    The pairing is **by atom name**, not by array index.  ``ligand_pdbqt`` is the
+    prepared ligand, written in its own atom order; ``pose.coords`` is in the order
+    `result.ligand_atom_order` describes.  Those two orders are usually the same and
+    sometimes are not -- measured on 3PTB/benzamidine, the archive recorded
+    ``C7 C6 C5 C4 ...`` while a fresh ``dock()`` of the same file reported
+    ``C7 C6 C8 C5 ...`` -- and zipping them index-by-index then reports contacts
+    for atoms that are not there (that is how pose 1 gained an ``ASP189`` contact
+    and pose 2 a ``VAL213`` contact that the geometry does not support).
     """
     text = getattr(result, "ligand_pdbqt", "") or ""
     if not text.strip():
@@ -263,8 +295,17 @@ def _ligand_atoms(result, pose) -> List[_Atom]:
     if coords is not None:
         array = getattr(coords, "shape", None)
         if array is not None and len(array) == 2 and int(array[0]) == len(atoms):
-            for atom, xyz in zip(atoms, coords):
-                atom.x, atom.y, atom.z = float(xyz[0]), float(xyz[1]), float(xyz[2])
+            order = tuple(getattr(result, "ligand_atom_order", ()) or ())
+            permutation = atom_permutation(
+                [str(atom.name) for atom in atoms], list(order)
+            ) if order and len(order) == len(atoms) else None
+            if permutation is None:
+                for atom, xyz in zip(atoms, coords):
+                    atom.x, atom.y, atom.z = float(xyz[0]), float(xyz[1]), float(xyz[2])
+            else:
+                for index, xyz in enumerate(coords):
+                    atom = atoms[permutation[index]]
+                    atom.x, atom.y, atom.z = float(xyz[0]), float(xyz[1]), float(xyz[2])
     return atoms
 
 

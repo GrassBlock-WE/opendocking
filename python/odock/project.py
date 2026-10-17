@@ -131,6 +131,16 @@ FORMAT_NAME = "odock-project"
 #: could misread the new one.
 SCHEMA_VERSION = 2
 
+#: The precision a pose PDBQT records coordinates at: three decimals, i.e. an
+#: angstrom.  An archive built from a pose file inherits exactly that, so a
+#: comparison at a zero RMSD tolerance can never pass -- measured, a bit-identical
+#: re-run differs by 5.1e-4 A once the atom orders are aligned.  The default
+#: tolerance therefore inherits the archive's precision, the same way the affinity
+#: tolerance does, and ``--rmsd-tolerance 0`` is still available for anyone who
+#: built an archive from an engine result (which carries full-precision
+#: coordinates).
+POSE_COORDINATE_PRECISION = 1e-3
+
 #: The oldest layout this build can still migrate onto :data:`SCHEMA_VERSION`.
 #: A file below this is refused with the reason, never guessed at.
 MIN_MIGRATABLE_VERSION = 1
@@ -1355,6 +1365,19 @@ class Project:
                     pose_records = [dict(item) for item in raw if isinstance(item, Mapping)]
 
         ligand_text = self.ligand_text()
+        atom_order = run.get("ligand_atom_order")
+        atom_order = tuple(str(name) for name in atom_order) if isinstance(atom_order, list) else ()
+        # The stored coordinates are in the **pose file's** atom order -- the PDBQT
+        # tree order the writer used -- while `ligand_atom_order` is the prepared
+        # ligand's order, which is the order the kernel's coordinates come back in.
+        # Without this permutation a reopened run's coordinates are physically
+        # right and index-wise wrong, and a symmetry-aware RMSD cannot undo an
+        # arbitrary permutation: measured, that produced `top_pose_rmsd` 0.571 A on
+        # a re-run whose affine deltas were all exactly 0.0, while the sorted
+        # coordinate sets matched to 0.0005 A (the PDBQT 3-decimal rounding).
+        permutation = None
+        if atom_order and self.has(ROLE_POSES):
+            permutation = _atom_permutation(_pose_atom_names(self.poses_text()), atom_order)
         poses: List[Any] = []
         if pose_records:
             for index, record in enumerate(pose_records):
@@ -1364,6 +1387,12 @@ class Project:
                     if isinstance(coords, list) and coords
                     else None
                 )
+                if (
+                    array is not None
+                    and permutation is not None
+                    and len(permutation) == len(array)
+                ):
+                    array = array[permutation]
                 poses.append(
                     Pose(
                         index=int(record.get("index", index)),
@@ -1387,8 +1416,6 @@ class Project:
                     )
                 )
 
-        atom_order = run.get("ligand_atom_order")
-        atom_order = tuple(str(name) for name in atom_order) if isinstance(atom_order, list) else ()
         result = DockResult(
             poses=poses,
             seed=int(run.get("seed") or 0),
@@ -2003,6 +2030,35 @@ def _pose_quality(result: Any, rows: Sequence[Mapping[str, Any]]) -> Dict[str, A
 # ---------------------------------------------------------------------------
 # Saving
 # ---------------------------------------------------------------------------
+
+
+def _pose_atom_names(poses_text: str) -> Tuple[str, ...]:
+    """The atom names of the first model of a pose PDBQT, in file order."""
+    if not poses_text:
+        return ()
+    try:
+        from .report import parse_pdbqt_atoms
+
+        blocks = _split_models(poses_text)
+        if not blocks:
+            return ()
+        return tuple(str(atom.name) for atom in parse_pdbqt_atoms(blocks[0]))
+    except Exception:  # pragma: no cover - defensive
+        return ()
+
+
+def _atom_permutation(
+    pose_names: Sequence[str], target_names: Sequence[str]
+) -> Optional[List[int]]:
+    """The index map taking coordinates in `pose_names` order into `target_names`.
+
+    Delegates to :func:`odock.report.atom_permutation` so there is one
+    implementation of the rule -- **an array index is not an atom identity** --
+    rather than one per module.
+    """
+    from .report import atom_permutation
+
+    return atom_permutation(list(pose_names), list(target_names))
 
 
 def _pose_record(pose: Any) -> Dict[str, Any]:
@@ -2974,7 +3030,7 @@ def reproduce_project(
     path: PathLike,
     *,
     tolerance: float = 0.0,
-    rmsd_tolerance: float = 0.0,
+    rmsd_tolerance: float = POSE_COORDINATE_PRECISION,
     cutoff: float = 2.0,
     record: Optional[PathLike] = None,
     save_as: Optional[PathLike] = None,
@@ -3101,6 +3157,12 @@ def reproduce_project(
         "n_poses": len(fresh_poses),
         "best_affinity": getattr(rerun, "best_affinity", None),
         "affinities": fresh_affinities,
+        # The stored block reports these, so the reproduced block must too: a
+        # comparison whose keys differ between the two sides reads as "None"
+        # rather than as a number, which is how the asymmetry hid.
+        "rmsd_lower_bounds": [
+            float(getattr(pose, "rmsd_lower_bound", 0.0) or 0.0) for pose in fresh_poses
+        ],
         "scoring": getattr(rerun, "scoring", None),
         "seed": getattr(rerun, "seed", None),
         "grid_points": getattr(rerun, "grid_points", 0),
@@ -3112,14 +3174,22 @@ def reproduce_project(
     deltas = [abs(a - b) for a, b in paired]
     top_rmsd: Optional[float] = None
     elements = _elements_of(loaded.poses_text())
-    if stored_poses and fresh_poses and elements:
-        stored_coords = getattr(stored_poses[0], "coords", None)
-        fresh_coords = getattr(fresh_poses[0], "coords", None)
-        if (
-            stored_coords is not None
-            and fresh_coords is not None
-            and len(stored_coords) == len(fresh_coords)
-        ):
+    # The two results order their atoms differently: measured on 3PTB/benzamidine,
+    # the archive's `ligand_atom_order` is C7 C6 C5 C4 ... while a fresh `dock()` of
+    # the same ligand file reports C7 C6 **C8** C5 ...  Comparing the raw arrays
+    # index-by-index therefore compares different atoms, and a symmetry-aware RMSD
+    # cannot undo an arbitrary permutation -- that is the whole of the 0.571 A
+    # "non-determinism": the sorted coordinate sets match to 0.0005 A (the PDBQT
+    # 3-decimal rounding) and every affinity delta is exactly 0.0.  Both sides are
+    # brought into the archive's atom order by name before anything is compared.
+    stored_order = tuple(getattr(stored_result, "ligand_atom_order", ()) or ())
+    fresh_order = tuple(getattr(rerun, "ligand_atom_order", ()) or ())
+    stored_coords_list = _coords_in_order(stored_poses, stored_order, stored_order)
+    fresh_coords_list = _coords_in_order(fresh_poses, fresh_order, stored_order)
+    if stored_coords_list and fresh_coords_list and elements:
+        stored_coords = stored_coords_list[0]
+        fresh_coords = fresh_coords_list[0]
+        if stored_coords is not None and fresh_coords is not None and len(stored_coords) == len(fresh_coords):
             try:
                 from .analysis import symmetry_aware_rmsd
 
@@ -3167,7 +3237,11 @@ def reproduce_project(
         "top_pose_rmsd": top_rmsd,
         "ranking_table_equal": ranking_equal,
         "residues_column_equal": residues_equal,
-        "clusters": _cluster_counts(stored_poses, fresh_poses, elements, cutoff),
+        "clusters": _cluster_counts(
+            stored_poses, fresh_poses, elements, cutoff,
+            stored_coords=stored_coords_list or None,
+            fresh_coords=fresh_coords_list or None,
+        ),
     }
 
     max_delta = outcome.deltas["max_affinity_delta"]
@@ -3221,17 +3295,66 @@ def reproduce_project(
     return _finish_reproduction(outcome, record, save_as, rerun=rerun, loaded=loaded)
 
 
+def _coords_in_order(
+    poses: Sequence[Any],
+    own_order: Sequence[str],
+    target_order: Sequence[str],
+) -> List[Any]:
+    """Pose coordinates brought into `target_order` by atom name.
+
+    A result's ``coords`` are in that result's own ``ligand_atom_order``; two
+    results for the same ligand can disagree about that order (measured: the
+    archive had ``C7 C6 C5 C4 ...`` and a fresh dock ``C7 C6 C8 C5 ...``).  When
+    the orders cannot be reconciled by name -- an unknown atom, a shape mismatch --
+    the raw arrays are returned unchanged, and the caller's comparison then reports
+    the disagreement rather than silently aligning the wrong atoms.
+    """
+    import numpy as np
+
+    permutation = None
+    if own_order and target_order:
+        permutation = _atom_permutation(list(own_order), list(target_order))
+    out: List[Any] = []
+    for pose in poses:
+        coords = getattr(pose, "coords", None)
+        if coords is None:
+            out.append(None)
+            continue
+        array = np.asarray(coords, dtype=float)
+        if permutation is not None and len(permutation) == len(array):
+            array = array[permutation]
+        out.append(array)
+    return out
+
+
 def _cluster_counts(
     stored_poses: Sequence[Any],
     fresh_poses: Sequence[Any],
     elements: Sequence[str],
     cutoff: float,
+    *,
+    stored_coords: Optional[Sequence[Any]] = None,
+    fresh_coords: Optional[Sequence[Any]] = None,
 ) -> Dict[str, Any]:
-    """How each pose set clusters, so a comparison can report a regrouping."""
+    """How each pose set clusters, so a comparison can report a regrouping.
+
+    `stored_coords`/`fresh_coords` let the caller pass coordinates already brought
+    into one atom order (:func:`_coords_in_order`); without them each pose's own
+    ``coords`` are used, which is only meaningful when both sides share an order.
+    """
     from .analysis import cluster_poses
 
-    def summarise(poses: Sequence[Any]) -> Dict[str, Any]:
-        coords = [pose.coords for pose in poses if getattr(pose, "coords", None) is not None]
+    import numpy as np
+
+    def summarise(poses: Sequence[Any], coords_in: Optional[Sequence[Any]]) -> Dict[str, Any]:
+        if coords_in is not None:
+            coords = [np.asarray(item, dtype=float) for item in coords_in if item is not None]
+        else:
+            coords = [
+                np.asarray(pose.coords, dtype=float)
+                for pose in poses
+                if getattr(pose, "coords", None) is not None
+            ]
         if len(coords) < 2 or not elements:
             return {"n_clusters": len(coords), "largest": len(coords), "representatives": []}
         try:
@@ -3251,8 +3374,8 @@ def _cluster_counts(
 
     return {
         "cutoff": float(cutoff),
-        "stored": summarise(stored_poses),
-        "reproduced": summarise(fresh_poses),
+        "stored": summarise(stored_poses, stored_coords),
+        "reproduced": summarise(fresh_poses, fresh_coords),
     }
 
 
@@ -3902,14 +4025,22 @@ def cmd_project_save(args) -> int:
                 "`odock dock --json-out FILE` writes one"
             )
         # The pose file carries the coordinates; the JSON carries the settings
-            # *and the exact numbers*.  A PDBQT `REMARK VINA RESULT` is rendered
-            # text -- three decimals -- so a result rebuilt from a pose file alone
-            # carries rounded affinities, and comparing that archive against a
-            # fresh run at `--tolerance 0` could never pass.  Measured before this
-            # line existed: a run scoring -5.9449521243509125 was archived as
-            # -5.945, and `project reproduce` reported INCONCLUSIVE with
-            # `max |delta affinity|` 4.37e-4 -- the rounding residual, not a
-            # difference in the engine.
+        # *and the exact numbers*.  A PDBQT `REMARK VINA RESULT` is rendered text
+        # -- three decimals -- so a result rebuilt from a pose file alone carries
+        # rounded affinities, and comparing that archive against a fresh run at
+        # `--tolerance 0` could never pass.  Measured before this existed: a run
+        # scoring -5.9449521243509125 was archived as -5.945, and `project
+        # reproduce` reported INCONCLUSIVE with `max |delta affinity|` 4.37e-4 --
+        # the rounding residual, not a difference in the engine.
+        #
+        # The `if poses:` guard is what puts the *coordinates* in the archive: a
+        # result rebuilt from the dock JSON alone has `coords=None` by design
+        # ("without coordinates, they are large"), and an archive whose poses have
+        # no coordinates cannot cluster, cannot compute a top-pose RMSD and cannot
+        # compare its residues column.  Measured when this guard was missing: the
+        # stored side reported `n_clusters: 0` against the re-run's 3 and
+        # `top_pose_rmsd: None`.
+        if poses:
             result = result_from_pdbqt(
                 poses,
                 box=args.box,
@@ -4259,8 +4390,11 @@ def add_project_parser(sub) -> None:
              "deterministic for a given release, seed and input)",
     )
     reproduce.add_argument(
-        "--rmsd-tolerance", type=float, default=0.0, dest="rmsd_tolerance",
-        help="top-pose RMSD tolerance in Å (default 0)",
+        "--rmsd-tolerance", type=float, default=POSE_COORDINATE_PRECISION,
+        dest="rmsd_tolerance",
+        help="top-pose RMSD tolerance in Å (default 1e-3: the precision a pose "
+             "PDBQT records coordinates at, which is what an archive inherits; "
+             "pass 0 for an archive built from an engine result)",
     )
     reproduce.add_argument(
         "--cutoff", type=float, default=2.0, help="clustering cutoff for the report (Å)"

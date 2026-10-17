@@ -124,9 +124,22 @@ MIN_VOLUME = 25.0
 #: "channel" is a gap between domains rather than an aperture.
 MAX_BOTTLENECK = 6.0
 
+#: How many of the six scan directions must see protein for a cell to count as
+#: inside a *pocket*. Five of six is the LIGSITE convention: a cell is in the
+#: pocket when every direction but the mouth is blocked. Lowering it to four
+#: admits straight **channels** (open at both ends) as well, and
+#: :attr:`Pocket.channel` then says which is which.
+DEFAULT_MIN_DIRECTIONS = 5
+
 #: Bisection steps for the bottleneck radius. Each step is one labelling, so the
 #: precision is (MAX_BOTTLENECK - CORE_RADIUS)/2**steps Å.
 BOTTLENECK_STEPS = 7
+
+#: The most residues reported as lining one bottleneck. A neck is a ring a few Å
+#: across, so a dozen is already generous; the cap exists because the list is
+#: written into an exported selection, and a selection of seventy residues is not
+#: a statement about an aperture.
+MAX_NECK_RESIDUES = 12
 
 
 class _Missing:
@@ -715,6 +728,11 @@ def analyse_cavities(
     # -- enclosed voids: accessible components the bulk does not reach -------
     sizes = np.bincount(labels.reshape(-1))
     pockets: List[Pocket] = []
+    #: ``id(pocket) -> cells``, so the report can carry the grid cells of the
+    #: pockets it *keeps* (after sorting, relabelling and the cap) without
+    #: re-deriving them. A caller that paints a surface or writes an interop
+    #: export needs them, and a label is only final at the end of this function.
+    cells_of: Dict[int, np.ndarray] = {}
     for label in range(1, len(sizes)):
         if sizes[label] == 0 or label in bulk_labels:
             continue
@@ -723,23 +741,22 @@ def analyse_cavities(
             continue
         cells = np.argwhere(labels == label)
         kind = "unknown" if report.box_too_tight else "enclosed"
-        pockets.append(
-            _make_pocket(
-                atoms,
-                coords,
-                axes,
-                cells,
-                kind=kind,
-                volume=volume,
-                openings=0,
-                bottleneck=None,
-                spacing=spacing,
-                residue_labels=residue_labels,
-                index=len(pockets) + 1,
-                core_radius=float(options.core_radius),
-            )
+        pocket = _make_pocket(
+            atoms,
+            coords,
+            axes,
+            cells,
+            kind=kind,
+            volume=volume,
+            openings=0,
+            bottleneck=None,
+            spacing=spacing,
+            residue_labels=residue_labels,
+            index=len(pockets) + 1,
+            core_radius=float(options.core_radius),
         )
-        report.pocket_cells.append((pockets[-1].label, kind, cells))
+        pockets.append(pocket)
+        cells_of[id(pocket)] = cells
 
     report.accessible_volume = float(np.count_nonzero(labels)) * cell_volume
     report.bulk_volume = float(
@@ -764,6 +781,12 @@ def analyse_cavities(
             )
         }
         candidates = (labels > 0) & (covered >= int(options.min_directions))
+        # The same scan at the **default** threshold, so a pocket that only
+        # qualified because the threshold was lowered can say so. A bore open at
+        # both ends has protein on four directions: it is a channel, not a
+        # pocket, and the flag travels into the legend, the table and the export
+        # so a picture of an ATP site and a picture of a bore cannot be confused.
+        strict = covered >= DEFAULT_MIN_DIRECTIONS
         report.enclosing_cells = int(np.count_nonzero(candidates))
         distance = _ndimage.distance_transform_edt(labels > 0, sampling=spacing)
         cluster_labels, cluster_count = _label(candidates)
@@ -803,10 +826,25 @@ def analyse_cavities(
                 neck_cells=neck_cells,
                 core_radius=float(options.core_radius),
             )
+            # It only qualified because the direction threshold was lowered *and*
+            # its **deep** cells are not enclosed: a bore open at both ends has
+            # protein on four directions along its whole length, while a pocket
+            # clears five, and only its rim is marginal. Testing the whole cluster
+            # instead flags everything, because the rim of any pocket is marginal;
+            # testing only whether *some* cell is outside the strict set flags
+            # every pocket, which it did.
+            deep = mask & (distance >= float(options.core_radius))
+            sample = deep if int(deep.sum()) >= 8 else mask
+            pocket.channel = bool(
+                int(options.min_directions) < DEFAULT_MIN_DIRECTIONS
+                and float(np.count_nonzero(strict[sample])) / max(1, int(sample.sum()))
+                < 0.5
+            )
             if bottleneck is None or bottleneck >= float(options.wide_mouth):
                 # A mouth this wide is a groove in the surface, not a site.
                 pocket.kind = "open" if bottleneck is None else "shallow"
             pockets.append(pocket)
+            cells_of[id(pocket)] = cells
     report.aperture_seconds = time.perf_counter() - aperture_started
 
     # Shallow: the smallest open components, reported but demoted.
@@ -818,6 +856,21 @@ def analyse_cavities(
     for index, pocket in enumerate(pockets, start=1):
         pocket.label = f"P{index}"
     report.pockets = pockets[: int(options.max_pockets)]
+    # The cells of the pockets that survived the sort and the cap, under the
+    # labels they now carry and in **world Å**, not grid indices: this is what a
+    # surface painting or an export reads, and both work in coordinates.
+    report.pocket_cells = [
+        (
+            pocket.label,
+            pocket.kind,
+            np.stack(
+                [axes[axis][cells_of[id(pocket)][:, axis]] for axis in range(3)],
+                axis=1,
+            ),
+        )
+        for pocket in report.pockets
+        if id(pocket) in cells_of
+    ]
     report.seconds = time.perf_counter() - started
     return report
 
@@ -1019,8 +1072,20 @@ def _make_pocket(
         neck_world = np.stack(
             [axes[axis][neck_cells[:, axis]] for axis in range(3)], axis=1
         )
-        neck_index, _ = _nearest_atoms(neck_world, coords)
-        for atom_index in np.unique(neck_index).tolist():
+        neck_index, neck_distance = _nearest_atoms(neck_world, coords)
+        # The residues that **line** the neck: the atoms nearest to the neck
+        # cells, within a probe of the measured radius — not every atom any neck
+        # cell happens to be nearest to. Without this filter a 1.3 Å neck reports
+        # seventy residues, because the neck band wraps the whole surface dimple;
+        # that number then went into an exported selection, which is where it was
+        # found.
+        limit = float(bottleneck or 0.0) + 3.0
+        ranked: List[Tuple[float, int]] = []
+        for atom_index, distance in zip(neck_index.tolist(), neck_distance.tolist()):
+            if float(distance) <= limit:
+                ranked.append((float(distance), int(atom_index)))
+        ranked.sort()
+        for _distance, atom_index in ranked[:MAX_NECK_RESIDUES]:
             atom = atoms[int(atom_index)]
             label = (
                 residue_labels[int(atom_index)]

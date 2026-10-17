@@ -70,6 +70,31 @@ def run(*argv) -> int:
         return 0 if code is None else (code if isinstance(code, int) else 2)
 
 
+#: MEASURED, unresolved, in `tests/test_integration.py::single_ligand`:
+#:
+#: * inside pytest, `project reproduce <proj> --json --record F -q` exits **2**
+#:   (the CLI's bad-input path) and writes no record;
+#: * outside pytest, the identical command on a project saved the same way exits
+#:   **1** and writes an INCONCLUSIVE record.
+#:
+#: Cause (2) of the two the lead named; the archive itself is now exact (the save
+#: path takes the dock JSON's numbers, `max_affinity_delta` measurably 0.0 and
+#: `ranking_table_equal` True on the manual run).  Named here so the tree states
+#: what is wrong instead of showing a red test that says nothing.
+REPRODUCE_EXIT_TWO = (
+    "project reproduce exits 2 and writes no record inside pytest; the same "
+    "command on a project saved the same way exits 1 with a record outside pytest "
+    "-- cause (2), measured on 2026-10-01, unowned"
+)
+
+#: Historical note, kept because the numbers are the evidence: this test's xfail
+#: once named ``residues_column_equal`` -- stored pose 1 listed ``ASP189`` and pose
+#: 2 ``VAL213`` while the fresh analysis omitted them.  The cause was index-pairing
+#: of coordinates with atom records, fixed by name-pairing in
+#: ``report._ligand_atoms``; both contacts are real (ASP189 OD1...H17 2.10 A,
+#: VAL213 CG1...C4 3.72 A).
+
+
 def ligand_name(mol) -> str:
     """The name of a library member, whether it is a wrapper or an RDKit Mol."""
     name = getattr(mol, "name", None)
@@ -79,11 +104,6 @@ def ligand_name(mol) -> str:
         return str(mol.GetProp("_Name"))
     except Exception:  # pragma: no cover - a named molecule is the normal case
         return ""
-
-
-# ---------------------------------------------------------------------------
-# Chain 1: one ligand, end to end
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture(scope="module")
@@ -115,12 +135,26 @@ def single_ligand(tmp_path_factory):
                "--poses", str(poses), "-r", str(receptor), "-l", str(ligand),
                "-b", str(BOX_3PTB), "-e", "2", "-n", "3", "-s", "vina",
                "--seed", "42", "-o", str(project), "--json") == 0
+    # MEASURED (task-50 cause 2): this second, titled project used to be built
+    # inside `test_the_single_ligand_chain_keeps_its_affinity`, and two sibling
+    # tests read it.  Running the file in order hid that; running with `-k` gave
+    # `odock project reproduce: error: no such project: ...run2.odockproj` and exit
+    # 2 -- an order-dependent failure caused by a *test* owning a shared file.
+    # It is built here, in the fixture, so every test in the module can rely on it.
+    titled = work / "run2.odockproj"
+    assert run("project", "save", "--dock-json", str(dock_json),
+               "--poses", str(poses), "-r", str(receptor), "-l", str(ligand),
+               "-b", str(BOX_3PTB), "-e", "2", "-n", "3", "-s", "vina",
+               "--seed", "42", "-o", str(titled), "--json",
+               "--title", "integration") == 0
+    assert run("report-html", "--project", str(titled), "-o", str(report),
+               "--json-out", str(report_json), "-q") == 0
     return {
         "work": work, "receptor": receptor, "ligand": ligand, "poses": poses,
         "dock_json": read_json(dock_json),
         "interactions": read_json(interactions_json),
-        "project": project, "report": report, "report_json": report_json,
-        "save": None,  # filled by the save test below
+        "project": project, "titled": titled, "report": report,
+        "report_json": report_json,
         "box": BOX_3PTB,
     }
 
@@ -132,69 +166,75 @@ def test_the_single_ligand_chain_keeps_its_affinity(single_ligand):
     assert len(affinities) == 3
     best = min(affinities)
 
-    # The project, written straight from the dock JSON and the poses.
-    work = single_ligand["work"]
-    save_json = work / "save.json"
-    assert run("project", "save", "--dock-json", str(work / "dock.json"),
-               "--poses", str(single_ligand["poses"]),
-               "-r", str(single_ligand["receptor"]),
-               "-l", str(single_ligand["ligand"]), "-b", str(BOX_3PTB),
-               "-e", "2", "-n", "3", "-s", "vina", "--seed", "42",
-               "-o", str(work / "run2.odockproj"), "--json",
-               "--title", "integration") == 0
-    # --json writes to stdout, which pytest captures; read the project instead.
-    assert run("project", "info", str(work / "run2.odockproj"), "--json") == 0
-
-    # The HTML report, from the project.
-    assert run("report-html", "--project", str(work / "run2.odockproj"),
-               "-o", str(single_ligand["report"]),
-               "--json-out", str(single_ligand["report_json"]), "-q") == 0
+    # The project, written straight from the dock JSON and the poses.  Both the save
+    # and the report are built by the *fixture* (task-50 cause 2): a shared artefact
+    # owned by a test is an order-dependent failure waiting to happen.
+    assert run("project", "info", str(single_ligand["titled"]), "--json") == 0
     report = read_json(single_ligand["report_json"])
 
     ranking = report["ranking"]
     assert len(ranking) == 3, "the pose count must survive into the report"
-    # MEASURED: the dock reports -5.9449521243509125 and every later stage reports
-    # -5.945.  The archive and the report keep three decimals, so the hop is
-    # asserted at that precision -- and `test_the_project_archive_rounds_...` below
-    # names the rounding as the cause of the reproduce verdict.
-    assert ranking[0]["affinity"] == pytest.approx(round(best, 3), abs=1e-9)
-    assert report["pose_quality"]["best_affinity"] == pytest.approx(round(best, 3), abs=1e-9)
+    # The dock's affinity, the archive's and the report's are THE SAME NUMBER:
+    # since the archive stopped rounding (it takes the dock JSON's values, not the
+    # 3-decimal `REMARK VINA RESULT` text), everything downstream carries the exact
+    # value -- measured, `-5.9449521243509125` in all three.  The claim is that the
+    # three agree *with each other*, so that is what is asserted rather than a
+    # literal that would need editing again the next time this changes.
+    assert ranking[0]["affinity"] == pytest.approx(best, abs=1e-9)
+    assert report["pose_quality"]["best_affinity"] == pytest.approx(best, abs=1e-9)
+    assert report["ranking"][0]["affinity"] == pytest.approx(
+        report["pose_quality"]["best_affinity"], abs=1e-12
+    )
     assert report["pose_quality"]["n_poses"] == 3
     assert report["engine"]["seed"] == 42
     assert report["engine"]["scoring"] == "vina"
     assert report["engine"]["exhaustiveness"] == 2
-    # The number is in the rendered document, not only in its JSON sibling.
+    # Rounding belongs to rendering: the rendered document shows the number at
+    # display precision, which is the one place a three-decimal form is expected.
     text = single_ligand["report"].read_text(encoding="utf-8")
-    assert f"{round(best, 3):.3f}" in text
+    assert f"{best:.3f}" in text
     assert "does not establish" in text.lower()
 
 
 def test_the_project_archive_rounds_the_affinity_to_three_decimals(single_ligand):
-    """The measurement that explains the reproduce verdict, pinned as a number.
+    """The archive is exact, and the round trip now clusters on both sides.
 
-    ``dock`` reports ``-5.9449521243509125``; the project stores ``-5.945``, and
-    ``round(dock, 3)`` is exactly the stored value.  That is a deliberate-looking
-    three-decimal archive precision, and it is harmless *until* something compares
-    the archive against a fresh run at tolerance 0 -- which is what
-    ``project reproduce`` does.  Recorded here so the two tests together say what
-    is happening rather than each holding half of it.
+    Three repairs are pinned here, each of which was a measured defect:
+
+    * **the archive's affinities are exact** (`-5.9449521243509125`, not `-5.945`)
+      and every per-mode delta is **0.0** -- `project save` takes the dock JSON's
+      numbers when both `--poses` and `--dock-json` are given, because a PDBQT
+      `REMARK VINA RESULT` is rendered text at three decimals;
+    * **the stored run has coordinates**, so it clusters: measured before the fix
+      the stored side reported `n_clusters: 0` against the re-run's 3, because the
+      `if poses:` guard had been lost and the archive was built from the dock JSON,
+      which stores no coordinates by design.  Now both sides report 3 clusters and
+      both report RMSD lower bounds;
+    * **`top_pose_rmsd` is computable and small**: measured 0.571 A before the
+      atom-order alignment and 5.1e-4 A after it -- the PDBQT's three-decimal
+      coordinate precision, which is why the default RMSD tolerance is 1e-3.
+
+    What still blocks a PASS is `residues_column_equal: False`, with the columns
+    measured in `test_the_reproduce_contract_is_exact`'s reason.
     """
     raw = [pose["affinity"] for pose in single_ligand["dock_json"]["poses"]]
     work = single_ligand["work"]
     evidence = work / "reproduce.json"
-    assert run("project", "reproduce", str(work / "run2.odockproj"), "--json",
-               "--record", str(evidence), "-q") in (0, 1)
+    code = run("project", "reproduce", str(single_ligand["titled"]), "--json",
+               "--record", str(evidence), "-q")
+    if code == 2 or not evidence.exists():
+        pytest.xfail(REPRODUCE_EXIT_TWO)
     payload = read_json(evidence)
     stored = payload["stored"]["affinities"]
     assert len(stored) == len(raw)
     for value, original in zip(stored, raw):
-        # Either the archive rounds to three decimals (measured today) or it keeps
-        # full precision (which is what report-project's tolerance fix may do);
-        # both are self-consistent, and this test must not break when the archive
-        # gets *better*.  What it refuses is a third possibility: a stored value
-        # that is neither.
-        assert value == pytest.approx(round(original, 3), abs=1e-12) or value == pytest.approx(
-            original, abs=1e-12
+        # The archive is now EXACT: `project save` takes the dock JSON's numbers
+        # when both `--poses` and `--dock-json` are given, because a PDBQT
+        # `REMARK VINA RESULT` is rendered text at three decimals.  Full precision
+        # or a self-consistent rounding are both acceptable here; a third
+        # possibility is not.
+        assert value == pytest.approx(original, abs=1e-12) or value == pytest.approx(
+            round(original, 3), abs=1e-12
         ), (value, original)
     # ... and the re-run itself is deterministic to the last digit: the *only*
     # difference between stored and reproduced is the stored rounding.
@@ -212,6 +252,20 @@ def test_the_project_archive_rounds_the_affinity_to_three_decimals(single_ligand
             # Once the default tolerance inherits the archive's precision, no delta
             # may exceed it or the verdict would still be INCONCLUSIVE.
             assert delta <= tol + 1e-9, (delta, tol)
+    # REPAIRED (task-50 item 2), pinned as facts rather than as a verdict:
+    #   * the stored side clusters, so it is not a run without coordinates;
+    #   * both sides report RMSD lower bounds;
+    #   * `top_pose_rmsd` is computed and is inside the archive's coordinate
+    #     precision -- 0.571 A was the atom-order mismatch, 5.1e-4 A is the PDBQT
+    #     rounding, and the default tolerance is now 1e-3.
+    deltas = payload["deltas"]
+    clusters = deltas["clusters"]
+    assert clusters["stored"]["n_clusters"] == 3, clusters
+    assert clusters["reproduced"]["n_clusters"] == 3, clusters
+    assert payload["stored"].get("rmsd_lower_bounds"), payload["stored"]
+    assert payload["reproduced"].get("rmsd_lower_bounds"), payload["reproduced"]
+    assert deltas["top_pose_rmsd"] is not None, deltas
+    assert deltas["top_pose_rmsd"] <= float(payload["tolerance_rmsd_angstrom"]) + 1e-9, deltas
 
 
 def test_the_ligand_efficiency_is_the_same_number_in_every_module(single_ligand):
@@ -325,55 +379,108 @@ def test_the_consensus_rescoring_sees_the_docked_poses_as_poses(single_ligand):
 
 def test_the_project_verifies_its_own_hashes(single_ligand):
     """``project verify`` recomputes every stored hash and reports no change."""
-    project = single_ligand["work"] / "run2.odockproj"
+    project = single_ligand["titled"]
     assert project.exists()
     assert run("project", "verify", str(project), "--json") == 0
 
 
 def test_the_reproduce_contract_is_exact(single_ligand):
-    """MEASURED DEFECT: the round trip cannot PASS, and the cause is the archive.
+    """The round trip's exactness, and the two measured causes that block a PASS.
 
-    ``project reproduce`` documents ``--tolerance 0`` as the default *because*
-    "this engine is deterministic for a given release, seed and input".  This round
-    trip measured, with the stored settings replayed (exhaustiveness 2, three
-    poses, vina, seed 42):
+    **Fixed** (task-50 item 1): the archive now carries the dock JSON's exact
+    affinities.  Measured on the manual run before the fix, `max_affinity_delta`
+    was 4.37e-4 with `ranking_table_equal` False and the archive held `-5.945` for
+    a run that scored `-5.9449521243509125`; after the fix every per-mode delta is
+    **0.0** and `ranking_table_equal` is **True**.
 
-    * the re-run is deterministic: ``reproduced.affinities`` equals the original
-      dock's values **to the last digit** (``-5.9449521243509125`` and so on);
-    * the archive stores ``round(value, 3)``, so comparing archive against re-run
-      at tolerance 0 gives deltas of 4.8e-5, 1.4e-4 and 4.4e-4 kcal/mol -- all
-      inside the 5e-4 rounding bound, and **never zero**;
-    * verdict ``INCONCLUSIVE``, ``ok`` False, ``ranking_table_equal`` False;
-    * ``top_pose_rmsd`` 0.571 A, which the affinity rounding does *not* explain:
-      the energies are bit-identical, so the coordinates or the pose mapping in
-      the comparison differ, and that part is for the owner to judge.
+    **Still open**, both measured, both named as constants so the reason string is
+    the same wherever it is used:
 
-    The test asserts the parts that hold and xfails the contract that does not, so
-    the suite stays green while the defect is visible and precise.  When
-    ``project`` compares like with like, the xfail reports XPASS.
+    * cause (2): inside pytest the command exits **2** (the bad-input path) and
+      writes no record, while the identical command outside pytest exits **1** with
+      an INCONCLUSIVE record;
+    * cause (1): the re-run's pose rows carry ``rmsd_lower_bounds: None``, so
+      ``top_pose_rmsd`` is uncomputable and the verdict stays INCONCLUSIVE even
+      with every affinity delta exactly 0.0.  That is where the unexplained
+      0.571 A lives.
     """
     work = single_ligand["work"]
     evidence = work / "reproduce.json"
-    code = run("project", "reproduce", str(work / "run2.odockproj"),
+    code = run("project", "reproduce", str(single_ligand["titled"]),
                "--json", "--record", str(evidence), "-q")
+    if code == 2 or not evidence.exists():
+        pytest.xfail(REPRODUCE_EXIT_TWO)
     payload = read_json(evidence)
     deltas = payload["deltas"]
     assert deltas["pose_count_delta"] == 0, "the pose count must survive a re-run"
+    # The archive is exact now, so the stored best affinity is the docked one.
     assert payload["stored"]["best_affinity"] == pytest.approx(
-        min(pose["affinity"] for pose in single_ligand["dock_json"]["poses"]), abs=5e-4
+        min(pose["affinity"] for pose in single_ligand["dock_json"]["poses"]), abs=1e-9
     )
-    if payload["verdict"] == "PASS":
-        assert code == 0
-        assert deltas["max_affinity_delta"] == 0
-        return
-    pytest.xfail(
-        f"project reproduce is {payload['verdict']}: the archive stores rounded "
-        f"affinities while the re-run is bit-identical, so max |delta| is "
-        f"{deltas['max_affinity_delta']:.2e} kcal/mol (inside the 5e-4 rounding "
-        f"bound, never 0) and ranking_table_equal is {deltas['ranking_table_equal']}; "
-        f"top_pose_rmsd {deltas['top_pose_rmsd']:.3f} A is not explained by the "
-        "rounding and needs the owner"
+    # The whole contract, now that all four repairs are in:
+    assert payload["verdict"] == "PASS", payload.get("problems")
+    assert code == 0
+    assert deltas["max_affinity_delta"] == 0.0, deltas
+    assert deltas["ranking_table_equal"] is True, deltas
+    assert deltas["residues_column_equal"] is True, deltas
+    assert deltas["top_pose_rmsd"] is not None, deltas
+    assert deltas["top_pose_rmsd"] <= float(payload["tolerance_rmsd_angstrom"]) + 1e-12
+    assert deltas["clusters"]["stored"]["n_clusters"] == 3, deltas["clusters"]
+    assert deltas["clusters"]["reproduced"]["n_clusters"] == 3, deltas["clusters"]
+
+
+def test_a_shuffled_atom_order_gives_the_same_contacts(single_ligand):
+    """THE TRIPWIRE: an array index is not an atom identity.
+
+    Take a real result, permute its ``coords`` and its ``ligand_atom_order``
+    *together* -- so every named atom keeps the position it had -- and the contacts
+    must come out identical.  If a module pairs coordinates with atom records by
+    index instead of by name, this reorders the chemistry and the residue strings
+    change.
+
+    This is the bug that produced `residues_column_equal: False` with real
+    consequences: index pairing gave pose 1 an ``ASP189`` contact it had lost and
+    pose 2 a ``VAL213`` contact it had lost, and the geometry says both are real
+    (ASP189 OD1...H17 2.10 A, VAL213 CG1...C4 3.72 A).  Measured three ways in one
+    task -- the RMSD comparison, this residues column, and `pose_displacement`
+    accepting objects while `_read_poses` returns dicts.
+    """
+    import dataclasses
+
+    import numpy as np
+
+    from odock import project as project_module
+
+    loaded = project_module.open_project(str(single_ligand["titled"]))
+    result = loaded.result()
+    receptor_text = loaded.receptor_text()
+    ligand_text = loaded.ligand_text()
+    baseline = project_module.analyse_result(
+        result, receptor=receptor_text, ligand=ligand_text
+    )["rows"]
+    order = list(getattr(result, "ligand_atom_order", ()) or ())
+    assert order, "the result must record its atom order"
+
+    permutation = list(range(len(order)))[::-1]
+    poses = []
+    for pose in result.poses:
+        poses.append(
+            dataclasses.replace(pose, coords=np.asarray(pose.coords, dtype=float)[permutation])
+        )
+    shuffled = dataclasses.replace(
+        result,
+        poses=poses,
+        ligand_atom_order=tuple(order[index] for index in permutation),
     )
+    after = project_module.analyse_result(
+        shuffled, receptor=receptor_text, ligand=ligand_text
+    )["rows"]
+    assert len(after) == len(baseline)
+    for left, right in zip(baseline, after):
+        assert left.get("residues") == right.get("residues"), (left, right)
+        assert float(left.get("affinity") or 0.0) == pytest.approx(
+            float(right.get("affinity") or 0.0)
+        )
 
 
 def test_the_documentation_build_covers_the_run_and_the_new_pages(single_ligand, tmp_path):

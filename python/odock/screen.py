@@ -85,6 +85,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .prepare import BoxSpec
+from ._fs import remove_tree as _remove_tree
 
 __all__ = [
     "EXIT_ALL_FAILED",
@@ -1153,7 +1154,7 @@ def _clear_owned_outputs(outdir: Path) -> List[str]:
     for name in _OWNED_DIRS:
         target = outdir / name
         if target.is_dir():
-            shutil.rmtree(target)
+            _remove_tree(target)
             removed.append(name + "/")
     return removed
 

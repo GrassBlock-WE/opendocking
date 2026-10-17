@@ -47,6 +47,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
 
 from . import project as _project
+from ._fs import remove_tree as _remove_tree
 
 __all__ = [
     "RELEASE_FORMAT",
@@ -855,7 +856,7 @@ def stage_release(
                            notes + ["nothing was written (dry run)"], listing)
 
     if destination.exists() and force:
-        shutil.rmtree(destination)
+        _remove_tree(destination)
     for name in published:
         target = destination / name
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -1180,6 +1181,106 @@ GATE_NAMES: Tuple[str, ...] = (
 )
 
 
+#: How many tests a green run of each gate legitimately skips, and why.
+#:
+#: A **change** in this number is a failure in either direction: more is
+#: "assertions just became skips" (a moved dataset, a missing fixture, a guard
+#: taking the quiet path); fewer is "a skip disappeared, so either a defect was
+#: fixed or a ``require()`` guard stopped firing".  Both need a human, and no
+#: gate that only looks at pass/fail can see either of them.
+#:
+#: The measured argument for having this at all: when ``demo/`` was reorganised,
+#: one workstream's integration file went from **15 passed to 16 skipped in
+#: 1.8 s** and the run looked green.  A gate that cannot tell "16 passed" from
+#: "16 not run" is not measuring the suite.
+#:
+#: Enforced in the **full** run only.  The ``--quick`` form deselects slow tests
+#: rather than skipping them, and its skip count has never been measured, so
+#: asserting a number there would be a guess dressed as a gate.
+EXPECTED_SKIPS: Dict[str, Tuple[int, str]] = {
+    "pytest suite": (1, "the opt-in ODOCK_STYLE_SHOTS contact-sheet test"),
+}
+
+#: A suite that finishes this fast did not run.  This is a **collapse detector**,
+#: not a performance gate: the measured contrast was 1.8 s against 337 s when the
+#: demo directory moved, so a 20 s floor catches a collapse on any machine while
+#: complaining about none of them for being slow.
+MIN_SUITE_SECONDS: Dict[str, float] = {
+    "pytest suite": 20.0,
+}
+
+
+def _note(gate: CheckGate, message: str) -> None:
+    """Append a failure reason instead of replacing an earlier one."""
+    gate.ok = False
+    gate.detail = f"{gate.detail}; {message}" if gate.detail else message
+
+
+def _apply_suite_budgets(gate: CheckGate, *, quick: bool) -> None:
+    """Fail a suite gate whose skip budget shifted, or whose run collapsed.
+
+    Both checks exist because a green run can be green for the wrong reason: a
+    moved dataset turns assertions into skips, and a suite that never starts
+    finishes suspiciously fast.  Neither is visible in the pass/fail line alone.
+
+    A **quick** run is exempt from both, but it must say what it did not run: the
+    0.3.0 cut shipped six failing slow tests because ``-m "not slow"`` *deselects*
+    them, and a deselected test appears in neither the pass/fail line nor the skip
+    count.  Printing the number is what makes the exemption honest.
+    """
+    if gate.skipped:
+        return
+    if quick:
+        deselected = gate.numbers.get("deselected")
+        if isinstance(deselected, int) and deselected:
+            gate.detail = (
+                f"{gate.detail}; QUICK run: {deselected} test(s) deselected and "
+                f"never executed -- the budgets below do not apply, and a full run "
+                f"is what the release requires"
+            )
+        return
+    expected = EXPECTED_SKIPS.get(gate.name)
+    observed = gate.numbers.get("skipped")
+    if expected is not None and isinstance(observed, int):
+        want, why = expected
+        if observed != want:
+            if observed > want:
+                direction = (
+                    f"{observed - want} more than expected — assertions may have "
+                    f"become skips (a moved dataset, a missing fixture, or a guard "
+                    f"taking the quiet path)"
+                )
+            else:
+                direction = (
+                    f"{want - observed} fewer than expected — a skip disappeared, so "
+                    f"either a defect was fixed or a require() guard stopped firing"
+                )
+            _note(
+                gate,
+                f"{gate.name} skipped {observed} test(s), expected {want} ({why}): "
+                f"{direction}",
+            )
+    floor = MIN_SUITE_SECONDS.get(gate.name)
+    passed = gate.numbers.get("passed")
+    # The floor applies only to a suite *large enough* for a fast finish to be
+    # implausible.  A constructed case (a fixture reporting 42 tests in half a
+    # second) is not a collapse, and treating it as one would make the gate fire
+    # on every test that exercises it -- which is how a real signal gets muted.
+    if (
+        floor is not None
+        and gate.seconds
+        and isinstance(passed, int)
+        and passed >= 100
+        and float(gate.seconds) < floor
+    ):
+        _note(
+            gate,
+            f"{gate.name} finished in {float(gate.seconds):.1f} s, below the "
+            f"{floor:.0f} s collapse floor — a run that fast did not exercise the suite",
+        )
+
+
+
 def check_release(
     root: PathLike,
     *,
@@ -1375,6 +1476,10 @@ def check_release(
                 "the suite is green" if result.ok
                 else f"FAIL (exit {result.code}): {_tail(result.stdout, 300)}"
             )
+        # A green pass/fail line is not the whole answer: a moved dataset turns
+        # assertions into skips, and a suite that never started finishes
+        # suspiciously fast.  Both are budgets, and both are enforced here.
+        _apply_suite_budgets(gate, quick=quick)
         report.gates.append(gate)
 
     # 7. the order/flakiness instrument: the same suite in the reverse order, which
@@ -1500,10 +1605,16 @@ def _parse_pytest_summary(output: str) -> Dict[str, Any]:
     match = re.search(r"(\d+) passed", output)
     failed = re.search(r"(\d+) failed", output)
     skipped = re.search(r"(\d+) skipped", output)
+    deselected = re.search(r"(\d+) deselected", output)
     return {
         "passed": int(match.group(1)) if match else None,
         "failed": int(failed.group(1)) if failed else 0,
         "skipped": int(skipped.group(1)) if skipped else 0,
+        # Deselected is not skipped: `-m "not slow"` removes a test from the run
+        # entirely, so a red slow test cannot appear in the pass/fail line of a
+        # quick gate.  The 0.3.0 cut shipped six failing slow tests for exactly
+        # this reason, which is why the number is now parsed and printed.
+        "deselected": int(deselected.group(1)) if deselected else 0,
     }
 
 

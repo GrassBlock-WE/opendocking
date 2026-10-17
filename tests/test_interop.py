@@ -191,6 +191,97 @@ def test_write_pose_pdb_returns_the_path(tmp_path, state):
 # ---------------------------------------------------------------------------
 
 
+def test_a_cavity_reaches_pymol_as_a_sphere_of_its_measured_radius():
+    """The neck radius has to survive as a *size* in the other viewer."""
+    state = interop.SceneState(
+        receptor=[atom("C", 0.0, 0.0, 0.0)],
+        cavities=[
+            {
+                "label": "P1",
+                "kind": "open",
+                "channel": False,
+                "point": (1.0, 2.0, 3.0),
+                "radius": 3.28,
+                "residues": ["A/GLY38", "A/ASP189"],
+                "volume": 310.8,
+            }
+        ],
+        cavity_criterion={
+            "min_directions": 5,
+            "enclosure_radius": 10.0,
+            "probe": 1.4,
+            "spacing": 0.7,
+            "kinds": {"open": 1, "shallow": 2},
+        },
+    )
+    script = interop.pymol_script(state)
+    assert "# cavities: geometric classification, not a druggability score" in script
+    assert "pseudoatom cavity_1, pos=[1.000, 2.000, 3.000]" in script
+    # The radius is the measurement, so it must reach the sphere scale verbatim.
+    assert "set sphere_scale, 3.280, cavity_1" in script
+    assert 'label cavity_1, "P1 open 311 A3 neck 3.28 A"' in script
+    assert "select neck_1, A/38+A/189" in script
+    # The criterion that produced it, so the file can be read on its own.
+    assert "protein within 10 A on 5 of six axis directions" in script
+    assert "open 1, shallow 2" in script
+
+
+def test_a_channel_says_so_where_a_pocket_says_pocket():
+    """A bore and an ATP site must not export identically."""
+    state = interop.SceneState(
+        receptor=[atom("C", 0.0, 0.0, 0.0)],
+        cavities=[
+            {
+                "label": "P1",
+                "kind": "open",
+                "channel": True,
+                "point": (0.0, 0.0, 0.0),
+                "radius": 2.4,
+                "residues": ["A/LEU1"],
+                "volume": 180.0,
+            }
+        ],
+        cavity_criterion={"min_directions": 4, "enclosure_radius": 10.0},
+    )
+    script = interop.pymol_script(state)
+    assert 'label cavity_1, "P1 channel 180 A3 neck 2.40 A"' in script
+    # The relaxed criterion is stated in the file, not only in the docs.
+    assert "RELAXED to 4 of six" in script
+    assert "channels open at both ends" in script
+    chimerax = interop.chimerax_script(state)
+    assert "RELAXED to 4 of six" in chimerax
+    assert "P1 channel" in chimerax
+
+
+def test_a_cavity_reaches_chimerax_as_a_radius_marker(state):
+    state = interop.SceneState(
+        receptor=[atom("C", 0.0, 0.0, 0.0)],
+        cavities=[
+            {
+                "label": "P2",
+                "kind": "shallow",
+                "channel": False,
+                "point": (-1.5, 0.25, 4.0),
+                "radius": 1.27,
+                "residues": ["A/SER61", "B/TYR7"],
+                "volume": 42.9,
+            }
+        ],
+        cavity_criterion={"min_directions": 5, "enclosure_radius": 10.0},
+    )
+    script = interop.chimerax_script(state)
+    assert "marker #801 position -1.500,0.250,4.000 radius 1.270" in script
+    assert '"P2 shallow 43 A3 neck 1.27 A"' in script
+    assert "/A:61 /B:7" in script
+
+
+def test_a_scene_without_cavities_has_no_cavity_section():
+    state = interop.SceneState(receptor=[atom("C", 0.0, 0.0, 0.0)])
+    for script in (interop.pymol_script(state), interop.chimerax_script(state)):
+        assert "cavities:" not in script
+        assert "cavity_" not in script
+
+
 def test_the_pymol_script_names_the_files_and_hides_everything(state):
     script = interop.pymol_script(state)
     assert "load receptor.pdb, receptor" in script

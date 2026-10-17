@@ -1288,7 +1288,11 @@ def test_release_check_reports_each_gate_with_measured_numbers(tmp_path):
     }
     report = release.check_release(root, runner=_gate_runner(passing), timeout=5)
     by_name = {gate.name: gate for gate in report.gates}
-    assert by_name["pytest suite"].numbers == {"passed": 42, "failed": 0, "skipped": 1}
+    # `deselected` is parsed alongside the rest because a `-m "not slow"` run
+    # removes tests from the gate without them appearing as skips.
+    assert by_name["pytest suite"].numbers == {
+        "passed": 42, "failed": 0, "skipped": 1, "deselected": 0
+    }
     assert by_name["inspect_dist self-test"].numbers["ok_rules"] == 2
     assert by_name["doctor --strict"].ok is True
     assert by_name["benchmark --check-baseline"].ok is True
@@ -1395,10 +1399,12 @@ def test_the_order_gate_names_the_flaky_signal(tmp_path):
     assert gate.numbers.get("flaky_signal") is True
     assert "FLAKY SIGNAL" in gate.detail
     assert "shared state" in gate.detail
-    # And it does not appear when the suite is green.
+    # And it does not appear when the suite is green.  The synthetic output carries
+    # the same "1 skipped" that a real full run reports, because the skip budget now
+    # fails a green run whose skip count does not match EXPECTED_SKIPS.
     clean = release.check_release(
         root,
-        runner=_gate_runner({"check_test_order.py": (0, ORDER_GREEN), "pytest": (0, "42 passed")}),
+        runner=_gate_runner({"check_test_order.py": (0, ORDER_GREEN), "pytest": (0, "42 passed, 1 skipped in 12.3s")}),
         timeout=5,
     )
     assert "flaky_signal" not in next(
@@ -1565,3 +1571,108 @@ def test_cli_release_publish_dry_run_needs_no_network(tmp_path, capsys, monkeypa
     payload = json.loads(capsys.readouterr().out)
     assert payload["dry_run"] is True and payload["tag"] == "v0.2.2"
     assert not any(call[:2] == ["git", "tag"] for call in fake.calls)
+
+# ---------------------------------------------------------------------------
+# The skip budget and the collapse floor (0.3.1)
+#
+# A green pass/fail line is not the whole answer.  When `demo/` was reorganised,
+# one workstream's integration file went from **15 passed to 16 skipped in 1.8 s**
+# and the run still looked green -- a gate that cannot tell "16 passed" from
+# "16 not run" is not measuring the suite.  These two budgets make that visible.
+# ---------------------------------------------------------------------------
+
+
+def _budget_gate(skipped: int, seconds: float, name: str = "pytest suite"):
+    gate = release.CheckGate(name, True, "the suite is green")
+    gate.numbers = {"skipped": skipped, "passed": 1900}
+    gate.seconds = seconds
+    return gate
+
+
+def test_the_expected_skip_count_is_the_green_case():
+    gate = _budget_gate(1, 600.0)
+    release._apply_suite_budgets(gate, quick=False)
+    assert gate.ok, gate.detail
+    assert gate.detail == "the suite is green"
+
+
+def test_more_skips_than_expected_fail_the_gate_and_name_the_direction():
+    gate = _budget_gate(16, 1.8)
+    release._apply_suite_budgets(gate, quick=False)
+    assert not gate.ok
+    assert "skipped 16 test(s), expected 1" in gate.detail
+    assert "more than expected" in gate.detail
+    # The reason for the expectation travels with it, so a reader can judge it.
+    assert "ODOCK_STYLE_SHOTS" in gate.detail
+
+
+def test_fewer_skips_than_expected_fail_the_gate_too():
+    """A skip disappearing is a change worth a human: a defect was fixed, or a
+    ``require()`` guard stopped firing."""
+    gate = _budget_gate(0, 600.0)
+    release._apply_suite_budgets(gate, quick=False)
+    assert not gate.ok
+    assert "0 test(s), expected 1" in gate.detail
+    assert "fewer than expected" in gate.detail
+
+
+def test_a_run_that_finished_instantly_is_a_collapse_not_a_pass():
+    gate = _budget_gate(1, 1.8)
+    release._apply_suite_budgets(gate, quick=False)
+    assert not gate.ok
+    assert "collapse floor" in gate.detail
+    assert "did not exercise the suite" in gate.detail
+
+
+def test_quick_mode_is_exempt_because_it_deselects_rather_than_skips():
+    """``--quick`` deselects slow tests instead of skipping them, so its skip
+    count has never been measured -- asserting a number there would be a guess
+    dressed as a gate."""
+    gate = _budget_gate(0, 30.0)
+    release._apply_suite_budgets(gate, quick=True)
+    assert gate.ok, gate.detail
+
+
+def test_a_skipped_gate_is_not_budgeted():
+    gate = _budget_gate(0, 0.5)
+    gate.skipped = True
+    release._apply_suite_budgets(gate, quick=False)
+    assert gate.ok
+
+
+def test_both_budget_failures_are_reported_together():
+    """One detail line has to carry both, or the second failure hides the first."""
+    gate = _budget_gate(16, 1.8)
+    release._apply_suite_budgets(gate, quick=False)
+    assert "skipped 16" in gate.detail
+    assert "collapse floor" in gate.detail
+
+def test_a_quick_run_says_how_many_tests_it_never_executed():
+    """The gap that let 0.3.0 ship six failing slow tests.
+
+    ``-m "not slow"`` **deselects** rather than skips, so a red slow test appears in
+    neither the pass/fail line nor the skip count.  The quick gate is exempt from
+    the budgets, but it has to declare what it did not run.
+    """
+    gate = release.CheckGate("pytest suite", True, "the suite is green")
+    gate.numbers = {"passed": 1900, "skipped": 1, "deselected": 42}
+    gate.seconds = 300.0
+    release._apply_suite_budgets(gate, quick=True)
+    assert gate.ok, "a quick run is not itself a failure"
+    assert "QUICK run: 42 test(s) deselected" in gate.detail
+    assert "never executed" in gate.detail
+
+
+def test_the_deselected_count_is_parsed_from_the_summary():
+    numbers = release._parse_pytest_summary(
+        "1997 passed, 1 skipped, 1 xfailed, 6 failed, 42 deselected in 935.35s"
+    )
+    assert numbers["passed"] == 1997
+    assert numbers["skipped"] == 1
+    assert numbers["failed"] == 6
+    assert numbers["deselected"] == 42
+
+
+def test_a_full_run_reports_no_deselection():
+    numbers = release._parse_pytest_summary("1997 passed, 1 skipped in 935.35s")
+    assert numbers["deselected"] == 0
