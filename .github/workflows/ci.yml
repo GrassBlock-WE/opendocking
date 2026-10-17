@@ -185,11 +185,27 @@ jobs:
       # is this runner's font metrics and the fix is to re-calibrate the test
       # deliberately -- do NOT set QT_QPA_FONTDIR to make it pass, because that
       # hides a genuine layout regression behind a font choice.
-      - name: pytest tests -q -m "not slow" --require-demo --require-gui
+      # `--require-gui` is passed only where a GL context can exist.  Measured on the
+      # windows-latest runner: every viewport test fails with
+      #
+      #     no GL context: wglCreateContextAttribsARB not found
+      #
+      # so the flag was turning a capability limit into six failures per leg.  On Linux
+      # the runner provides Mesa's software path and the flag stays on, which is what
+      # keeps a genuinely missing Qt/GL dependency from turning the workbench tests into
+      # silent skips.  The GUI requirement is therefore a *platform* fact, stated here
+      # rather than a number nobody can see.
+      - name: pytest tests -q -m "not slow" --require-demo
         shell: bash
         run: |
           unset QT_QPA_FONTDIR
-          python -m pytest tests -q -m "not slow" --require-demo --require-gui
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            python -m pytest tests -q -m "not slow" --require-demo --require-gui
+          else
+            echo "no GL context on $RUNNER_OS (wglCreateContextAttribsARB not found):"
+            echo "running without --require-gui, so the workbench tests skip instead of fail"
+            python -m pytest tests -q -m "not slow" --require-demo
+          fi
 
       - name: Report the head-less Qt environment
         shell: bash

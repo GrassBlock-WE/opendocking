@@ -4,6 +4,54 @@ All notable changes to OpenDocking are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.3.4 — 2026-10-17
+
+The three blockers the CI matrix exposed once 0.3.3 put the tests on PATH — and all three
+were invisible from a developer machine, for the same reason: **they only appear in a
+clean checkout or on a runner**.
+
+### Fixed
+
+* **Two documentation links pointed at unpublished files.** `CONTRIBUTING.md` linked
+  `.cargo/config.toml` and `docs/VISUALIZATION.md` embedded four figures from
+  `out/surface/`. Both exist on a working machine and neither is published — `.cargo/`
+  holds local build settings and `out/` is generated scratch — so the links resolved
+  locally and were dead in every clone. They are prose now, naming the file and the
+  command that produces it instead of linking to something a reader will not have. The
+  documentation gate is unchanged and still checks **117** local links; what changed is
+  that the published set no longer contains links to files that are not in it.
+
+* **`--require-gui` cannot be satisfied on a Windows runner.** Every viewport test failed
+  with
+
+  ```
+  no GL context: wglCreateContextAttribsARB not found
+  ```
+
+  which turned a capability limit into six failures per leg. The flag is now passed only
+  on Linux, where Mesa's software path provides a context; on Windows the workbench tests
+  skip instead of failing, and the step prints why. This is the one place a requirement
+  is genuinely platform-dependent, and stating it is better than a number nobody can act
+  on — the alternative, dropping `--require-gui` everywhere, would let a missing Qt/GL
+  dependency turn the workbench tests into silent skips, which is precisely what the flag
+  exists to prevent.
+
+### Verified
+
+`tests/test_docs.py` + `tests/test_docs_site.py` + `tests/test_cli_surface.py` →
+**93 passed**; `odock docs check` exit 0; both workflows parse and the `RUNNER_OS` split
+is present with `--require-gui` retained on Linux. This patch changes **only** markdown
+and workflow YAML, so the Python suite is unaffected by it — the last clean-environment
+full run is the one reported with 0.3.3 (**2201 passed, 1 skipped, 0 failed**).
+
+### Still open
+
+The Linux legs still fail `tests/test_project.py::reproducible_project`, where
+`exhaustiveness=8`, `seed=42` returns a single distinct pose on Linux against at least
+two on Windows. That needs a Linux machine to diagnose; changing the assertion from here
+would be a guess. And `cargo test -p dock-core --features gpu` fails on the Windows
+runner, which asks for the CPU fallback — also runner-specific and not yet diagnosed.
+
 ## 0.3.3 — 2026-10-17
 
 The CI matrix had **never been green** — not on 0.3.2, not on 0.3.1, not on any 0.2.x

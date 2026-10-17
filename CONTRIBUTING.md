@@ -102,7 +102,7 @@ make install
 ```
 
 `.rust-tmp/` is already in `.gitignore`. The same note is in
-[`.cargo/config.toml`](.cargo/config.toml).
+`.cargo/config.toml` (not published: it is a local build setting, so it is named here rather than linked).
 
 ## 3. The demo fixtures are generated, not committed
 
