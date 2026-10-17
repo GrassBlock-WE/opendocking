@@ -37,6 +37,7 @@ from odock.gui.viewport import (  # noqa: E402
     Renderer,
     Scene,
 )
+from gui_guard import require_gl  # noqa: E402
 
 BACKGROUND = np.array([22.0, 24.0, 32.0])
 
@@ -89,23 +90,6 @@ def _painted(pixmap) -> tuple[int, int]:
     return differing, w * h
 
 
-def _require_gl(viewport) -> None:
-    """Skip when this machine cannot provide an OpenGL context.
-
-    The module import succeeding is not evidence that a context can be created: the
-    windows-latest runner imports ``moderngl`` and then fails with
-    ``wglCreateContextAttribsARB not found``.  Asserting that a renderer exists turned
-    that capability limit into six failures per leg, so it is a skip -- and the skip
-    message names ``moderngl``/``PyQt6`` so that ``--require-gui`` still escalates it to
-    a failure, because on a machine that declared the GUI extra a missing context IS the
-    defect.
-    """
-    if viewport.renderer is not None:
-        return
-    reason = viewport._gl_error or "no details from the driver"
-    pytest.skip(f"moderngl/PyQt6 cannot create an OpenGL context on this machine: {reason}")
-
-
 def test_offscreen_renderer_draws_into_its_own_framebuffer():
     """The GL layer alone (no Qt) must produce pixels."""
     import moderngl
@@ -143,7 +127,7 @@ def test_viewport_widget_paints_the_scene(qapp):
     qapp.processEvents()
 
     viewport = window.viewport
-    _require_gl(viewport)
+    require_gl(viewport)
     assert viewport.renderer.receptor_count > 0
     assert viewport.renderer.ligand_count == 5
 
@@ -484,7 +468,7 @@ def test_every_protein_style_renders_geometry_and_switching_is_reversible(qapp):
     window.show()
     qapp.processEvents()
     renderer = window.viewport.renderer
-    _require_gl(window.viewport)
+    require_gl(window.viewport)
 
     meshed = {"cartoon", "ribbon", "tube", "sticks", "ball_stick"}
     counts = {}
@@ -515,7 +499,7 @@ def test_every_ligand_style_renders_geometry_and_switching_is_reversible(qapp):
     window.show()
     qapp.processEvents()
     renderer = window.viewport.renderer
-    _require_gl(window.viewport)
+    require_gl(window.viewport)
     assert window.scene.ligand_bonds, "the ligand must have perceived bonds"
 
     meshed = {"ball_stick", "sticks", "wireframe"}
@@ -774,7 +758,7 @@ def test_spacefill_draws_every_atom_at_its_real_van_der_waals_radius(qapp):
     window.show()
     qapp.processEvents()
     renderer = window.viewport.renderer
-    _require_gl(window.viewport)
+    require_gl(window.viewport)
 
     elements = [atom.element for atom in window.scene.ligand]
     carbon = elements.index("C")
@@ -813,7 +797,7 @@ def test_the_selection_is_drawn_and_an_empty_selection_is_a_no_op(qapp):
     window.show()
     qapp.processEvents()
     renderer = window.viewport.renderer
-    _require_gl(window.viewport)
+    require_gl(window.viewport)
     window.viewport.frame_ligand()
     qapp.processEvents()
 
@@ -852,7 +836,7 @@ def test_the_reference_ghost_overlay_is_drawn_only_when_set(qapp):
     window.show()
     qapp.processEvents()
     renderer = window.viewport.renderer
-    _require_gl(window.viewport)
+    require_gl(window.viewport)
     window.viewport.frame_ligand()
     qapp.processEvents()
 
@@ -1076,7 +1060,7 @@ def test_the_box_is_a_translucent_fill_without_grips(qapp):
     window.show()
     qapp.processEvents()
     renderer = window.viewport.renderer
-    _require_gl(window.viewport)
+    require_gl(window.viewport)
 
     window.scene.box = ((1.5, 1.2, 0.0), (8.0, 8.0, 8.0))
     assert window.scene.show_box_handles is False, "the grips must be off by default"
@@ -1124,7 +1108,7 @@ def test_no_box_fill_when_the_camera_is_inside_the_box(qapp):
     window.show()
     qapp.processEvents()
     renderer = window.viewport.renderer
-    _require_gl(window.viewport)
+    require_gl(window.viewport)
 
     # A box big enough to contain the camera whatever `frame_all` chooses.
     window.scene.box = ((0.0, 0.0, 0.0), (400.0, 400.0, 400.0))
@@ -1247,7 +1231,7 @@ def test_the_interaction_dashes_are_visible_not_hairlines(qapp):
     window.resize(800, 560)
     window.show()
     qapp.processEvents()
-    _require_gl(window.viewport)
+    require_gl(window.viewport)
     window.set_pose(2)
     qapp.processEvents()
     window._annotate_interactions(quiet=True)
@@ -1300,7 +1284,7 @@ def test_the_emphasis_suppresses_the_base_spheres_it_replaces(qapp):
     window.show()
     qapp.processEvents()
     renderer = window.viewport.renderer
-    _require_gl(window.viewport)
+    require_gl(window.viewport)
     window._annotate_interactions(quiet=True)
     qapp.processEvents()
     assert window.scene.interaction_focus, "Show interactions must set the focus"
@@ -1381,7 +1365,7 @@ def test_every_pose_draws_the_same_protein(qapp):
     window.resize(640, 480)
     window.show()
     qapp.processEvents()
-    _require_gl(window.viewport)
+    require_gl(window.viewport)
     assert len(window.pose_models) == 2
 
     states = []
@@ -1450,7 +1434,7 @@ def test_the_interaction_focus_emphasises_the_site_and_clears(qapp):
     window.show()
     qapp.processEvents()
     renderer = window.viewport.renderer
-    _require_gl(window.viewport)
+    require_gl(window.viewport)
     assert window.scene.interaction_focus == []
 
     base_mesh = renderer.mesh_receptor_vertices

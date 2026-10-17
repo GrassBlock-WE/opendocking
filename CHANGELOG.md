@@ -4,6 +4,50 @@ All notable changes to OpenDocking are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.3.8 — 2026-10-18
+
+### Fixed
+
+* **The GL capability guard covered one test module out of three.** `0.3.5` and `0.3.6`
+  converted the twelve assertions in `tests/test_gui_viewport.py`, but `tests/test_sequence.py`
+  and `tests/test_surface.py` reach the same renderer by other routes and assume it exists:
+
+  ```
+  AttributeError: 'NoneType' object has no attribute 'pick_atom'
+  AttributeError: 'NoneType' object has no attribute 'receptor_count'
+  AttributeError: 'NoneType' object has no attribute 'render_image'
+  ```
+
+  Twelve of the sixteen remaining CI failures were that one cause. The guard is now
+  `tests/gui_guard.py::require_gl()`, a single implementation the three modules import, and
+  all fourteen call sites go through it. It skips with the driver's own error text and the
+  message names `moderngl`/`PyQt6`, so `--require-gui` still escalates it to a failure on a
+  machine that declared the GUI extra.
+
+  Worth recording: the first attempt inserted the import line **inside a multi-line
+  parenthesised `from odock.gui... import (...)`**, which is a syntax error — caught
+  immediately by collection, and the repair moves the line past the closing bracket. A
+  mechanical edit into a file with multi-line imports needs to know where the statement
+  ends, not just where the imports are.
+
+### Verified
+
+`test_gui_viewport` + `test_sequence` + `test_surface` → **147 passed, 1 skipped**; the guard
+was driven directly with a stubbed viewport (`renderer = None`,
+`_gl_error = "wglCreateContextAttribsARB not found"`) and raises `Skipped` naming both
+`moderngl` and the driver error, while a working context passes through. Full suite in a
+clean environment → **2205 passed, 1 skipped, 0 failed**.
+
+### Still open
+
+Four non-GL CI failures remain, all Windows-leg-only so far:
+`test_read_sdf_skips_a_broken_record_with_a_warning` (`DID NOT WARN`),
+`test_the_search_reaches_the_chemical_superposition[N=C(N)c1ccc(F)cc1-fluorobenzamidine]`,
+`test_enrichment_on_the_labelled_demo_set` (`0.9697` against `0.9545 ± 0.002`),
+`test_submit_poll_fetch_in_process` (`0 == 2`) and
+`test_an_unreadable_sdf_record_is_an_invalid_audit_entry` (`1 == 2`). The Linux legs are
+still blocked by `tests/test_project.py::reproducible_project`, which needs a Linux machine.
+
 ## 0.3.7 — 2026-10-18
 
 Two defects that only the CI matrix could find, because each depends on something a

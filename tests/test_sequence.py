@@ -33,6 +33,7 @@ from odock.gui.sequence import (  # noqa: E402
     residue_class,
 )
 from odock.gui.structure import Atom, parse_pdbqt  # noqa: E402
+from gui_guard import require_gl  # noqa: E402
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -708,7 +709,7 @@ def test_a_fresh_window_draws_nothing(qapp):
     qapp.processEvents()
     try:
         renderer = window.viewport.renderer
-        assert renderer is not None, f"no GL context: {window.viewport._gl_error}"
+        require_gl(window.viewport)
         assert window.scene.box is None
         assert window.scene.selection == []
         assert (getattr(window.scene, "ghost_ligand", None) or []) == []

@@ -48,6 +48,7 @@ from odock.gui.surface import (
     surface_area,
     surface_volume,
 )
+from gui_guard import require_gl  # noqa: E402
 
 
 def atom(element: str, x: float, y: float, z: float, **kwargs) -> Atom:
@@ -1102,7 +1103,7 @@ def test_the_window_builds_a_surface_and_puts_it_on_the_scene(workbench, qapp):
     workbench.viewport._ensure_context()
     workbench.viewport.refresh()
     renderer = workbench.viewport.renderer
-    assert renderer is not None
+    require_gl(workbench.viewport)
     data = renderer.render_image(workbench.viewport.camera, 320, 240)
     assert renderer.surface_vertices == surface.mesh().shape[0]
     assert renderer.surface_triangles == surface.triangles_count
