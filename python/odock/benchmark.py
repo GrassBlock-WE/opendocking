@@ -1119,5 +1119,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     return 0
 
 
-if __name__ == "__main__":  # pragma: no cover - CLI entry point
+if __name__ == "__main__":  # pragma: no cover - module entry point
+    # A `-m` entry does not pass through `cli.main()`, so it does not get the UTF-8
+    # stream setup, and on a non-UTF-8 console code page a pipe receives bytes the
+    # parent cannot decode (0xa1, GBK, from an em dash).  Same call, same reason.
+    from .cli import _use_utf8_streams
+
+    _use_utf8_streams()
     raise SystemExit(main())

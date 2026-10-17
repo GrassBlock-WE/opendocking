@@ -77,6 +77,7 @@ __all__ = [
     "protocol_diff_text",
     "protocol_text",
     "run_protocol",
+    "screen_config",
     "save_protocol",
     "template_dir",
     "template_named",
@@ -1230,7 +1231,7 @@ def run_protocol(
         _apply_overrides(protocol, overrides)
     protocol.validate(for_run=True)
 
-    config = _screen_config(protocol, receptor=receptor, library=library, outdir=outdir)
+    config = screen_config(protocol, receptor=receptor, library=library, outdir=outdir)
     if runner is None:
         from .screen import screen_ligands as runner  # type: ignore[assignment]
     summary = runner(config)
@@ -1240,8 +1241,16 @@ def run_protocol(
     return run
 
 
-def _screen_config(protocol: Protocol, *, receptor: Any, library: Any, outdir: Any) -> Any:
-    """A ``ScreenConfig`` assembled from the protocol and the run's inputs."""
+def screen_config(
+    protocol: Protocol, *, receptor: Any, library: Any, outdir: Any
+) -> Any:
+    """A ``ScreenConfig`` assembled from a protocol and a run's inputs.
+
+    Public because it is the *seam* between the protocol document and the engine:
+    ``odock protocol run``, the workbench's campaign queue and the tests all build
+    their config here, so a queued campaign and a command-line one cannot diverge
+    in how a protocol becomes settings.
+    """
     from .screen import ScreenConfig
     from .docking import BoxSpec  # the box type the kernel and screen share
 
@@ -1579,7 +1588,7 @@ def _cmd_run(args: Any) -> int:
         if overrides:
             _apply_overrides(protocol, overrides)
         protocol.validate(for_run=True)
-        config = _screen_config(
+        config = screen_config(
             protocol, receptor=args.receptor, library=args.library, outdir=args.out
         )
         config.validated()

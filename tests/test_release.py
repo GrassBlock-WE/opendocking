@@ -1259,8 +1259,9 @@ def test_release_check_aggregates_a_failure_from_every_gate(tmp_path):
     report = release.check_release(root, runner=_gate_runner(failing), timeout=5)
     names = {gate.name for gate in report.gates}
     assert names == {
-        "release content", "release_check.py", "inspect_dist self-test", "docs site",
-        "doctor --strict", "benchmark --check-baseline", "pytest suite", "test order",
+        "release content", "release_check.py", "inspect_dist self-test",
+        "cargo metadata", "docs site", "doctor --strict",
+        "benchmark --check-baseline", "pytest suite", "test order",
     }
     failed = {gate.name for gate in report.failures()}
     assert failed == {
@@ -1274,7 +1275,10 @@ def test_release_check_aggregates_a_failure_from_every_gate(tmp_path):
     assert "FAIL" in report.text()
     payload = report.as_dict()
     assert payload["ok"] is False
-    assert len(payload["gates"]) == 8
+    # Derived from GATE_NAMES rather than hard-coded: adding a gate must not require
+    # editing a number here, and the set assertion above already pins *which* gates
+    # ran.  A gate that is declared but never appended still fails this.
+    assert len(payload["gates"]) == len(release.GATE_NAMES)
 
 
 def test_release_check_reports_each_gate_with_measured_numbers(tmp_path):
@@ -1676,3 +1680,62 @@ def test_the_deselected_count_is_parsed_from_the_summary():
 def test_a_full_run_reports_no_deselection():
     numbers = release._parse_pytest_summary("1997 passed, 1 skipped in 935.35s")
     assert numbers["deselected"] == 0
+
+# ---------------------------------------------------------------------------
+# The workspace must resolve (0.3.2)
+#
+# The gate that would have caught the 0.3.0/0.3.1 build failure.  An internal
+# dependency pinned to `version = "0.2.1"` means `^0.2.1`, which stops matching the
+# moment the workspace version crosses 0.3.0 -- so `cargo metadata` fails, all eight
+# CI jobs fail with it, and the local Python suite stays green because it runs
+# against a pre-built extension.  A release that cannot be built from its own
+# sources is not a release.
+# ---------------------------------------------------------------------------
+
+BUILD_FAILURE = (
+    'error: failed to select a version for the requirement `dock-core = "^0.2.1"`\n'
+    'candidate versions found which didn\'t match: 0.3.1'
+)
+
+
+def test_the_cargo_gate_passes_when_the_workspace_resolves(tmp_path):
+    report = release.check_release(
+        tmp_path, only=["cargo metadata"],
+        runner=lambda argv, **kw: release.TransportResult(list(argv), 0, "{}", "", 0.03),
+        timeout=5,
+    )
+    gate = report.gates[0]
+    assert gate.name == "cargo metadata"
+    assert gate.ok, gate.detail
+    assert "resolves" in gate.detail
+
+
+def test_the_cargo_gate_names_the_build_failure(tmp_path):
+    """The whole point: the CI error text reaches the release report."""
+    report = release.check_release(
+        tmp_path, only=["cargo metadata"],
+        runner=lambda argv, **kw: release.TransportResult(
+            list(argv), 101, "", BUILD_FAILURE, 0.03
+        ),
+        timeout=5,
+    )
+    gate = report.gates[0]
+    assert not gate.ok
+    assert "dock-core" in gate.detail
+    assert "0.2.1" in gate.detail
+
+
+def test_the_cargo_gate_is_skipped_with_a_note_when_cargo_is_absent(tmp_path, monkeypatch):
+    monkeypatch.setattr(release.shutil, "which", lambda _name: None)
+    report = release.check_release(tmp_path, only=["cargo metadata"], timeout=5)
+    gate = report.gates[0]
+    assert gate.ok and gate.skipped
+    assert "cargo is not on PATH" in gate.detail
+
+
+def test_the_cargo_gate_runs_before_the_expensive_ones():
+    """Cheapest first: a workspace that does not resolve must fail in 30 ms, not
+    after the benchmark."""
+    order = list(release.GATE_NAMES)
+    assert order.index("cargo metadata") < order.index("benchmark --check-baseline")
+    assert order.index("cargo metadata") < order.index("pytest suite")

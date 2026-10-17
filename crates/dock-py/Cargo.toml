@@ -20,6 +20,20 @@ name = "_odock"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-dock-core = { version = "0.2.1", path = "../dock-core" }
+# No `version` here, deliberately.  A version requirement on an internal crate is a
+# second place the release version has to be maintained, and it fails *silently at
+# build time* when they drift: `version = "0.2.1"` means `^0.2.1`, which is
+# `>=0.2.1, <0.3.0`, so bumping the workspace to 0.3.0 made `cargo metadata` refuse
+# the whole workspace and `maturin develop` fail --
+#
+#     failed to select a version for the requirement `dock-core = "^0.2.1"`
+#     candidate versions found which didn't match: 0.3.1
+#
+# which is how the 0.3.0 and 0.3.1 releases came to ship a source tree that could
+# not be built.  The path is the requirement; `dock-core` is never published to
+# crates.io, so there is nothing for a registry version to disambiguate.  `ci.yml`
+# runs `cargo metadata` for exactly this reason -- it fails here, not in the wheel.
+dock-core = { path = "../dock-core" }
 numpy = "0.27.1"
 pyo3 = { version = "0.27.2", features = ["extension-module"] }
+

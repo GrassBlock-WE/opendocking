@@ -90,7 +90,10 @@ def dock_text(receptor_pdbqt: str, ligand_pdbqt: str, box: BoxSpec, **kwargs) ->
 #: ``odock.screen.screen_ligands`` works after a plain ``import odock``; it
 #: itself imports the chemistry lazily.
 _EAGER_SUBMODULES = ("analysis", "chem", "consensus", "export", "fetch", "filters",
-                     "ligandsim", "metrics", "pocket", "report", "scaffold", "screen")
+                     "ligandsim", "metrics", "pocket", "report", "scaffold", "screen"    "standardise",
+    "service",
+    "panel",
+)
 
 
 def __getattr__(name: str):  # pragma: no cover - lazy submodule access

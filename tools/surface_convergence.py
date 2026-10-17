@@ -22,6 +22,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "python"))
 
+from _tool import use_utf8_streams  # noqa: E402
+
+use_utf8_streams()
+
 from odock import sasa as sasa_module  # noqa: E402
 from odock.gui import surface as surface_module  # noqa: E402
 from odock.gui.structure import read_pdbqt  # noqa: E402

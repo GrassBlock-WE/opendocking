@@ -1173,6 +1173,7 @@ GATE_NAMES: Tuple[str, ...] = (
     "release content",
     "release_check.py",
     "inspect_dist self-test",
+    "cargo metadata",
     "docs site",
     "doctor --strict",
     "benchmark --check-baseline",
@@ -1372,6 +1373,33 @@ def check_release(
             }
             gate.detail = "the leak rules pass their self-test" if result.ok else (
                 f"FAIL (exit {result.code}): {_tail(result.stdout or result.stderr, 200)}"
+            )
+        report.gates.append(gate)
+
+    # 3b. the Rust workspace must resolve.  This is the cheapest gate in the list and
+    # it is the one that would have caught the 0.3.0/0.3.1 build failure: an internal
+    # dependency pinned to `version = "0.2.1"` means `^0.2.1`, which stops matching the
+    # moment the workspace version crosses 0.3.0 -- so `cargo metadata` fails, and all
+    # eight CI jobs fail with it, while the local Python suite stays green because it
+    # runs against a pre-built extension.  A release that cannot be built from its own
+    # sources is not a release; this gate is thirty milliseconds.
+    if selected("cargo metadata"):
+        cargo = shutil.which("cargo")
+        gate = CheckGate("cargo metadata", False, "")
+        if cargo is None:
+            gate.ok = True
+            gate.skipped = True
+            gate.detail = "skipped: cargo is not on PATH, so the workspace cannot be checked here"
+        else:
+            command = [cargo, "metadata", "--no-deps", "--format-version", "1"]
+            gate.command = command
+            result = runner(command, timeout=max(timeout, 300.0))
+            gate.seconds = result.seconds
+            gate.ok = result.ok
+            gate.detail = (
+                "the workspace resolves" if result.ok
+                else f"FAIL (exit {result.code}): "
+                     f"{_tail(result.stderr or result.stdout, 300)}"
             )
         report.gates.append(gate)
 

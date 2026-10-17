@@ -1119,6 +1119,30 @@ def main() -> int:
         window.workspace_dock.setVisible(True)
         robot.pump(80)
         step.expect(window.workspace_dock.isVisible(), "the workspace can be shown again")
+        # The campaign queue is a panel like the others: it holds a library or a
+        # protocol and runs it through screen.screen_ligands — the same call
+        # `odock screen` makes. Its *existence and toggling* are covered here; the
+        # campaign itself (a real two-molecule run whose files are read back with
+        # screen's own loader, a stop that keeps its rows, a restart that does not
+        # duplicate them, a failing item that does not stop the queue) is covered
+        # end to end in tests/test_queue.py, because ten seconds of docking belong
+        # in a test rather than in this walk-through.
+        step.expect(
+            window.queue_dock is not None
+            and window.queue_dock.windowTitle() == i18n.tr("dock.queue"),
+            "the campaign queue dock exists",
+            window.queue_dock.windowTitle() if window.queue_dock else "absent",
+        )
+        window.queue_dock.setVisible(False)
+        robot.pump(80)
+        step.expect(not window.queue_dock.isVisible(), "the queue can be hidden")
+        window.queue_dock.setVisible(True)
+        robot.pump(80)
+        step.expect(window.queue_dock.isVisible(), "the queue can be shown again")
+        step.expect(
+            window.queue_caption.text() == i18n.tr("queue.caption"),
+            "and it states that its output is identical to the CLI's",
+        )
 
     with robot.step("Switch the whole interface to 简体中文 (View ▸ Language)", "View") as step:
         window.set_language("zh")

@@ -30,6 +30,7 @@ import json
 import math
 import os
 import sys
+import threading
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -1727,6 +1728,61 @@ class _CallWorker(QtCore.QThread):
 # ---------------------------------------------------------------------------
 
 
+class _CampaignWorker(QtCore.QThread):
+    """Runs one campaign through :func:`odock.screen.screen_ligands`.
+
+    That function *is* the CLI's: ``odock screen`` ends up in the same call, so a
+    campaign started here and one started from a terminal produce the same files
+    with the same numbers. Nothing about screening is reimplemented here — the
+    worker's whole job is to own the thread, hand over the caller-owned stop
+    token, and forward what the run reports.
+
+    ``stop`` is the same event ``screen._Runner.stop()`` sets, so cancelling goes
+    through the kernel's own cancel token: the search notices at its next
+    Monte-Carlo step, the rows already written stay on disk, and the summary comes
+    back with ``interrupted = True``. Do not touch anything else to cancel.
+    """
+
+    #: One finished molecule, after its row was written and flushed.
+    recordDone = QtCore.pyqtSignal(object)
+    #: The campaign finished (a ``screen.ScreenSummary``, possibly interrupted).
+    finishedRun = QtCore.pyqtSignal(object)
+    #: The campaign refused to start or died: the message is ``screen``'s own.
+    failedRun = QtCore.pyqtSignal(str)
+
+    def __init__(self, config, parent=None) -> None:
+        super().__init__(parent)
+        self.config = config
+        self.stop_event = threading.Event()
+        self.summary = None
+        self.error = ""
+        self.stopped_by_user = False
+
+    def request_stop(self) -> None:
+        """Ask the campaign to stop the way Ctrl-C does."""
+        self.stopped_by_user = True
+        self.stop_event.set()
+
+    def run(self) -> None:  # noqa: D102 - the thread body
+        screen = _try_import("screen")
+        if screen is None:  # pragma: no cover - depends on the installation
+            self.error = "screening is unavailable: odock.screen could not be imported"
+            self.failedRun.emit(self.error)
+            return
+        try:
+            self.summary = screen.screen_ligands(
+                self.config,
+                stop=self.stop_event,
+                on_record=self.recordDone.emit,
+            )
+        except BaseException as exc:  # noqa: BLE001 - a refusal must reach the dock
+            # Verbatim: a paraphrased refusal is how a user learns the wrong fix.
+            self.error = f"{type(exc).__name__}: {exc}"
+            self.failedRun.emit(self.error)
+        else:
+            self.finishedRun.emit(self.summary)
+
+
 class DockingWorkbench(QtWidgets.QMainWindow):
     """The main window.
 
@@ -1777,6 +1833,12 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         #: loaded from a file (for the tab's diff label).
         self._loaded_protocol = None
         self._protocol_view = None
+        #: The campaign queue: the item list, the worker currently running one of
+        #: them, and which item that worker is for. One campaign at a time, which
+        #: is the whole scheduling policy (see the queue dock's caption).
+        self.queue_model = dashboard.CampaignQueue()
+        self._campaign_worker: Optional[QtCore.QThread] = None
+        self._campaign_item = None
         self.receptor_mol = None
         self.ligand_mol = None
         self.inventory = None
@@ -1869,6 +1931,7 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         self._build_workspace()
         self._build_bottom()
         self._build_dashboard()
+        self._build_queue()
         self._build_console()
         self._build_comparison()
         self._build_selection_panel()
@@ -1908,6 +1971,7 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         self._build_workspace()
         self._build_bottom()
         self._build_dashboard()
+        self._build_queue()
         self._build_console()
         self._build_comparison()
         self._build_selection_panel()
@@ -1951,6 +2015,7 @@ class DockingWorkbench(QtWidgets.QMainWindow):
                     "inspector_dock",
                     "bottom_dock",
                     "dashboard_dock",
+                    "queue_dock",
                     "comparison_dock",
                     "selection_dock",
                 )
@@ -2023,6 +2088,7 @@ class DockingWorkbench(QtWidgets.QMainWindow):
             "inspector_dock",
             "bottom_dock",
             "dashboard_dock",
+            "queue_dock",
             "comparison_dock",
             "selection_dock",
         ):
@@ -2298,6 +2364,378 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         the hint by one event-loop turn makes it land on a live layout.
         """
         QtCore.QTimer.singleShot(0, self._apply_dock_proportions)
+
+    # -- the campaign queue -------------------------------------------------
+    #
+    # The queue is a *view onto runs*, not a second engine: every item is handed
+    # to ``screen.screen_ligands``, the function ``odock screen`` calls, so a
+    # campaign started here and one started from a terminal produce the same
+    # ``run.json``/``results.jsonl``/summary with the same numbers. The queue adds
+    # the bookkeeping a GUI needs (which item is running, what each one did) and
+    # nothing else; the streaming numbers are read back with
+    # ``screen.read_records``, the loader the CLI itself uses.
+
+    def _build_queue(self) -> None:
+        """View ▸ Panels ▸ Campaign queue: libraries and protocols, one at a time."""
+        dock = QtWidgets.QDockWidget(tr("dock.queue"), self)
+        dock.setObjectName("queueDock")
+        page = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(page)
+        layout.setContentsMargins(6, 4, 6, 4)
+        layout.setSpacing(4)
+
+        self.queue_caption = QtWidgets.QLabel(tr("queue.caption"))
+        self.queue_caption.setWordWrap(True)
+        self.queue_caption.setObjectName("dashboardCaption")
+        layout.addWidget(self.queue_caption)
+
+        self.queue_table = dashboard.QueueTable()
+        self.queue_table.itemSelectionChanged.connect(self._on_queue_selection)
+        layout.addWidget(self.queue_table, 1)
+
+        self.queue_results = dashboard.CampaignResultsTable()
+        self.queue_results.activated.connect(self._on_campaign_result_activated)
+        layout.addWidget(self.queue_results, 1)
+
+        self.queue_campaign = QtWidgets.QLabel("")
+        self.queue_campaign.setObjectName("dashboardReadout")
+        layout.addWidget(self.queue_campaign)
+        # The panel says what its numbers are *over*, on screen, not only in the
+        # docs: per-molecule outcomes, not a search trace.
+        self.queue_no_curve = QtWidgets.QLabel(tr("queue.no_curve"))
+        self.queue_no_curve.setWordWrap(True)
+        self.queue_no_curve.setObjectName("dashboardCaption")
+        layout.addWidget(self.queue_no_curve)
+
+        row = QtWidgets.QHBoxLayout()
+        self.queue_add_library_button = self._act_row_button(
+            row, tr("btn.queue_add_library"), self._queue_add_library
+        )
+        self.queue_add_protocol_button = self._act_row_button(
+            row, tr("btn.queue_add_protocol"), self._queue_add_protocol
+        )
+        self.queue_stop_button = self._act_row_button(
+            row, tr("btn.queue_stop"), self._queue_stop
+        )
+        self.queue_restart_button = self._act_row_button(
+            row, tr("btn.queue_restart"), self._queue_restart
+        )
+        layout.addLayout(row)
+
+        dock.setWidget(page)
+        self.addDockWidget(QtCore.Qt.DockWidgetArea.BottomDockWidgetArea, dock)
+        self.tabifyDockWidget(self.dashboard_dock, dock)
+        self.queue_dock = dock
+        self._refresh_queue()
+
+    def queue_stats(self):
+        """The queue's model, for tests and for the console."""
+        return self.queue_model
+
+    def _refresh_queue(self) -> None:
+        """Redraw the dock from the model — the only place the widgets are filled."""
+        table = getattr(self, "queue_table", None)
+        if table is None:
+            return
+        items = list(self.queue_model)
+        table.set_items(items)
+        stats = dashboard.campaign_stats(items)
+        if stats.total:
+            self.queue_campaign.setText(
+                tr(
+                    "queue.campaign",
+                    done=stats.done,
+                    total=stats.total,
+                    best=stats.best_text(),
+                    rate=stats.rate_text(),
+                    eta=stats.eta_text(),
+                    failures=stats.failures,
+                )
+            )
+        elif items:
+            # No denominators yet: the dockable count arrives with screen's own run
+            # manifest, and inventing one would be a fake progress bar.
+            self.queue_campaign.setText(
+                tr(f"queue.state.{items[0].state}")
+            )
+        stop = getattr(self, "queue_stop_button", None)
+        if stop is not None:
+            stop.setEnabled(self.queue_model.current is not None)
+        self._collect_campaign_state(self.queue_model.current)
+
+    def _collect_campaign_state(self, item) -> None:
+        """Refresh one running item's counters from the results file.
+
+        Polling with ``screen.read_records`` is deliberate: it is the loader the CLI
+        uses, so the dock shows what an ``odock screen`` run would show, and a
+        campaign started outside the workbench can be watched the same way. The
+        ``on_record`` callback is a notification; this is the source of truth.
+        """
+        results = getattr(self, "queue_results", None)
+        if item is None:
+            return
+        screen = _try_import("screen")
+        if screen is None:  # pragma: no cover - depends on the installation
+            return
+        self._read_campaign_counters(item, screen)
+        if results is not None:
+            results.set_records(screen.read_records(item.results_path()))
+
+    def _read_campaign_counters(self, item, screen) -> None:
+        """done/failures/best/total for one item, from its own files."""
+        manifest_path = item.outdir / "run.json"
+        total = None
+        if manifest_path.exists():
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                if isinstance(manifest, dict) and manifest.get("n_dockable"):
+                    total = int(manifest["n_dockable"])
+            except Exception:
+                total = None
+        records = screen.read_records(item.results_path())
+        failures = sum(
+            1 for record in records if getattr(record, "status", "ok") != "ok"
+        )
+        best = None
+        for record in records:
+            affinity = getattr(record, "affinity", None)
+            if affinity is not None:
+                best = affinity if best is None else min(best, affinity)
+        self.queue_model.update_progress(
+            item, done=len(records), total=total, failures=failures, best=best
+        )
+
+    def _queue_add_library(self) -> None:
+        """Queue a library against the receptor and box the workbench holds."""
+        receptor = self._pending.get("receptor")
+        if not receptor:
+            self._report_error(tr("log.load_receptor_first"), False)
+            return
+        library, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, tr("btn.queue_add_library"), "", ""
+        )
+        if not library:
+            return
+        outdir = QtWidgets.QFileDialog.getExistingDirectory(
+            self, tr("btn.queue_add_library"), ""
+        )
+        if not outdir:
+            return
+        try:
+            captured = self.current_protocol()
+        except Exception as exc:  # pragma: no cover - the panel always captures
+            self._report_error(str(exc), True)
+            return
+        self.queue_campaign_item(
+            label=Path(str(library)).stem,
+            protocol_document=captured,
+            receptor=Path(str(receptor)),
+            library=Path(str(library)),
+            outdir=Path(str(outdir)),
+        )
+
+    def _queue_add_protocol(self) -> None:
+        """Queue a *protocol* — the same document ``odock protocol run`` takes."""
+        receptor = self._pending.get("receptor")
+        if not receptor:
+            self._report_error(tr("log.load_receptor_first"), False)
+            return
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, tr("btn.queue_add_protocol"), "", ""
+        )
+        if not path:
+            return
+        try:
+            loaded = protocol.load_protocol(path)
+            loaded.validate(for_run=True)
+        except Exception as exc:
+            self._report_error(str(exc), True)
+            return
+        library, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, tr("btn.queue_add_protocol"), "", ""
+        )
+        if not library:
+            return
+        outdir = QtWidgets.QFileDialog.getExistingDirectory(
+            self, tr("btn.queue_add_protocol"), ""
+        )
+        if not outdir:
+            return
+        self.queue_campaign_item(
+            label=loaded.name,
+            protocol_document=loaded,
+            receptor=Path(str(receptor)),
+            library=Path(str(library)),
+            outdir=Path(str(outdir)),
+        )
+
+    def queue_campaign_item(
+        self, *, label, protocol_document, receptor, library, outdir
+    ):
+        """Queue one campaign and start it if the queue is idle.
+
+        Public because the console binds it: ``queue_campaign_item(...)`` from the
+        console puts an item where the buttons put it, through the same model and
+        the same ``screen`` call.
+        """
+        item = dashboard.CampaignItem(
+            label=str(label),
+            outdir=Path(outdir),
+            receptor=Path(receptor),
+            library=Path(library),
+            protocol=protocol_document,
+        )
+        self.queue_model.add(item)
+        # Record the protocol with the campaign, so "which settings produced these
+        # files?" has an answer even if the workbench is closed.
+        try:
+            protocol.record_protocol(protocol_document, item.outdir)
+        except Exception:  # pragma: no cover - the record is a convenience
+            pass
+        self._log(tr("log.queue_item", label=item.label, state=tr("queue.state.queued")))
+        self._refresh_queue()
+        self._queue_start_next()
+        return item
+
+    def _queue_start_next(self) -> None:
+        """Start the next queued item, if nothing is running."""
+        if getattr(self, "_campaign_worker", None) is not None:
+            return
+        item = self.queue_model.next_item()
+        if item is None:
+            self._refresh_queue()
+            return
+        self.queue_model.begin(item)
+        item.phase = tr("queue.state.running")
+        try:
+            config = protocol.screen_config(
+                item.protocol,
+                receptor=item.receptor,
+                library=item.library,
+                outdir=item.outdir,
+            )
+            config.validated()
+        except Exception as exc:
+            # A bad item is a failed row, not a stopped queue: the next one still
+            # gets its turn, and the message is screen's or the protocol's own.
+            self.queue_model.finish(item, state="failed", error=str(exc))
+            self._log(
+                tr(
+                    "log.queue_item",
+                    label=item.label,
+                    state=f"{tr('queue.state.failed')} — {exc}",
+                )
+            )
+            self._refresh_queue()
+            self._queue_start_next()
+            return
+        worker = _CampaignWorker(config, self)
+        worker.recordDone.connect(self._on_campaign_record)
+        worker.finishedRun.connect(self._on_campaign_finished)
+        worker.failedRun.connect(self._on_campaign_failed)
+        self._campaign_worker = worker
+        self._campaign_item = item
+        worker.start()
+        self._refresh_queue()
+
+    def _on_campaign_record(self, record) -> None:
+        """One molecule finished. Trivial on purpose: the row is already on disk."""
+        item = getattr(self, "_campaign_item", None)
+        if item is None:
+            return
+        item.done += 1
+        if getattr(record, "status", "ok") != "ok":
+            item.failures += 1
+        affinity = getattr(record, "affinity", None)
+        if affinity is not None:
+            item.best = affinity if item.best is None else min(item.best, affinity)
+        self._refresh_queue()
+
+    def _on_campaign_finished(self, summary) -> None:
+        item = getattr(self, "_campaign_item", None)
+        worker = getattr(self, "_campaign_worker", None)
+        self._campaign_worker = None
+        self._campaign_item = None
+        if worker is not None:
+            worker.wait(50)
+        if item is None:
+            return
+        if summary is not None:
+            item.done = len(getattr(summary, "records", []) or [])
+            item.failures = int(summary.n_failed()) + int(summary.n_timeout())
+            best = None
+            for receptor_name in summary.receptor_names:
+                for record in summary.ranked(receptor_name):
+                    if record.affinity is not None:
+                        best = record.affinity if best is None else min(best, record.affinity)
+            item.best = best
+        state = "stopped" if getattr(summary, "interrupted", False) else "done"
+        self.queue_model.finish(item, state=state)
+        self._log(tr("log.queue_item", label=item.label, state=tr(f"queue.state.{state}")))
+        self._refresh_queue()
+        self._queue_start_next()
+
+    def _on_campaign_failed(self, message: str) -> None:
+        item = getattr(self, "_campaign_item", None)
+        worker = getattr(self, "_campaign_worker", None)
+        self._campaign_worker = None
+        self._campaign_item = None
+        if worker is not None:
+            worker.wait(50)
+        if item is None:
+            return
+        self.queue_model.finish(item, state="failed", error=str(message))
+        self._log(tr("log.queue_item", label=item.label, state=tr("queue.state.failed")))
+        self._report_error(str(message), False)
+        self._refresh_queue()
+        # A failure is a row, not a stop: the queue continues.
+        self._queue_start_next()
+
+    def _queue_stop(self) -> None:
+        """Stop the running campaign the way Ctrl-C does; finished rows stay."""
+        item = self.queue_model.stop_current()
+        worker = getattr(self, "_campaign_worker", None)
+        if item is None or worker is None:
+            return
+        worker.request_stop()
+        item.phase = tr("queue.state.stopped")
+        self._log(tr("log.queue_item", label=item.label, state=tr("queue.state.stopped")))
+        self._refresh_queue()
+
+    def _queue_restart(self) -> None:
+        """Re-queue what did not finish; a finished item is left alone."""
+        requeued = self.queue_model.restart()
+        for item in requeued:
+            self._log(
+                tr("log.queue_item", label=item.label, state=tr("queue.state.queued"))
+            )
+        self._refresh_queue()
+        self._queue_start_next()
+
+    def _on_queue_selection(self) -> None:
+        """Show the selected item's counters (nothing runs because of a click)."""
+        self._refresh_queue()
+
+    def _on_campaign_result_activated(self, index) -> None:
+        """Open one molecule's poses in the viewer — the pose table, filled.
+
+        ``screen`` writes a pose file per molecule, so this is the same file a
+        terminal user would pass to ``odock pose <file>``.
+        """
+        record = getattr(self.queue_results, "record_at", lambda _i: None)(index)
+        if record is None:
+            return
+        pose_file = getattr(record, "pose_file", None)
+        if not pose_file:
+            return
+        path = Path(str(pose_file))
+        if not path.is_absolute():
+            item = getattr(self.queue_results, "source_item", None)
+            base = getattr(item, "outdir", None) if item is not None else None
+            if base is not None:
+                path = Path(base) / path
+        if path.exists():
+            self.load_poses(path)
 
     # -- the protocol tab ---------------------------------------------------
 
@@ -2649,6 +3087,10 @@ class DockingWorkbench(QtWidgets.QMainWindow):
             "diff_protocols": protocol.diff_protocols,
             "run_protocol": protocol.run_protocol,
             "list_templates": protocol.list_templates,
+            # The campaign queue, on the buttons' own path: a campaign from the
+            # console is the same item the dock would hold.
+            "queue_campaign_item": self.queue_campaign_item,
+            "queue": self.queue_stats,
         }
         namespace["help"] = self.console_help
         return namespace
@@ -3649,6 +4091,7 @@ class DockingWorkbench(QtWidgets.QMainWindow):
             self.inspector_dock,
             self.bottom_dock,
             self.dashboard_dock,
+            self.queue_dock,
             self.comparison_dock,
             self.selection_dock,
         ):
@@ -8514,6 +8957,7 @@ class DockingWorkbench(QtWidgets.QMainWindow):
                 "inspector_dock",
                 "bottom_dock",
                 "dashboard_dock",
+                "queue_dock",
                 "comparison_dock",
                 "selection_dock",
             )

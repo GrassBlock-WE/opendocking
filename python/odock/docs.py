@@ -125,7 +125,10 @@ DOC_AUDIENCE: Dict[str, str] = {
     "docs_pharmacophore": "workbench",
     "docs_covalent": "workbench",
     "docs_fragments": "workbench",
+    "docs_panel": "science",
     "docs_protocols": "workbench",
+    "docs_standardise": "workbench",
+    "docs_service": "engineering",
     "docs_architecture": "engineering",
     "docs_release": "engineering",
     "docs_docs": "engineering",
@@ -316,7 +319,14 @@ _HR_RE = re.compile(r"^\s*(?:-{3,}|\*{3,}|_{3,})\s*$")
 _BQ_RE = re.compile(r"^\s*>\s?(.*)$")
 _TABLE_SEP_RE = re.compile(r"^\s*\|?\s*:?-{2,}:?\s*(?:\|\s*:?-{2,}:?\s*)*\|?\s*$")
 
-_CODE_SPAN_RE = re.compile(r"`([^`\n]+)`")
+#: An inline code span is delimited by a run of N backticks and closed by a run of the
+#: same length -- Markdown's rule, and it matters here: `` `` `C[C@H](F)Cl` `` `` is how
+#: a code span that *contains* backticks is written, and the single-backtick form
+#: (`re.compile(r"`([^`\n]+)`")`) paired the doubled runs wrongly, leaving the stereo
+#: SMILES outside the protected span. The link checker then read `[C@H](F)` as a link
+#: to a file named `F` and reported a dead link in `CHANGELOG.md` that is not a link at
+#: all. Group 1 is the delimiter run, group 2 the content.
+_CODE_SPAN_RE = re.compile(r"(`+)(.+?)\1")
 _IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(([^)\s]+)(?:\s+&quot;[^&]*&quot;)?\)")
 _LINK_RE = re.compile(r"\[([^\]]*)\]\(([^)\s]+)(?:\s+&quot;[^&]*&quot;)?\)")
 _BOLD_RE = re.compile(r"\*\*(.+?)\*\*", re.S)
@@ -349,7 +359,8 @@ def _inline(
     spans: List[str] = []
 
     def hold(match: re.Match) -> str:
-        spans.append(_html.escape(match.group(1), quote=False))
+        # group 1 is the backtick run that delimited the span, group 2 the content
+        spans.append(_html.escape(match.group(2), quote=False))
         return f"\x00{len(spans) - 1}\x00"
 
     text = _CODE_SPAN_RE.sub(hold, text)

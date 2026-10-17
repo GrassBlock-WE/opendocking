@@ -994,6 +994,37 @@ EN: Dict[str, str] = {
     "action.protocol_run": "Run protocol…",
     "log.protocol_saved": "protocol saved: {path}",
     "log.protocol_loaded": "protocol loaded: {path}",
+    # The campaign queue: a library of `odock screen` runs, one at a time. The
+    # campaign line counts *completed molecules* — rate and ETA are over those,
+    # not over an iteration count — and `queue.no_curve` says why there is no
+    # search trace to plot: `screen` reports per-molecule outcomes only.
+    "dock.queue": "Campaign queue",
+    "queue.caption": (
+        "One campaign at a time: the queue drives the same code the CLI does, so "
+        "its output is identical to `odock screen`."
+    ),
+    "queue.state.queued": "queued",
+    "queue.state.running": "running",
+    "queue.state.done": "done",
+    "queue.state.stopped": "stopped",
+    "queue.state.failed": "failed",
+    "queue.col.item": "item",
+    "queue.col.state": "state",
+    "queue.col.progress": "progress",
+    "queue.col.best": "best",
+    "queue.campaign": (
+        "campaign: {done} of {total} molecules · best {best} · {rate} per minute · "
+        "ETA {eta} · {failures} failed"
+    ),
+    "queue.no_curve": (
+        "no per-iteration curve: screening reports per-molecule outcomes, not a "
+        "search trace"
+    ),
+    "btn.queue_add_library": "Add library…",
+    "btn.queue_add_protocol": "Add protocol…",
+    "btn.queue_stop": "Stop",
+    "btn.queue_restart": "Restart",
+    "log.queue_item": "queue: {label} {state}",
     # Viewer annotations and undo/redo. These were written against the call
     # sites in app.py while that feature was being added, so the placeholders
     # are the ones the code passes; the wording is deliberately plain.
@@ -1939,6 +1970,29 @@ ZH: Dict[str, str] = {
     "action.protocol_run": "运行方案…",
     "log.protocol_saved": "方案已保存：{path}",
     "log.protocol_loaded": "方案已载入：{path}",
+    "dock.queue": "任务队列",
+    "queue.caption": (
+        "一次一个任务：队列使用的代码与命令行完全相同，因此输出与 `odock screen` 一致。"
+    ),
+    "queue.state.queued": "排队中",
+    "queue.state.running": "运行中",
+    "queue.state.done": "已完成",
+    "queue.state.stopped": "已停止",
+    "queue.state.failed": "失败",
+    "queue.col.item": "任务",
+    "queue.col.state": "状态",
+    "queue.col.progress": "进度",
+    "queue.col.best": "最佳",
+    "queue.campaign": (
+        "任务：{done}/{total} 个分子 · 最佳 {best} · 每分钟 {rate} · 预计 {eta} · "
+        "{failures} 个失败"
+    ),
+    "queue.no_curve": "没有逐迭代曲线：筛选只报告每个分子的结果，不提供搜索轨迹",
+    "btn.queue_add_library": "添加库…",
+    "btn.queue_add_protocol": "添加方案…",
+    "btn.queue_stop": "停止",
+    "btn.queue_restart": "重新开始",
+    "log.queue_item": "队列：{label} {state}",
     "annotation.default": "标注",
     "annotation.empty": "当前没有可标注的对象",
     "annotation.on_measurement": "测量 {index}",

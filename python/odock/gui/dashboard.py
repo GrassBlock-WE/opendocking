@@ -58,6 +58,8 @@ from .i18n import EN as _EN
 from .i18n import tr
 
 __all__ = [
+    "CAMPAIGN_RESTARTABLE",
+    "CAMPAIGN_STATES",
     "DARK",
     "DENSITIES",
     "LIGHT",
@@ -67,6 +69,10 @@ __all__ = [
     "PHASES",
     "THEMES",
     "Annotation",
+    "CampaignItem",
+    "CampaignQueue",
+    "CampaignStats",
+    "campaign_stats",
     "Command",
     "CommandPalette",
     "CommandStack",
@@ -3225,6 +3231,152 @@ def interaction_label(kind: str) -> str:
     return tr(key) if key in _EN else str(kind)
 
 
+class QueueTable(QtWidgets.QTableWidget):
+    """The queue as the user sees it: one row per campaign, state and counters.
+
+    The columns are the *facts the queue has*: the item, its state, how many
+    molecules are finished of how many are dockable, and the best affinity so far.
+    ``queue.col.progress`` shows "3/10" rather than a bar, deliberately: a bar
+    implies a known workload, and the dockable count is only known once `screen`
+    has filtered the library (it arrives with the run manifest).
+    """
+
+    COLUMNS = ("item", "state", "progress", "best")
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(0, len(self.COLUMNS), parent)
+        self.setObjectName("queueTable")
+        self.setHorizontalHeaderLabels(
+            [
+                tr("queue.col.item"),
+                tr("queue.col.state"),
+                tr("queue.col.progress"),
+                tr("queue.col.best"),
+            ]
+        )
+        self.verticalHeader().setVisible(False)
+        self.setSelectionBehavior(
+            QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self.setSelectionMode(
+            QtWidgets.QAbstractItemView.SelectionMode.SingleSelection
+        )
+        self.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        for column in range(len(self.COLUMNS)):
+            self.horizontalHeader().setSectionResizeMode(
+                column, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
+            )
+        self.horizontalHeader().setStretchLastSection(True)
+        self.setMinimumHeight(90)
+
+    # -- filling ------------------------------------------------------------
+
+    @staticmethod
+    def state_label(state: str) -> str:
+        key = f"queue.state.{state}"
+        return tr(key) if key in _EN else str(state)
+
+    def set_items(self, items: Sequence[CampaignItem]) -> None:
+        self.setRowCount(len(items))
+        for row, item in enumerate(items):
+            state = self.state_label(item.state)
+            if item.running and item.phase:
+                state = f"{state} · {item.phase}"
+            cells = (
+                item.label,
+                state,
+                f"{item.done}/{item.total}" if item.total else str(item.done),
+                "—" if item.best is None else f"{item.best:.3f}",
+            )
+            for column, text in enumerate(cells):
+                entry = self.item(row, column)
+                if entry is None:
+                    entry = QtWidgets.QTableWidgetItem("")
+                    entry.setFlags(
+                        QtCore.Qt.ItemFlag.ItemIsEnabled
+                        | QtCore.Qt.ItemFlag.ItemIsSelectable
+                    )
+                    self.setItem(row, column, entry)
+                entry.setText(str(text))
+            # The line that explains *why* a row is what it is, without adding a
+            # column nobody reads: the summary is the tooltip.
+            summary = item.summary_line()
+            for column in range(len(self.COLUMNS)):
+                entry = self.item(row, column)
+                if entry is not None:
+                    entry.setToolTip(summary or item.label)
+        self.resizeColumnsToContents()
+
+
+class CampaignResultsTable(QtWidgets.QTableWidget):
+    """The ranking as it fills: one row per completed molecule.
+
+    Fed from ``screen.read_records`` — the loader the CLI itself uses — so the
+    number in a cell is the number in the results file, not a copy kept by the
+    window. A campaign the CLI started can be watched the same way.
+    """
+
+    COLUMNS = ("rank", "name", "affinity", "status")
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(0, len(self.COLUMNS), parent)
+        self.setObjectName("campaignResults")
+        self.setHorizontalHeaderLabels(
+            [
+                # Existing column words on purpose: this ranking shows the same
+                # quantities the pose table shows (a rank, a ligand, a kcal/mol
+                # energy, a state), so it must not invent new names for them.
+                tr("col.rank"),
+                tr("col.ligand"),
+                tr("col.energy"),
+                tr("queue.col.state"),
+            ]
+        )
+        self.verticalHeader().setVisible(False)
+        self.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.horizontalHeader().setStretchLastSection(True)
+        self.setMinimumHeight(90)
+        #: The rows currently shown, best first, so a caller can map a selected
+        #: row back to the record it came from (and to that molecule's pose file).
+        self.records: List[Any] = []
+
+    def record_at(self, index: int) -> Optional[Any]:
+        """The record behind a row, or ``None`` for a stale selection."""
+        row = int(index)
+        if row < 0 or row >= len(self.records):
+            return None
+        return self.records[row]
+
+    def set_records(self, records: Sequence[Any], *, limit: int = 200) -> None:
+        """Best first, because that is the question a ranking answers."""
+        rows = sorted(
+            records,
+            key=lambda record: (
+                math.inf if getattr(record, "affinity", None) is None else float(record.affinity)
+            ),
+        )[:limit]
+        self.records = rows
+        self.setRowCount(len(rows))
+        for index, record in enumerate(rows):
+            values = (
+                str(index + 1),
+                str(getattr(record, "name", "")),
+                "—" if getattr(record, "affinity", None) is None else f"{record.affinity:.3f}",
+                str(getattr(record, "status", "")),
+            )
+            for column, text in enumerate(values):
+                entry = self.item(index, column)
+                if entry is None:
+                    entry = QtWidgets.QTableWidgetItem("")
+                    entry.setFlags(
+                        QtCore.Qt.ItemFlag.ItemIsEnabled
+                        | QtCore.Qt.ItemFlag.ItemIsSelectable
+                    )
+                    self.setItem(index, column, entry)
+                entry.setText(text)
+        self.resizeColumnsToContents()
+
+
 class RunDashboard(QtWidgets.QWidget):
     """The run monitor: phases, live read-outs and the energy trace."""
 
@@ -3665,6 +3817,351 @@ class PoseComparisonWidget(QtWidgets.QWidget):
             self.heading.setText(tr("compare.hint"))
         else:
             self.set_comparison(self._comparison)
+
+
+# ---------------------------------------------------------------------------
+# The campaign queue: a view onto runs, not a second engine
+# ---------------------------------------------------------------------------
+#
+# The model here deliberately knows nothing about docking.  A queue item names a
+# receptor, a library and (optionally) a protocol, plus an output directory; the
+# *work* is done by ``odock.screen.screen_ligands`` — the same function
+# ``odock screen`` calls — so a campaign started from the workbench and one
+# started from the CLI produce the same files with the same numbers.  What lives
+# here is the bookkeeping a GUI needs and the CLI does not: which item is running,
+# what each one did, and the campaign-level totals.
+#
+# Everything below is pure Python on purpose: it is the part that can be tested
+# without Qt, a kernel or a library, and it is the part where a mistake would be
+# reported to the user as a wrong number.
+
+#: The states an item can be in.  ``stopped`` is distinct from ``failed`` because
+#: a user who pressed Stop has not had an error, and ``done`` is the only state a
+#: restart skips (that is the CLI's resume rule, in the small).
+CAMPAIGN_STATES = ("queued", "running", "done", "stopped", "failed")
+
+#: States a restart re-queues.  A finished item is left alone: re-running it would
+#: either duplicate rows or be a no-op, and "Restart" must never look like it
+#: threw work away.
+CAMPAIGN_RESTARTABLE = ("stopped", "failed", "running")
+
+
+@dataclass
+class CampaignItem:
+    """One queued campaign: a receptor, a library, optionally a protocol."""
+
+    label: str
+    outdir: Path
+    receptor: Optional[Path] = None
+    library: Optional[Path] = None
+    #: The protocol that supplies the settings (``None`` for "the panel's
+    #: settings", which is what the queue turns into a ScreenConfig directly).
+    protocol: Optional[Any] = None
+    state: str = "queued"
+    phase: str = ""
+    done: int = 0
+    total: int = 0
+    failures: int = 0
+    best: Optional[float] = None
+    error: str = ""
+    started: float = 0.0
+    finished: float = 0.0
+
+    def __post_init__(self) -> None:
+        self.outdir = Path(self.outdir)
+        if self.state not in CAMPAIGN_STATES:
+            raise ValueError(f"unknown campaign state {self.state!r}")
+        if self.receptor is not None:
+            self.receptor = Path(self.receptor)
+        if self.library is not None:
+            self.library = Path(self.library)
+
+    # -- derived facts -----------------------------------------------------
+
+    @property
+    def running(self) -> bool:
+        return self.state == "running"
+
+    @property
+    def finished_state(self) -> bool:
+        return self.state in ("done", "stopped", "failed")
+
+    def fraction(self) -> float:
+        """Progress in 0..1 from **real** counters, or 0 when nothing is known."""
+        if self.total <= 0:
+            return 0.0
+        return max(0.0, min(1.0, self.done / float(self.total)))
+
+    def elapsed(self) -> float:
+        if not self.started:
+            return 0.0
+        end = self.finished or time.monotonic()
+        return max(0.0, end - self.started)
+
+    def results_path(self):
+        """The results file this item writes, in ``screen``'s own convention."""
+        return self.outdir / "results.jsonl"
+
+    def protocol_hash(self) -> str:
+        if self.protocol is None:
+            return ""
+        try:
+            return self.protocol.hash()
+        except Exception:  # pragma: no cover - a protocol always hashes
+            return ""
+
+    def summary_line(self) -> str:
+        """One line a user can read in the dock, from counters that exist."""
+        if self.state == "failed" and self.error:
+            return self.error
+        parts = []
+        if self.total:
+            parts.append(f"{self.done}/{self.total}")
+        if self.failures:
+            parts.append(f"{self.failures} failed")
+        if self.best is not None:
+            parts.append(f"best {self.best:.3f}")
+        if self.finished_state and self.elapsed():
+            parts.append(f"{self.elapsed():.0f} s")
+        return " · ".join(parts)
+
+
+@dataclass
+class CampaignStats:
+    """Campaign-level numbers, and whether each of them is knowable yet.
+
+    Deliberately *not* a curve.  ``screen`` reports one outcome per molecule as it
+    finishes and keeps no search trace, so the only honest time series here is
+    the cumulative one — and even that is a step function over completed rows, not
+    a smooth fit.  ``curve`` says so in words so a caller cannot present it as
+    anything else.
+    """
+
+    items: int = 0
+    completed_items: int = 0
+    running: Optional[str] = None
+    done: int = 0
+    total: int = 0
+    failures: int = 0
+    best: Optional[float] = None
+    elapsed: float = 0.0
+
+    @property
+    def remaining(self) -> int:
+        return max(0, self.total - self.done)
+
+    def rate_per_minute(self) -> Optional[float]:
+        """Molecules per minute, from *measured* rows only.
+
+        ``None`` until at least one molecule has finished: an estimate extrapolated
+        from zero rows would be a guess dressed as a measurement, and this panel
+        already has a note about not doing that.
+        """
+        if self.done <= 0 or self.elapsed <= 0:
+            return None
+        return self.done / (self.elapsed / 60.0)
+
+    def eta_seconds(self) -> Optional[float]:
+        rate = self.rate_per_minute()
+        if rate is None or rate <= 0:
+            return None
+        return self.remaining / (rate / 60.0)
+
+    def eta_text(self) -> str:
+        seconds = self.eta_seconds()
+        if seconds is None:
+            return "—"
+        return format_duration(seconds)
+
+    def rate_text(self) -> str:
+        rate = self.rate_per_minute()
+        return "—" if rate is None else f"{rate:.1f}"
+
+    def best_text(self) -> str:
+        return "—" if self.best is None else f"{self.best:.3f}"
+
+    @property
+    def curve(self) -> str:
+        return (
+            "no per-iteration curve: screening reports per-molecule outcomes, "
+            "not a search trace"
+        )
+
+
+def campaign_stats(items: Sequence[CampaignItem]) -> CampaignStats:
+    """Totals over every item: what the campaign panel shows."""
+    stats = CampaignStats(items=len(items))
+    for item in items:
+        if item.state == "done":
+            stats.completed_items += 1
+        if item.running:
+            stats.running = item.label
+        stats.done += int(item.done)
+        stats.total += int(item.total)
+        stats.failures += int(item.failures)
+        stats.elapsed += item.elapsed()
+        if item.best is not None:
+            stats.best = item.best if stats.best is None else min(stats.best, item.best)
+    return stats
+
+
+class CampaignQueue:
+    """The queue itself: items in order, one running at a time.
+
+    ``next_item``/``mark_*`` are the whole state machine.  It is kept apart from
+    the window so the ordering rules ("one at a time", "a restart skips what is
+    done", "a failure is a state, not a stop") are testable without a Qt event
+    loop, which is where they would otherwise be discovered by a user at scale.
+    """
+
+    def __init__(self) -> None:
+        self.items: List[CampaignItem] = []
+        self._current: Optional[CampaignItem] = None
+
+    # -- container ---------------------------------------------------------
+
+    def __len__(self) -> int:
+        return len(self.items)
+
+    def __iter__(self):
+        return iter(self.items)
+
+    def __getitem__(self, index) -> CampaignItem:
+        return self.items[index]
+
+    def add(self, item: CampaignItem) -> CampaignItem:
+        self.items.append(item)
+        return item
+
+    def remove(self, item: CampaignItem) -> bool:
+        """Drop an item that is not running (a running one is stopped first)."""
+        if item.running:
+            return False
+        if item in self.items:
+            self.items.remove(item)
+            return True
+        return False
+
+    def clear(self) -> None:
+        self.items = []
+        self._current = None
+
+    # -- the state machine -------------------------------------------------
+
+    @property
+    def current(self) -> Optional[CampaignItem]:
+        return self._current if self._current is not None and self._current.running else None
+
+    @property
+    def running(self) -> bool:
+        return self.current is not None
+
+    def next_item(self) -> Optional[CampaignItem]:
+        """Mark and return the next queued item, or ``None`` when there is none."""
+        if self.running:
+            return None
+        for item in self.items:
+            if item.state == "queued":
+                item.state = "running"
+                item.started = time.monotonic()
+                item.finished = 0.0
+                item.error = ""
+                item.phase = ""
+                self._current = item
+                return item
+        return None
+
+    def begin(self, item: CampaignItem) -> CampaignItem:
+        """Record that ``item`` has started running (idempotent)."""
+        item.state = "running"
+        if not item.started:
+            item.started = time.monotonic()
+        item.finished = 0.0
+        item.error = ""
+        self._current = item
+        return item
+
+    def update_progress(
+        self,
+        item: CampaignItem,
+        *,
+        done: int,
+        total: Optional[int] = None,
+        failures: int = 0,
+        best: Optional[float] = None,
+        phase: Optional[str] = None,
+    ) -> CampaignItem:
+        """Take the counters from the results file (they are the truth here)."""
+        item.done = max(0, int(done))
+        if total is not None:
+            item.total = max(0, int(total))
+        item.failures = max(0, int(failures))
+        if best is not None:
+            item.best = float(best)
+        if phase is not None:
+            item.phase = str(phase)
+        return item
+
+    def finish(self, item: CampaignItem, *, state: str = "done", error: str = "") -> CampaignItem:
+        """Close an item: ``done`` when it ran, ``stopped``/``failed`` otherwise."""
+        if state not in CAMPAIGN_STATES:
+            raise ValueError(f"unknown campaign state {state!r}")
+        item.state = state
+        item.finished = time.monotonic()
+        if error:
+            item.error = str(error)
+        if item is self._current:
+            self._current = None
+        return item
+
+    def stop_current(self) -> Optional[CampaignItem]:
+        """Ask the running item to stop. Returns it, or ``None`` if idle.
+
+        The *caller* owns the mechanism (the kernel cancel token, a process
+        terminate, or screen's own interrupt path); this only records the intent so
+        a stopped item is not mistaken for a failed one.
+        """
+        item = self.current
+        return item
+
+    def restart(self) -> List[CampaignItem]:
+        """Re-queue everything that did not finish; leave finished items alone.
+
+        This is the queue's version of the CLI's resume: a ``done`` item is
+        skipped (its rows are on disk and screen would skip them anyway), while a
+        ``stopped``/``failed`` one becomes ``queued`` again so its *unfinished*
+        molecules are docked on the next pass. Nothing is deleted — deleting a
+        campaign is a separate, explicit act.
+        """
+        requeued: List[CampaignItem] = []
+        for item in self.items:
+            if item.state in CAMPAIGN_RESTARTABLE:
+                item.state = "queued"
+                item.phase = ""
+                item.finished = 0.0
+                # The counters stay: they describe what is on disk, and the next
+                # pass will refresh them from the results file before docking.
+                requeued.append(item)
+        self._current = None
+        return requeued
+
+    # -- reporting ---------------------------------------------------------
+
+    def counts(self) -> Dict[str, int]:
+        out = {state: 0 for state in CAMPAIGN_STATES}
+        for item in self.items:
+            out[item.state] = out.get(item.state, 0) + 1
+        return out
+
+    def stats(self) -> CampaignStats:
+        return campaign_stats(self.items)
+
+    def failure_count(self) -> int:
+        """Molecule-level failures across every item (a dock that did not work)."""
+        return sum(int(item.failures) for item in self.items)
+
+    def failed_items(self) -> List[CampaignItem]:
+        return [item for item in self.items if item.state == "failed"]
 
 
 # ---------------------------------------------------------------------------

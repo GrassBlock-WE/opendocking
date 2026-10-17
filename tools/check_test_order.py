@@ -40,6 +40,14 @@ ROOT = Path(__file__).resolve().parent.parent
 TESTS = ROOT / "tests"
 
 
+# The output streams are UTF-8 at the boundary: this script prints an em dash and
+# would raise UnicodeEncodeError on a GBK pipe (a redirected report is a pipe), which
+# would make a *release gate* fail for a plumbing reason rather than a real one.
+from _tool import use_utf8_streams  # noqa: E402
+
+use_utf8_streams()
+
+
 def test_files() -> list[Path]:
     """Every collected test file, in the order pytest collects them (sorted paths)."""
     return sorted(path for path in TESTS.glob("test_*.py"))

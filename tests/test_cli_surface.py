@@ -45,6 +45,7 @@ EXPECTED_SUBCOMMANDS = frozenset(
         "info",
         "interactions",
         "lbvs",
+        "panel",
         "pharmacophore",
         "pocket",
         "pocket-score",
@@ -60,8 +61,10 @@ EXPECTED_SUBCOMMANDS = frozenset(
         "screen",
         "similar",
         "split",
+        "standardise",
         "study",
         "triage",
+        "service",
         "tutorial",
     }
 )

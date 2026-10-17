@@ -38,6 +38,14 @@ import zipfile
 from pathlib import Path
 from typing import Callable, Iterable, List, Sequence, Tuple
 
+
+# The output streams are UTF-8 at the boundary: this script prints an em dash and
+# would raise UnicodeEncodeError on a GBK pipe (a redirected report is a pipe), which
+# would make a *release gate* fail for a plumbing reason rather than a real one.
+from _tool import use_utf8_streams  # noqa: E402
+
+use_utf8_streams()
+
 # ---------------------------------------------------------------------------
 # What must be present
 # ---------------------------------------------------------------------------

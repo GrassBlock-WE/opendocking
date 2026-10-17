@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import math
 import os
+import pathlib
 import subprocess
 import sys
 from pathlib import Path
@@ -189,6 +190,52 @@ def test_write_pose_pdb_returns_the_path(tmp_path, state):
 # ---------------------------------------------------------------------------
 # PyMOL
 # ---------------------------------------------------------------------------
+
+
+def test_the_exported_bundle_carries_the_cavities_to_disk(tmp_path):
+    """The seam the workbench actually uses: bundle -> the two scripts on disk.
+
+    The script builders were tested directly; this goes through
+    :func:`export_bundle`, which the workbench's export action calls, so a field
+    that survives the builders but is dropped by the bundle would be caught here.
+    """
+    state = interop.SceneState(
+        receptor=[atom("C", 0.0, 0.0, 0.0, res_name="ALA", res_id=1)],
+        cavities=[
+            {
+                "label": "P1",
+                "kind": "open",
+                "channel": False,
+                "point": (1.5, 2.5, 3.5),
+                "radius": 3.28,
+                "residues": ["A/GLY38", "A/ASP189"],
+                "volume": 310.8,
+            }
+        ],
+        cavity_criterion={
+            "min_directions": 5,
+            "enclosure_radius": 10.0,
+            "probe": 1.4,
+            "spacing": 0.7,
+            "kinds": {"open": 1},
+        },
+    )
+    manifest = interop.export_bundle(tmp_path, state, stem="scene")
+    assert set(manifest) >= {"receptor", "ligand", "pose", "pymol", "chimerax"}
+    pymol = pathlib.Path(manifest["pymol"]).read_text(encoding="utf-8")
+    chimerax = pathlib.Path(manifest["chimerax"]).read_text(encoding="utf-8")
+    for text in (pymol, chimerax):
+        assert "geometric classification, not a druggability score" in text
+        assert "five" in text or "5 of six" in text
+        assert "P1 open" in text and "3.28" in text
+    assert "pseudoatom cavity_1, pos=[1.500, 2.500, 3.500]" in pymol
+    assert "select neck_1, A/38+A/189" in pymol
+    assert "marker #801 position 1.500,2.500,3.500 radius 3.280" in chimerax
+    # Every cavity field survives the bundle's SceneState copy: the bundle builds
+    # a new state from ``__dict__``, so a field added later must not be dropped.
+    copy = interop.SceneState(**{**state.__dict__})
+    assert list(copy.cavities) == list(state.cavities)
+    assert dict(copy.cavity_criterion) == dict(state.cavity_criterion)
 
 
 def test_a_cavity_reaches_pymol_as_a_sphere_of_its_measured_radius():

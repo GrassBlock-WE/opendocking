@@ -2234,13 +2234,17 @@ class _Runner:
     the slowest molecule in flight.
     """
 
-    def __init__(self, jobs: int) -> None:
+    def __init__(self, jobs: int, stop_event: Optional[threading.Event] = None) -> None:
         self.jobs = max(1, int(jobs))
         self.pool = ThreadPoolExecutor(max_workers=self.jobs, thread_name_prefix="odock-screen")
         self._lock = threading.Lock()
         self._engines: Dict[int, Any] = {}
         self._counter = 0
-        self.stopping = threading.Event()
+        # A caller may supply the event that *is* the stop signal, so a GUI or a
+        # service can ask for a cancellation without a second cancellation path:
+        # `stop()` remains the only way to stop, and this only decides who owns the
+        # flag it sets.  `None` keeps the historical behaviour exactly.
+        self.stopping = stop_event if stop_event is not None else threading.Event()
 
     def register(self, engine: Any) -> int:
         with self._lock:
@@ -2434,8 +2438,28 @@ def probe_cost(
 # ---------------------------------------------------------------------------
 
 
-def screen_ligands(config: ScreenConfig) -> ScreenSummary:
+def screen_ligands(
+    config: ScreenConfig,
+    *,
+    stop: Optional[threading.Event] = None,
+    on_record: Optional[Callable[["LigandRecord"], None]] = None,
+) -> ScreenSummary:
     """Run one screening campaign and return its :class:`ScreenSummary`.
+
+    Two optional seams let a caller drive a campaign without duplicating this
+    function's submit/wait loop (which a GUI queue and a service layer both needed,
+    and neither was allowed to copy):
+
+    Args:
+        stop: an event that, when set, asks the campaign to stop. It is the *same*
+            event :meth:`_Runner.stop` sets, so ``_Runner.stop()`` stays the one
+            cancellation path -- the kernel notices at its next Monte-Carlo step and
+            returns the poses it has, and the rows already written stay on disk.
+            With ``None`` the campaign gets a private event, exactly as before.
+        on_record: called once per finished molecule, immediately after its row is
+            written and flushed, with the record. It is a *notification*, not a hook
+            into the pipeline: raising from it would abort the campaign, and readers
+            that need the durable truth should use :func:`read_records`.
 
     The order of operations is the order a user can interrupt safely:
 
@@ -2562,7 +2586,9 @@ def screen_ligands(config: ScreenConfig) -> ScreenSummary:
     )
     refresh()
 
-    runner = _Runner(_job_count(config.jobs))
+    # `stop` is the caller's event when they gave one, so `_Runner.stop()` remains
+    # the single cancellation path (see screen_ligands' docstring).
+    runner = _Runner(_job_count(config.jobs), stop_event=stop)
     try:
         with _ResultWriter(
             config.results_path, config.fmt, config.checkpoint_every, on_checkpoint=refresh
@@ -2583,6 +2609,7 @@ def screen_ligands(config: ScreenConfig) -> ScreenSummary:
                     members=pending,
                     done_before=len(dockable) - len(pending),
                     base_seed=seed,
+                    on_record=on_record,
                 )
                 if finished is None:
                     summary.interrupted = True
@@ -2678,6 +2705,7 @@ def _screen_receptor(
     members: Sequence[LibraryMember],
     done_before: int,
     base_seed: int,
+    on_record: Optional[Callable[["LigandRecord"], None]] = None,
 ) -> Optional[int]:
     """Dock every pending molecule of one receptor; ``None`` when interrupted."""
     total = len(members) + done_before
@@ -2736,6 +2764,11 @@ def _screen_receptor(
             )
             writer.write(record)
             summary.records.append(record)
+            # Notify *after* the flush, so a caller that reacts to this cannot see a
+            # molecule it could not read back.  It is a notification, not a hook: a
+            # reader that needs the durable truth uses read_records().
+            if on_record is not None:
+                on_record(record)
             summary.completed_this_run += 1
             done_here += 1
             if record.status == "ok":

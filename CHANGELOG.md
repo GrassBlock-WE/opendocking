@@ -4,6 +4,107 @@ All notable changes to OpenDocking are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.3.2 — 2026-10-17
+
+**The published source tree could not be built, and all eight CI jobs were red.**
+That is the headline, and it is the reason this patch exists.
+
+### Fixed
+
+* **The workspace did not resolve.** `crates/dock-py/Cargo.toml` carried
+  `dock-core = { version = "0.2.1", path = "../dock-core" }`. A version requirement on
+  an *internal* crate means `^0.2.1` — `>=0.2.1, <0.3.0` — so the moment the workspace
+  version crossed 0.3.0, `cargo metadata` rejected the whole thing:
+
+  ```
+  error: failed to select a version for the requirement `dock-core = "^0.2.1"`
+  candidate versions found which didn't match: 0.3.1
+  ```
+
+  Everything downstream failed with it: `maturin develop`, `pip install` from the
+  sdist, and **all eight CI jobs** (Rust and Python 3.9/3.10/3.12 across ubuntu and
+  windows, plus Wheels and Benchmark) on **both the 0.3.0 and 0.3.1 commits**. The
+  local Python suite stayed green throughout, because it runs against a *pre-built*
+  extension — which is exactly why no release gate saw it. The dependency is now
+  path-only (`dock-core` is never published to a registry, so the path *is* the
+  requirement), and a **`cargo metadata` gate** runs in 30 ms before the expensive
+  ones, because a release that cannot be built from its own sources is not a release.
+
+* **The output boundary was wrong for every command on a non-UTF-8 console.** `odock`
+  prints `Å`, `→`, `—`; on a Chinese Windows the console codepage is GBK and a
+  *redirected* stdout is a pipe, so Python encoded with GBK. `Å` (U+00C5) is not in
+  GBK, so the command raised `UnicodeEncodeError` — and a parent capturing with
+  `encoding="utf-8"` saw **`returncode == 0` and `stdout is None` simultaneously**,
+  because failing to decode leaves the attribute unset. That is how the documentation
+  test failed for weeks while the same command "worked" by hand. Four modules with
+  their own `__main__` block (`tutorial`, `benchmark`, `panel`, `standardise`) bypassed
+  `cli._use_utf8_streams()` and now route through it, as do the two release-gate
+  scripts `inspect_dist.py` and `check_test_order.py` — a gate that dies of its own
+  redirected report fails for a plumbing reason, which is the worst kind. Pinned by
+  `tests/test_output_encoding.py`, which forces `PYTHONIOENCODING=gbk` on the child:
+  neither CI (a UTF-8 Linux runner) nor a developer shell (usually already set) can see
+  this class, so the test has to create it.
+
+* **The documentation gate read chemistry as markup.** A stereo SMILES written as
+  `` `C[C@H](F)Cl` `` contains `[C@H](F)`, which the link checker matched as a link to a
+  file named `F`, so `docs/STANDARDISE.md` reported **two dead links that are not
+  links**. Fenced blocks and inline code spans are now stripped before scanning. The
+  check stayed sharp rather than being loosened: it still catches a real dead link and
+  still checks **117** local links.
+
+* **The release gate's quick mode could not see a red slow test.** `release check
+  --quick` runs `pytest -m "not slow"`, which **deselects** rather than skips — so a
+  failing slow test appeared in neither the pass/fail line nor the skip count, which is
+  how 0.3.0 shipped six failing tests. `deselected` is now parsed, a quick run declares
+  how many tests it never executed, and the full run enforces `EXPECTED_SKIPS` (failing
+  when the count moves in *either* direction) plus a 20 s collapse floor, because a
+  suite that never ran finishes fast.
+
+* **`odock tutorial` and `odock docs check` crashed** with `PermissionError:
+  [WinError 5]` on a stale scratch directory carrying the read-only attribute. `os.walk`
+  yields only a directory's *children*, so an empty read-only directory was missed —
+  twice: by the original code and by the first attempt at the fix. `python/odock/_fs.py`
+  now holds the one implementation (clear the flag on the root **and** every entry, then
+  verify the tree is gone) used by `tutorial`, `docs`, `release` and `screen`.
+
+### Added
+
+* **`odock standardise`** — the ordered, switchable recipe that decides whether a
+  screening run means anything: parse/refuse, repair, desalt, charge, stereochemistry,
+  dedupe (canonical *and* tautomer-insensitive), property filters. The deliverable is an
+  **audit**: one row per input record with `in == kept + rejected + merged` asserted
+  inside the function (a report that cheats the invariant raises), every removed
+  fragment named with its SMILES, heavy atoms and charge, and a recipe hash in the
+  header. Determinism is measured: two runs give byte-identical output, and the bundled
+  library is left untouched at 17/17 — with the honest line beside it that **7 records
+  carry the charges pH 7.4 implies and 10 do not (recorded, not changed)**.
+* **`odock panel`** — profile ligands across receptors, with the box sizes reported
+  beside the affinities precisely so a "selective" ligand cannot be one that merely had
+  a smaller box elsewhere.
+* **`odock service`** — a typed, versioned contract (`odock-service`, schema 1) with an
+  `http.server` adapter and no framework dependency. Security is enforced in the service
+  rather than only in the adapter: loopback `Host` check, a per-request token,
+  cross-origin and `Origin: null` refused, and a non-loopback bind requires an explicit
+  opt-in *and* a token. The doc says plainly that it is not a hardened multi-tenant
+  server.
+* **`screen_ligands(config, *, stop=None, on_record=None)`** and
+  `_Runner(jobs, stop_event=None)`: a caller-owned cancellation event, so
+  `_Runner.stop()` remains the **single** cancellation path — the kernel notices at its
+  next Monte-Carlo step, the rows already written stay on disk, and the summary comes
+  back interrupted. Two workstreams independently needed it; neither was allowed to
+  duplicate the submit/wait loop, and neither had to.
+* **`odock covalent`** — warheads, reactive geometry and adducts, with continuity
+  *measured* (halving the sample spacing halves the largest step: 2.00 distance, 1.97
+  angle) rather than asserted.
+
+### The CLI is now 40 subcommands
+
+`benchmark`, `box`, `cluster`, `conformers`, `covalent`, `decoys`, `diagram`, `diverse`,
+`dock`, `docs`, `doctor`, `endpoint`, `ensemble`, `export`, `fetch`, `filter`, `gui`,
+`info`, `interactions`, `lbvs`, `panel`, `pharmacophore`, `pocket`, `pocket-score`,
+`prepare`, `project`, `protocol`, `release`, `report`, `report-html`, `screen`, `score`,
+`service`, `similar`, `split`, `standardise`, `study`, `triage`, `tutorial`.
+
 ## 0.3.1 — 2026-10-17
 
 A patch release, and most of it is defects found by running the suite rather than

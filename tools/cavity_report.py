@@ -19,6 +19,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "python"))
 
+from _tool import use_utf8_streams  # noqa: E402
+
+use_utf8_streams()
+
 import numpy as np  # noqa: E402
 
 from odock import cavity  # noqa: E402

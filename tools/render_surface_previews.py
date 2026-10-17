@@ -21,6 +21,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "python"))
 
+from _tool import use_utf8_streams  # noqa: E402
+
+use_utf8_streams()
+
 # Headless Qt, but with the real font directory: without it every label in the
 # legend and the scale bar renders as tofu boxes.
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")

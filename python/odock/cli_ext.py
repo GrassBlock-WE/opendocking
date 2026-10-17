@@ -47,8 +47,11 @@ _REGISTRARS: tuple[tuple[str, str], ...] = (
     (".release", "add_release_parser"),         # release prepare|stage|check|notes|publish
     (".docs", "add_docs_parser"),               # docs build|check|serve
     (".covalent", "add_covalent_parser"),       # covalent: warheads, reactive geometry, adducts
+    (".panel", "add_panel_parser"),            # panel: profile ligands across receptors
     (".endpoint", "add_endpoint_parser"),       # endpoint: MM-GBSA-style end-point rescoring
     (".protocol", "add_protocol_parser"),       # protocol list|show|validate|diff|hash|save|run
+    (".standardise", "add_standardise_parser"),  # standardise: salts, charges, duplicates, stereo
+    (".service", "add_service_parser"),      # service serve|submit|status|results|cancel|list
     (".tutorial", "add_tutorial_parser"),       # tutorial: the whole toolchain on the bundled data
 )
 

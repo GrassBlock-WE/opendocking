@@ -77,6 +77,22 @@ PUBLISHED = [
 
 _LINK = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
 
+#: Fenced blocks and inline code spans, removed before any link is looked for.
+#:
+#: Without this the checker reads chemistry as markup: a stereo SMILES written as
+#: ``C[C@H](F)Cl`` inside backticks contains ``[C@H](F)``, which `_LINK` matches as a
+#: link to ``F`` -- so `docs/STANDARDISE.md` reported **two dead links** to a file
+#: called ``F`` that do not exist as links at all.  A documentation gate that fires
+#: on a valid SMILES is a gate people learn to work around, and this project's docs
+#: are mostly chemistry.
+_FENCE = re.compile(r"```.*?```", re.S)
+_CODE_SPAN = re.compile(r"`[^`\n]*`")
+
+
+def _without_code(text: str) -> str:
+    """The prose of a markdown document, with fenced blocks and code spans gone."""
+    return _CODE_SPAN.sub("``", _FENCE.sub("", text))
+
 
 def _relative(path: Path) -> str:
     return str(path.relative_to(ROOT)).replace(os.sep, "/")
@@ -94,7 +110,7 @@ def test_every_local_documentation_link_resolves():
     broken = []
     checked = 0
     for path in PUBLISHED:
-        text = path.read_text(encoding="utf-8")
+        text = _without_code(path.read_text(encoding="utf-8"))
         for target in _LINK.findall(text):
             if target.startswith(("http://", "https://", "mailto:")):
                 continue
