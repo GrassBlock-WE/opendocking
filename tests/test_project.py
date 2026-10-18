@@ -1594,3 +1594,22 @@ def test_cli_project_index_writes_a_page(tmp_path, capsys):
     assert written[0].path.name in document
     assert htmlreport.find_external_references(document) == []
     assert project.find_absolute_paths(document) == []
+
+def test_the_foreign_path_tail_is_split_on_both_separators():
+    """The rule has to hold *on this platform*, which is the only kind of test that can
+    catch it.
+
+    `0.3.16` fixed `portable_path`'s foreign-path branch with `path.name`, which splits only
+    on the running platform's separator: on POSIX `Path(r"C:\\a\\b\\python.exe").name` is the
+    whole string, so the ubuntu legs returned the raw Windows path unchanged and
+    `test_no_absolute_path_reaches_the_report` started failing. The existing tests asserted
+    the *outcome* on CI and passed here, where a Windows path is native.
+
+    This one asserts the **helper**, with a Windows path, on whatever platform is running.
+    """
+    foreign = "C:" + chr(92) + "Users" + chr(92) + "someone" + chr(92) + ".venv" + chr(92) + "python.exe"
+    assert project._final_component(foreign) == "python.exe"
+    assert project._final_component("/opt/venv/bin/python") == "python"
+    assert project._final_component("D:/data/x/y.pdbqt") == "y.pdbqt"
+    assert project._final_component(foreign.rstrip(chr(92))) == "python.exe"
+    assert project._final_component("") == ""

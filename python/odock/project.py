@@ -306,7 +306,7 @@ def portable_path(value: PathLike, *, base: Optional[PathLike] = None,
     #
     # Nothing about a foreign path is resolvable, so it goes straight to the last rule.
     if not path.is_absolute():
-        return path.name or _as_posix(raw)
+        return _final_component(raw) or _as_posix(raw)
 
     # `base` and the working directory first: a path inside the checkout is best
     # reported relative to it, and only then does the home directory become a
@@ -333,6 +333,21 @@ def portable_path(value: PathLike, *, base: Optional[PathLike] = None,
             return prefix.rstrip("/") or "."
         return prefix + text
     return path.name or _as_posix(raw)
+
+
+def _final_component(raw: str) -> str:
+    """The last path component, splitting on **both** separators.
+
+    ``Path.name`` splits only on the *running* platform's separator, so on POSIX
+    ``Path(r"C:\\Users\\someone\\python.exe").name`` is the whole string.  The first
+    attempt at the foreign-path rule used ``path.name`` and therefore returned the raw
+    Windows path unchanged on the ubuntu CI legs -- the very defect it was meant to fix,
+    reintroduced one line lower.
+    """
+    stripped = raw.rstrip("\\/")
+    if not stripped:
+        return ""
+    return re.split(r"[\\/]", stripped)[-1]
 
 
 def _plausible_absolute_path(token: str, *, before: str = "") -> bool:

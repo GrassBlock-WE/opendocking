@@ -4,6 +4,59 @@ All notable changes to OpenDocking are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.4.1 — 2026-10-18
+
+### Fixed
+
+* **`0.3.16`'s fix for the foreign-path rule was itself correct only on Windows.** It used
+  `path.name`, which splits **only on the running platform's separator**, so on POSIX
+
+  ```python
+  Path(r"C:\Users\someone\.venv\Scripts\python.exe").name
+      == r"C:\Users\someone\.venv\Scripts\python.exe"      # the whole string
+  ```
+
+  — the ubuntu legs therefore returned the raw Windows path unchanged, and the very defect
+  being fixed reappeared one line lower. Worse, it **broke a test that had been passing**:
+  `test_no_absolute_path_reaches_the_report` builds `C:\Users\someone\.venv` and asserts
+  none of it reaches the report, which stopped being true.
+
+  The final component is now split on **both** separators, in a helper that does not consult
+  the running platform at all:
+
+  ```python
+  def _final_component(raw: str) -> str:
+      stripped = raw.rstrip("\\/")
+      return re.split(r"[\\/]", stripped)[-1] if stripped else ""
+  ```
+
+  Verified with the exact CI inputs: `C:\...\python.exe` → `python.exe`,
+  `/opt/venv/bin/python` → `python`, `D:/data/x/y.pdbqt` → `y.pdbqt`.
+
+* **A test now pins the helper on whatever platform is running.** The existing tests asserted
+  the *outcome* and therefore passed here, where a Windows path is native and takes the other
+  branch entirely. `test_the_foreign_path_tail_is_split_on_both_separators` asserts
+  `_final_component` directly with a Windows path, so this class of bug fails locally instead
+  of only on the ubuntu legs.
+
+  That is the point worth recording: **a test that only fails on the platform you are not
+  using cannot be verified by running the suite.** Either it asserts the helper, or it has to
+  be run on that platform.
+
+### Verified
+
+`test_project` + `test_htmlreport` + `test_protocol` → **121 passed**; full suite in a clean
+environment → **2208 passed, 1 skipped, 0 failed**.
+
+### Still open
+
+The CI Python legs still fail the same clusters, now with this fix in place: the four
+path-portability tests and `test_no_absolute_path_reaches_the_report` should clear; the
+remaining are three real-docking tests (`ensemble cross_rescoring`, `screen campaign`,
+`service submit_poll_fetch`), three chemistry/statistics tests
+(`test_read_sdf_skips_a_broken_record`, `covalent perceive_nucleophiles`,
+`standardise clean_library`) and the Linux `reproducible_project`.
+
 ## 0.4.0 — 2026-10-18
 
 A **minor** release, because the seventeen patch releases since 0.3.0 are not seventeen
