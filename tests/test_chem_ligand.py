@@ -940,3 +940,42 @@ def test_a_record_that_parses_to_no_atoms_is_a_problem_not_a_molecule(tmp_path, 
     assert [m.GetProp("_Name") for m in mols] == ["good"]
     assert any("0 atoms" in note for note in notes), notes
     assert any(ligand_module._is_problem_note(note) for note in notes)
+
+def test_a_document_whose_supplier_reports_no_records_is_still_read(tmp_path, monkeypatch):
+    """`len(SDMolSupplier)` is RDKit's opinion, and it can disagree with the file.
+
+    A document carrying one junk block can make `len()` zero on some RDKit builds. The old
+    loop ran `for index in range(len(supplier))`, so it never executed: no molecule was read,
+    no note was recorded, no warning was emitted, and the CI legs reported
+    "DID NOT WARN. Emitted warnings: []" while the same test passed on the machine it was
+    written on.
+
+    The count now comes from the `$$$$` delimiters, which is what the document says. This
+    test forces the disagreeing case, because no local build reaches it.
+    """
+    from rdkit import Chem
+    from odock.chem import ligand as ligand_module
+
+    good = Chem.MolFromSmiles("CCO")
+    good.SetProp("_Name", "good")
+
+    class _Stubborn:
+        """`len()` says zero; indexing still works for the records that exist."""
+
+        def __len__(self):
+            return 0
+
+        def __getitem__(self, index):
+            if index == 0:
+                return good
+            raise IndexError(index)
+
+    monkeypatch.setattr(
+        ligand_module.Chem, "SDMolSupplier", lambda *a, **k: _Stubborn(), raising=True
+    )
+    path = tmp_path / "two_blocks.sdf"
+    path.write_text("first\n$$$$\nsecond\n$$$$\n", encoding="utf-8")
+    mols, notes = ligand_module._collect(str(path), "sdf")
+    assert [m.GetProp("_Name") for m in mols] == ["good"], mols
+    # The second block could not be parsed, and that has to be a *problem* note.
+    assert any(ligand_module._is_problem_note(note) for note in notes), notes

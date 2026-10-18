@@ -423,11 +423,25 @@ def _read_file(path: Path, kind: str) -> Tuple[List[object], List[str]]:
 
     if kind == "sdf":
         supplier = Chem.SDMolSupplier(str(path), removeHs=False, sanitize=True)
+        # Count the records by the **delimiter**, not by `len(supplier)`. `len()` is
+        # RDKit's opinion of how many records the document holds, and a document carrying
+        # one junk block can make it zero -- the loop then never runs, no note is recorded,
+        # no warning is emitted, and `test_read_sdf_skips_a_broken_record_with_a_warning`
+        # fails on CI with "DID NOT WARN. Emitted warnings: []" while passing on the machine
+        # it was written on. The `$$$$` markers are what the document says.
+        #
+        # This is the same defect that was fixed in `standardise.py` (0.3.12); there were
+        # two record counters and only one was changed.
         try:
-            count = len(supplier)
-        except Exception as exc:  # pragma: no cover - defensive
-            count = 0
-            notes.append(f"could not count the SDF records: {exc}")
+            blocks = [
+                block
+                for block in path.read_text(encoding="utf-8", errors="replace").split("$$$$")
+                if block.strip()
+            ]
+        except OSError as exc:  # pragma: no cover - defensive
+            blocks = []
+            notes.append(f"could not read the SDF text: {exc}")
+        count = len(blocks) or len(supplier)
         blocks: Optional[List[str]] = None
         for index in range(count):
             try:

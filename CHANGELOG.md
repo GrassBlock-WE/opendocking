@@ -4,6 +4,49 @@ All notable changes to OpenDocking are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.3.17 — 2026-10-18
+
+### Fixed
+
+* **The SDF record count was still taken from `len(SDMolSupplier)` in `chem/ligand.py`.**
+  `0.3.12` changed that in `standardise.py` and stopped there — there were **two record
+  counters and only one was fixed**. A document carrying one junk block can make `len()`
+  zero on some RDKit builds, and the loop
+
+  ```python
+  for index in range(len(supplier)):
+  ```
+
+  then never executes: nothing is read, no note is recorded, no warning is emitted. That is
+  exactly how `test_read_sdf_skips_a_broken_record_with_a_warning` failed on both CI
+  platforms with
+
+  ```
+  Failed: DID NOT WARN. No warnings of type (<class 'UserWarning'>,) were emitted.
+  Emitted warnings: [].
+  ```
+
+  while passing on the machine it was written on. Both counters now count the `$$$$`
+  delimiters, which is what the document says, falling back to `len(supplier)` only when
+  the text cannot be read.
+
+  A test forces the disagreeing case — a stubbed supplier whose `__len__` returns 0 while
+  indexing still works — because no local RDKit build reaches it.
+
+### Verified
+
+`test_chem_ligand` + `test_standardise` + `test_prepare_cli` → **250 passed**; full suite in a
+clean environment → **2207 passed, 1 skipped, 0 failed**.
+
+### The pattern, stated once more
+
+Four releases have now fixed the same *shape* of defect at four different addresses:
+`benchmark.portable_command` (0.3.3), `portable_path` (0.3.16), the staging command versus
+the `.gitignore` engine (0.3.13), and this record counter (0.3.12 then 0.3.17). Each time a
+rule was implemented in more than one place and only one implementation was corrected.
+**When a fix does not make the failure go away, the first question is "how many copies of
+this rule are there", not "is the fix wrong".**
+
 ## 0.3.16 — 2026-10-18
 
 ### Fixed
