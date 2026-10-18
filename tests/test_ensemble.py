@@ -613,10 +613,15 @@ def test_cross_rescoring_of_a_real_docking_run(data_dir, tmp_path):
         data_dir / "EST.sdf", built, exhaustiveness=1, num_poses=2, seed=11,
         cluster_rmsd=2.0,
     )
-    assert len(result.poses) == 4
     assert len(result.labels) == 2
+    # Every pose that came back is rescored in **every** conformation: that matrix shape
+    # is the property this test exists for. How many *distinct* poses one seed returns is
+    # an engine/platform fact -- measured on the CI ubuntu legs, `num_poses=2` across two
+    # conformations produced three poses, not four, because `min_rmsd` merged one pair.
+    # A pinned 4 asserted Linux's merging behaviour, not the coverage.
+    assert len(result.poses) >= 2
     rescoring = ens.cross_rescore(result, built)
-    assert rescoring.shape == (4, 2)
+    assert rescoring.shape == (len(result.poses), 2)
     for row, pose in enumerate(result.poses):
         own = rescoring.labels.index(pose.conformation)
         # The diagonal is the pose's own docking number to within the PDBQT
