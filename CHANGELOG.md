@@ -4,6 +4,30 @@ All notable changes to OpenDocking are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.3.14 — 2026-10-18
+
+### Fixed
+
+* **`CONTRIBUTING.md` called `.cargo/config.toml` "not published", and it is published.**
+  The sentence was written in 0.3.4 to fix a dead link, and it derived "not published" from
+  **the staging copy command's exclude list** rather than from the repository's own
+  `.gitignore` engine. When staging moved to `odock release stage` (0.3.13) the file
+  appeared in the published set, and the path diff against the previous release named it.
+  The link is restored: the file carries the build settings a contributor needs, and the
+  documentation gate checks that it resolves.
+
+* **`docs/RELEASE.md` now states the procedural rule**, because that is what actually
+  failed: *stage with `odock release stage`, never with a copy command of your own.* Two
+  implementations disagreed in both directions inside one week — one excluded a file that
+  is published and included a directory that is not — and the gate was right both times.
+  The scratch directories (`TMP`/`TMPDIR`/`LOCALAPPDATA`) are to be kept **outside** the
+  checkout so the gate can pass without being told to ignore anything.
+
+### Verified
+
+`test_docs` + `test_docs_site` → **49 passed**; `odock docs check` → exit 0; full suite in a
+clean environment → **2206 passed, 1 skipped, 0 failed**.
+
 ## 0.3.13 — 2026-10-18
 
 ### Fixed

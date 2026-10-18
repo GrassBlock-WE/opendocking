@@ -86,6 +86,24 @@ family is denied in `.gitignore`, in maturin's `exclude`, in
 content scan — added in each place with a comment saying why the *family* is denied
 rather than the four names that leaked.
 
+`.gh-tmp`, `.rust-tmp` and `.pytest_cache` joined that list after `0.3.12`, and the
+incident that put them there is worth reading because **the defect was procedural**:
+
+> The staging step was a hand-written copy command with its **own** exclude list, which
+> is how `.gh-tmp` could be in the *cleanup* list and not in the *exclude* list — so
+> `.gh-tmp/GitHub CLI/device-id` reached a staged tree. What caught it was a path diff
+> against the previous release, **not** `release content`, which checks named fixtures
+> rather than "what is here that was not here before". The same hand-written list also
+> **excluded `.cargo/config.toml`**, a file the `.gitignore` engine says *is* published,
+> and `CONTRIBUTING.md` had been edited to call it "not published" — a false statement
+> produced by trusting the copy command over the gate.
+
+**So: stage with `odock release stage`, never with a copy command of your own.** The two
+implementations disagreed in both directions within a week of each other, and the gate
+was right both times. Keep the toolchain's own scratch outside the repository
+(`.gh-tmp` has to live somewhere; point `TMP`/`TMPDIR`/`LOCALAPPDATA` at a directory
+outside the checkout) so the gate can pass without being told to ignore anything.
+
 The result reports the file count, the byte count, how many paths `.gitignore`
 excluded, and a manifest SHA-256 over `(path, size, sha256)` rows — so two
 stagings of the same tree can be compared without trusting either one.
