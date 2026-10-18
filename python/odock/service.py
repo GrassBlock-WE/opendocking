@@ -256,6 +256,15 @@ class Job:
                     "failed": failed,
                     "rows": len(rows),
                     "interrupted": bool((summary or {}).get("interrupted", False)),
+                    # The campaign's own counts, because a job can finish **completed with
+                    # zero rows** and that has to explain itself. Measured on the CI Windows
+                    # leg: `test_submit_poll_fetch_in_process` reported `assert 0 == 2` for a
+                    # job whose state was "completed", and nothing in the payload said
+                    # whether the two molecules were never read, were filtered at the library
+                    # stage, or were docked and the rows were written somewhere else. The
+                    # summary already knows; surfacing it turns a mysterious zero into a
+                    # diagnosis.
+                    "campaign": _campaign_counts(summary),
                 },
             },
         }
@@ -939,3 +948,34 @@ def add_service_parser(sub) -> None:
     list_parser.add_argument("--root")
     list_parser.add_argument("--out")
     list_parser.set_defaults(func=cmd_service)
+
+#: Summary keys that explain a result, surfaced in a job's ``progress``. A completed job
+#: with zero rows is otherwise indistinguishable from a broken write: the campaign's own
+#: counts say whether the molecules were read, filtered, or written elsewhere.
+_CAMPAIGN_COUNT_KEYS: Tuple[str, ...] = (
+    "library",
+    "library_size",
+    "n_library",
+    "molecules",
+    "dockable",
+    "prepared",
+    "skipped",
+    "filtered",
+    "rejected",
+    "failed",
+    "written",
+    "rows",
+    "receptors",
+    "interrupted",
+)
+
+
+def _campaign_counts(summary: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """The numeric part of a campaign summary, for a job's progress payload."""
+    if not summary:
+        return {}
+    return {
+        key: summary[key]
+        for key in _CAMPAIGN_COUNT_KEYS
+        if key in summary and isinstance(summary[key], (int, bool))
+    }

@@ -104,6 +104,14 @@ was right both times. Keep the toolchain's own scratch outside the repository
 (`.gh-tmp` has to live somewhere; point `TMP`/`TMPDIR`/`LOCALAPPDATA` at a directory
 outside the checkout) so the gate can pass without being told to ignore anything.
 
+One thing that **does not** work, measured rather than assumed: pointing pytest's
+`--basetemp` at a directory outside the checkout to keep `tmp*` debris off the tree.
+Tried here — **`1655 passed, 551 errors`**, every one a `PermissionError` from the
+per-test temporary directories that layout cannot serve. So the sequence is **run the
+suite normally, then clear the debris, then stage**, and `stage` refuses until the tree
+is clean. The gate is what makes that reliable; the temporary-directory trick is not a
+substitute for it.
+
 The result reports the file count, the byte count, how many paths `.gitignore`
 excluded, and a manifest SHA-256 over `(path, size, sha256)` rows — so two
 stagings of the same tree can be compared without trusting either one.

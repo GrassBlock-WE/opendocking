@@ -4,6 +4,32 @@ All notable changes to OpenDocking are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.3.15 — 2026-10-18
+
+### Fixed
+
+* **A job that finished `completed` with zero rows could not say why.** Measured on the CI
+  Windows leg: `test_submit_poll_fetch_in_process` reported `assert 0 == 2` against a job
+  whose state was `completed`, and nothing in the payload distinguished "the molecules were
+  never read" from "they were filtered at the library stage" from "they were docked and the
+  rows were written somewhere else". The campaign's own summary already knows; a job's
+  `progress` now carries those counts (`n_library`, `dockable`, `prepared`, `skipped`,
+  `filtered`, `rejected`, `failed`, `written`, `rows`, `receptors`, `interrupted`), so a
+  zero is a diagnosis rather than a mystery. When the summary is absent the field is `{}`,
+  which is itself the statement that the campaign never got far enough to write one.
+
+* **`docs/RELEASE.md` records an approach that was measured and does not work.** The
+  previous release said to keep scratch outside the checkout; true for the toolchain's own
+  caches, but pointing pytest's `--basetemp` outside did not survive contact —
+  **`1655 passed, 551 errors`**, all `PermissionError`. The documented sequence is now the
+  one that was actually verified: **run the suite normally, clear the debris, then stage**,
+  with `stage` refusing until the tree is clean.
+
+### Verified
+
+`test_docs` + `test_docs_site` → **49 passed**; `test_service` + `test_cli_surface` →
+**58 passed**; full suite in a clean environment → **2206 passed, 1 skipped, 0 failed**.
+
 ## 0.3.14 — 2026-10-18
 
 ### Fixed
