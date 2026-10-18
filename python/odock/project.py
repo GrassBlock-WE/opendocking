@@ -296,6 +296,18 @@ def portable_path(value: PathLike, *, base: Optional[PathLike] = None,
         except OSError:  # pragma: no cover - an unresolvable root is unusable
             return None
 
+    # A path that is absolute for *another* platform cannot be resolved here: pathlib
+    # treats `C:\...` as relative on POSIX, so `resolve()` **prepends the working
+    # directory**, and the "inside this checkout" rule below then rewrites a stranger's
+    # path as if it lived here. Measured on the CI ubuntu legs:
+    #
+    #     portable_path(r"C:\Users\someone\.venv\Scripts\python.exe")
+    #         -> 'C:/Users/someone/.venv/Scripts/python.exe'   (expected 'python.exe')
+    #
+    # Nothing about a foreign path is resolvable, so it goes straight to the last rule.
+    if not path.is_absolute():
+        return path.name or _as_posix(raw)
+
     # `base` and the working directory first: a path inside the checkout is best
     # reported relative to it, and only then does the home directory become a
     # useful (still non-absolute) shorthand.

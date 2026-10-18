@@ -4,6 +4,48 @@ All notable changes to OpenDocking are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.3.16 — 2026-10-18
+
+### Fixed
+
+* **`portable_path` resolved a foreign-platform absolute path against this machine's
+  working directory, so it was never recognised as foreign.** The function already detected
+  a Windows path on POSIX (`^[A-Za-z]:`, `\`) — and then called `path.resolve()`, which on
+  POSIX treats `C:\...` as *relative* and **prepends the working directory**. The path then
+  looked "inside the checkout", the relative-to-the-checkout rule fired, and:
+
+  ```
+  portable_path(r"C:\Users\someone\.venv\Scripts\python.exe")
+      -> 'C:/Users/someone/.venv/Scripts/python.exe'      # expected 'python.exe'
+  ```
+
+  Redaction was worse still: `C:\Users\someone\project\.venv\Scripts\python.exe` came
+  back as **`C:python.exe`** — the drive letter survived and the path was eaten.
+
+  A path that is absolute for *another* platform cannot be resolved here at all, so it now
+  goes straight to the last rule (keep the file name). Verified with the exact inputs the CI
+  ubuntu legs used: `C:\...\python.exe` → `python.exe`, `/opt/venv/bin/python` → `python`,
+  and `redact_paths` on a Windows-style command leaves **no** absolute path behind.
+
+  This is the same principle as `0.3.3`'s `benchmark.portable_command` fix: **handle
+  cross-platform data from the data's point of view, not this machine's.** It was found only
+  after `out/ci_logs.py` was repaired — the failure list being quoted before that was a
+  **stale log from 0.3.9**, and these four tests had never appeared in it.
+
+### Verified
+
+`test_project` + `test_protocol` + `test_benchmark` + `test_docs` → **122 passed**; full suite
+in a clean environment → **2206 passed, 1 skipped, 0 failed**.
+
+### Still open
+
+The real CI failure set is **14 tests** across two platforms, not the three that had been
+reported from the stale log. With this release four of them (the path-portability cluster)
+should be gone; the remaining clusters are three real-docking tests
+(`ensemble cross_rescoring`, `screen campaign`, `service submit_poll_fetch`) and three
+chemistry/statistics tests (`test_read_sdf_skips_a_broken_record`,
+`covalent perceive_nucleophiles`, `standardise clean_library`).
+
 ## 0.3.15 — 2026-10-18
 
 ### Fixed
