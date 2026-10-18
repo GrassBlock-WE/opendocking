@@ -4,6 +4,44 @@ All notable changes to OpenDocking are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.4.5 — 2026-10-18
+
+### Fixed
+
+* **Three pharmacophore failures were one premise, and it was two assertions away from
+  where it was reported.** The screen's whole measured profile rests on
+
+  ```
+  17 molecules x 4 conformers = 68
+  ```
+
+  and on the CI ubuntu legs ETKDG produced **fewer**, so the ranking shifted by one, one
+  more molecule stopped being alignable, and three separate assertions failed as if they
+  were three defects:
+
+  | reported as | actually |
+  |---|---|
+  | `assert sorted(top5) == sorted(RING_AMIDINES)` | the ranking moved by one |
+  | `assert hits.n_rejected == 4` → `5` | one more molecule could not be aligned |
+  | `assert report["n_total"] == 17 and ...` | downstream of the same shortfall |
+
+  The conformer count is now **the first thing that fails, with the reason in it**: the
+  message names the shortfall, says that every fit and rank below is therefore
+  machine-specific rather than a regression in the screen, and points a reader at the actual
+  cause instead of at the ranking.
+
+  This does not make CI green — it makes the failure **readable**, which is the step before
+  deciding whether to pin the conformer count by construction (and treat a shortfall as the
+  reproducibility defect it is) or to restate the profile as a range.
+
+  Note, for that decision: `n_total == 17` is **not** part of it. The bundled library is
+  hand-written and checked in — `examples/make_demo.py` says so explicitly — so the CI legs
+  read the same 17 molecules the release does. Only the **conformer** count differs.
+
+### Verified
+
+`tests/test_pharmacophore.py` → **25 passed**. One test file, no shipped source.
+
 ## 0.4.4 — 2026-10-18
 
 ### Fixed

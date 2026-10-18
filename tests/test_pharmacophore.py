@@ -306,7 +306,16 @@ def test_screening_ranks_the_five_actives_first(hits, demo_names):
     assert hits.hits[5].name == "aspirin"
     assert hits.hits[5].fit == pytest.approx(0.497, abs=0.02)
     assert hits.n_library == 17
-    assert hits.n_conformers == 68, "17 molecules x 4 conformers"
+    # The premise under every number in this test: 17 molecules x 4 conformers. When a
+    # build produces fewer -- ETKDG can, and the CI ubuntu legs did -- the ranking
+    # shifts by one, one more molecule stops being alignable, and three separate
+    # assertions fail as if they were three defects. Say so *here*, where it can be
+    # read, instead of leaving it to be inferred from a different-looking ranking.
+    assert hits.n_conformers == 68, (
+        f"{hits.n_conformers} conformers, expected 17 x 4 = 68: this build's ETKDG "
+        f"produced fewer, so every fit and rank below is machine-specific rather than "
+        f"a regression in the screen"
+    )
     assert hits.seconds >= 0.0
 
 
