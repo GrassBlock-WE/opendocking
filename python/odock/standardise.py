@@ -1108,7 +1108,14 @@ def _read_sdf_records(text: str) -> Tuple[List[_Record], List[MoleculeAudit]]:
     broken: List[MoleculeAudit] = []
     supplier = Chem.SDMolSupplier()
     supplier.SetData(text, sanitize=False, removeHs=False)
-    for index in range(len(supplier)):
+    # Count the records by the **delimiter**, not by `len(supplier)`. A malformed record
+    # makes RDKit report fewer records than the document holds -- measured on the CI legs,
+    # where a two-record file came back as one -- so the broken record vanished from the
+    # audit entirely and `n_in` said 1 instead of 2. The `$$$$` markers are what the
+    # document actually says, and an audit that silently drops the malformed record is
+    # exactly the thing this module exists to prevent.
+    blocks = [block for block in text.split("$$$$") if block.strip()]
+    for index in range(len(blocks)):
         position = index + 1
         try:
             with _quiet_rdkit():

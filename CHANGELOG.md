@@ -4,6 +4,34 @@ All notable changes to OpenDocking are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.3.12 — 2026-10-18
+
+### Fixed
+
+* **The SDF audit counted records the way RDKit counts them, so a malformed record vanished.**
+  `standardise()` enumerated `for index in range(len(supplier))`, and `len()` on an
+  `SDMolSupplier` is *RDKit's* opinion of how many records the document holds. A malformed
+  block makes that fewer than the document actually contains — measured on the CI legs,
+  where `test_an_unreadable_sdf_record_is_an_invalid_audit_entry` saw `n_in` of **1** for a
+  two-record file, so the broken record produced **no audit row at all** and the invariant
+  `in == kept + rejected + merged` stayed true while a record silently disappeared. That is
+  precisely what the audit exists to prevent.
+
+  The count now comes from the **`$$$$` delimiters**, which is what the document says, and
+  a record RDKit cannot read becomes an `invalid` audit row at its own position. Verified:
+  a two-record file with one malformed block reports `n_in=2, n_kept=1, n_rejected=1,
+  balanced=True` with audits `[(1, kept), (2, invalid)]`.
+
+  This is the third defect in this series with the same shape — **a library's failure mode
+  used as a semantic judgement**: a junk record coming back as `None` versus a 0-atom
+  molecule (0.3.11), a missing GL context versus a renderer that was never created (0.3.9),
+  and now a record count that the parser is allowed to disagree with the file about.
+
+### Verified
+
+`test_standardise` + `test_chem_ligand` → **166 passed**; the delimiter count and the audit
+rows were confirmed on a constructed two-record file.
+
 ## 0.3.11 — 2026-10-18
 
 ### Fixed
