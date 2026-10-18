@@ -4,6 +4,77 @@ All notable changes to OpenDocking are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.4.0 — 2026-10-18
+
+A **minor** release, because the seventeen patch releases since 0.3.0 are not seventeen
+fixes with a release number each — they added six workflows, six commands, and a public
+programmatic surface. The CLI went from 34 subcommands to **40**; the package from 58 modules
+to **64**; the suite from 2058 tests to **2207**.
+
+### New capabilities since 0.3.0
+
+* **`odock covalent`** — covalent docking: warheads, nucleophile perception, reactive
+  geometry classified as bonded / near-attack / non-productive, and adducts built and
+  relaxed through the project's own minimiser. Its scoring term's continuity is **measured**
+  (halving the sample spacing halves the largest step: 2.00 distance, 1.97 angle), and the
+  doc states both of its honest edges — a 263-389 kcal/mol strain beside a truncated cysteine
+  is a *clash, not chemistry*, and the bundled 1M17 has six cysteines **none of which is
+  C797**.
+* **`odock standardise`** — the ordered, switchable recipe that decides whether a screening
+  result means anything: parse/refuse, repair, desalt, charge, stereochemistry, dedupe
+  (canonical *and* tautomer-insensitive), property filters. The deliverable is an **audit**:
+  `in == kept + rejected + merged` asserted inside the function, every removed fragment
+  named, and a recipe hash in the header.
+* **`odock panel`** — profile ligands across receptors, with box sizes reported beside the
+  affinities precisely so a "selective" ligand cannot be one that merely had a smaller box
+  elsewhere.
+* **`odock service`** — a typed, versioned contract (`odock-service`, schema 1) with an
+  `http.server` adapter and **no framework dependency**. Security is enforced in the service
+  rather than only in the adapter: loopback `Host` check, per-request token, cross-origin and
+  `Origin: null` refused, and a non-loopback bind requires an explicit opt-in *and* a token.
+* **`odock protocol`** — versioned, validated, diffable protocols with a hash recorded in the
+  run, so a third party can ask "was this produced by that protocol?".
+* **Cavity classification in the workbench and the export** — `View > Surface > Cavities`
+  repaints the surface by class, marks each bottleneck with a sphere at the **measured** neck
+  radius, treats a through-tunnel as its own `channel` class, and exports all of it to PyMOL
+  and ChimeraX. Measured: 3PTB 9 pockets / 3.28 A, 1M17 12 pockets / 4.48 A.
+* **`screen_ligands(config, *, stop=None, on_record=None)`** and
+  `_Runner(jobs, stop_event=None)`: a caller-owned cancellation event, so `_Runner.stop()`
+  stays the **single** cancellation path. Two workstreams independently needed it.
+
+### The release discipline that came out of these seventeen patches
+
+Most of the patch releases were **not** feature work; they were the cost of the CI matrix
+having **never been green** — not on 0.3.0, not on any 0.2.x commit. Fixing that exposed one
+recurring shape of defect, recorded here because it has now happened at four addresses:
+
+> **A rule implemented in more than one place, with only one implementation corrected.**
+>
+> `benchmark.portable_command` checked only the running platform's separator (0.3.3);
+> `portable_path` called `resolve()` on a foreign absolute path (0.3.16); the staging command
+> and the `.gitignore` engine disagreed about what ships (0.3.13); and the SDF record counter
+> was fixed in `standardise.py` and left broken in `chem/ligand.py` (0.3.12, then 0.3.17).
+>
+> **When a fix does not make the failure go away, the first question is "how many copies of
+> this rule are there", not "is the fix wrong".**
+
+Two more rules earned their place in the docs:
+
+* **A library's failure mode is not a semantic judgement.** A junk record returning `None`
+  versus a 0-atom molecule; a missing GL context versus a renderer that was never created; a
+  parser's record count versus the document's own delimiters. Each was decided by the running
+  machine's library version, so each passed where it was written and failed elsewhere.
+* **Stage with `odock release stage`, never with a copy command of your own.** The two
+  implementations disagreed in both directions inside one week and the gate was right both
+  times.
+
+### Verified
+
+Full suite in a clean environment with no `PYTHONIOENCODING`: **2207 passed, 1 skipped,
+0 failed**. `cargo test -p dock-core --lib` **116 passed**; `cargo clippy -D warnings` clean.
+The CI matrix is still red on its Python legs — that is stated in every release note rather
+than hidden, and the remaining failures are named there.
+
 ## 0.3.17 — 2026-10-18
 
 ### Fixed
