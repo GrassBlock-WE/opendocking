@@ -667,6 +667,15 @@ GENERATED_ROOT_PREFIXES: Tuple[Tuple[str, str], ...] = (
     ("chrome_", "a headless browser's own profile directory"),
     ("scoped_dir", "a headless browser's own profile directory"),
     ("Crashpad", "a headless browser's crash-report directory"),
+    # The scratch directories *this* toolchain creates, added after one of them reached a
+    # staged tree: `.gh-tmp` was in the cleanup list but not in the staging copy's exclude
+    # list, so `.gh-tmp/GitHub CLI/device-id` was published-adjacent and the path diff
+    # against the previous release caught it -- not the content gate, which checks named
+    # fixtures rather than "what is here that was not here before". Naming the families
+    # puts that check where it belongs, in the gate the release actually runs.
+    (".gh-tmp", "github CLI's cache and device id (its default cache directory is unwritable here)"),
+    (".rust-tmp", "the Rust build's scratch directory (TEMP is unwritable here)"),
+    (".pytest_cache", "pytest's own cache directory"),
 )
 
 

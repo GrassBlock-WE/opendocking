@@ -4,6 +4,40 @@ All notable changes to OpenDocking are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.3.13 — 2026-10-18
+
+### Fixed
+
+* **The staging gate now names the scratch families this toolchain creates.** `.gh-tmp` was
+  removed by hand before 0.3.12's staging but was **not** in the copy command's exclude
+  list, so `.gh-tmp/GitHub CLI/device-id` reached the staged tree. What caught it was a
+  path-diff against the published tree — **not** `release content`, which checks named
+  fixtures rather than "what is here that was not here before".
+
+  `GENERATED_ROOT_PREFIXES` now carries `.gh-tmp`, `.rust-tmp` and `.pytest_cache` with
+  their reasons, so `odock release stage` refuses a tree that carries them:
+
+  ```
+  odock release stage: 1 generated entry in the release root: .gh-tmp — github CLI's cache
+  and device id (its default cache directory is unwritable here)
+  ```
+
+  and the message ends with the control the release needs: *"anything here you do not
+  recognise is a leak: fix the tree, re-stage, and read this list again."*
+
+* **The real defect was procedural, and it is mine.** The staging path used a hand-written
+  copy command with its own exclude list, which is why a directory could be in the cleanup
+  list and not in the exclude list. `odock release stage` already existed, already refused
+  stray families, and already printed the staged set grouped by top-level entry — running
+  it is now the procedure, and the gh/rust caches live **outside** the repository so the
+  gate can pass without being told to ignore them.
+
+### Verified
+
+The detector names all ten families and leaves real directories alone; a tree carrying
+`.gh-tmp` is refused with the family named; the same tree with the caches outside the
+repository stages cleanly (`exit 0`). `tests/test_release.py` → **93 passed**.
+
 ## 0.3.12 — 2026-10-18
 
 ### Fixed

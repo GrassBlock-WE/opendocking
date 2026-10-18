@@ -1,0 +1,51 @@
+# Cargo configuration for the Open Docking workspace.
+#
+# This is *build-time* configuration only. The runtime configuration surface is
+# the `DockOptions` struct in `crates/dock-core/src/docking.rs`, which the CLI
+# flags and the Python keyword arguments populate; there is deliberately no
+# on-disk runtime config file to keep a docking run fully described by its
+# inputs.
+
+[build]
+# Keep build artifacts inside the workspace. On Windows this also avoids
+# OneDrive-synced or antivirus-scanned %TEMP% paths, which have caused
+# intermittent `LNK1201: error writing to the program database` failures.
+target-dir = "target"
+
+[net]
+# The registry occasionally times out on a cold cache.
+retry = 5
+
+[term]
+verbose = false
+
+# Short aliases for the workflows in the README.
+#
+# `cargo fmt` is deliberately *not* aliased. A user-defined alias shadows the
+# `cargo-fmt` subcommand and cargo rejects the recursion outright
+# ("alias `fmt` has unresolvable recursive definition: fmt -> fmt"), which broke
+# `cargo fmt` for everyone. The formatting command is plain `cargo fmt --all`.
+[alias]
+t = "test --workspace"
+core = "test -p dock-core --lib"
+gpu-check = "check -p dock-core --features gpu"
+gpu-test = "test -p dock-core --features gpu"
+real = "test -p dock-core --test real_ligand"
+lint = "clippy --workspace --all-targets"
+
+# NOTE for Windows users
+# ---------------------
+# `maturin develop --release` builds through a temporary directory that picks up
+# %TEMP%. If the system temp directory cannot be written (locked, redirected, or
+# sandboxed), the build fails with
+#
+#     maturin failed: Failed to create temporary directory ... (os error 5)
+#
+# Point the three variables at a directory inside the workspace before running
+# maturin:
+#
+#     $env:TEMP = "$PWD\.rust-tmp"; $env:TMP = $env:TEMP; $env:TMPDIR = $env:TEMP
+#     python -m maturin develop --release
+#
+# `.rust-tmp/` is already in `.gitignore`. Cargo's own `[env]` table cannot fix
+# this, because maturin resolves its temp directory before cargo is invoked.
