@@ -4,6 +4,52 @@ All notable changes to OpenDocking are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.4.3 — 2026-10-18
+
+### Fixed
+
+* **`perceive_nucleophiles` probed the receptor *text* with `Path(...).exists()`, which raises
+  on POSIX.** The function accepts a path **or the PDBQT text**, and decided which by calling
+  `Path(value).exists()`. For the text case that is:
+
+  ```
+  OSError: [Errno 36] File name too long:
+  'REMARK  OpenDocking receptor preparation\nATOM      1 N    GLY A 672 ...'
+  ```
+
+  measured on the CI ubuntu legs, where the test that passes receptor text failed outright
+  while passing on Windows — where the probe simply returns `False`. The input is now
+  classified **by shape first** (a newline, or a length that cannot be a path, means text),
+  and the probe itself can no longer raise: an `OSError` from `exists()` is treated as "this
+  is text", which is exactly what `ENAMETOOLONG` means here.
+
+  A test simulates the POSIX probe — a `Path.exists` that raises `OSError(36)` for anything
+  longer than a filename — because **no local run reaches that branch**. That is the same
+  lesson as `0.4.1`: a test whose failure only happens on a platform you are not using has to
+  assert the mechanism, not the outcome.
+
+### The four remaining failures are one premise, not four defects
+
+The CI failures that are left cluster tightly around **counts**, all off by one:
+
+| test | difference |
+|---|---|
+| `ensemble cross_rescoring` | `3 == 4` (one fewer) |
+| `pharmacophore screening_ranks_the_five_actives_first` | order differs (`benzylamidine` vs `aspirin`) |
+| `pharmacophore shape_constraint` | `5 == 4` (one more) |
+| `pharmacophore enrichment` | `6 == 5` (one more) |
+
+Every one is "one pose or one conformation different", which is the same root as the
+`exhaustiveness=8` single-pose finding on Linux, compounded by the CI regenerating `demo/`
+with `make_demo.py --fast`. **The next step is to measure how many poses and conformations the
+CI legs actually produce**, and then decide whether the assertions or the premise is wrong -
+not to adjust four numbers.
+
+### Verified
+
+`tests/test_covalent.py` → **30 passed**; full suite in a clean environment →
+**2209 passed, 1 skipped, 0 failed**.
+
 ## 0.4.2 — 2026-10-18
 
 ### Fixed

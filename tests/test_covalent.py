@@ -512,3 +512,29 @@ def test_require_rdkit_explains_a_missing_dependency(monkeypatch):
         CV.require_rdkit()
     with pytest.raises(ImportError):
         CV.perceive_warheads(named("C=CC(=O)N"))
+
+def test_receptor_text_is_not_probed_as_a_path(receptor, monkeypatch):
+    """The probe itself must not raise for the text case.
+
+    `perceive_nucleophiles` accepts a path *or* the PDBQT text. It decided which by calling
+    `Path(value).exists()`, and on POSIX that raises for a long string:
+
+        OSError: [Errno 36] File name too long
+
+    measured on the CI ubuntu legs, where this test failed while passing on Windows (the
+    probe simply returns False there). No local run reaches it, so the POSIX behaviour is
+    simulated: the probe raises for anything longer than a filename, exactly as the kernel
+    would.
+    """
+    from pathlib import Path
+
+    real_exists = Path.exists
+
+    def posix_like(self):
+        if len(str(self)) > 255:
+            raise OSError(36, "File name too long")
+        return real_exists(self)
+
+    monkeypatch.setattr(Path, "exists", posix_like, raising=True)
+    text = RECEPTOR.read_text(encoding="utf-8")
+    assert len(CV.perceive_nucleophiles(text)) == 6

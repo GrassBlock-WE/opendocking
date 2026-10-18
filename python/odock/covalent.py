@@ -465,13 +465,31 @@ def _load_receptor(receptor):
     from pathlib import Path
 
     if isinstance(receptor, (str, Path)):
-        path = Path(receptor)
-        if path.exists():
-            text = path.read_text(encoding="utf-8", errors="replace")
-        elif isinstance(receptor, Path) or "\n" not in str(receptor):
-            return None
-        else:
-            text = str(receptor)
+        # A receptor argument can be a path **or the PDBQT text itself**, and probing the
+        # text with `Path(...).exists()` raises on POSIX:
+        #
+        #     OSError: [Errno 36] File name too long
+        #
+        # measured on the CI ubuntu legs, where `perceive_nucleophiles(receptor_text)`
+        # failed with exactly that while passing on Windows (where the probe returns
+        # False). Decide by shape first -- a newline or an implausible length means text,
+        # never a path -- and never let the probe itself raise.
+        raw = str(receptor)
+        looks_like_a_path = (
+            isinstance(receptor, Path)
+            or ("\n" not in raw and "\r" not in raw and 0 < len(raw) < 4096)
+        )
+        text = raw
+        if looks_like_a_path:
+            path = Path(raw)
+            try:
+                found = path.exists()
+            except OSError:  # ENAMETOOLONG and friends: this is text, not a path
+                found = False
+            if found:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            elif isinstance(receptor, Path) or "\n" not in raw:
+                return None
     elif isinstance(receptor, str):
         text = receptor
     else:  # pragma: no cover - defensive
