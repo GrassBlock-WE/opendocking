@@ -58,9 +58,11 @@ from .i18n import EN as _EN
 from .i18n import tr
 
 __all__ = [
+    "BOX_COLOURS",
     "CAMPAIGN_RESTARTABLE",
     "CAMPAIGN_STATES",
     "DARK",
+    "DEFAULT_BOX_SIZE",
     "DENSITIES",
     "LIGHT",
     "LAYOUT_PRESETS",
@@ -73,6 +75,7 @@ __all__ = [
     "CampaignQueue",
     "CampaignStats",
     "campaign_stats",
+    "box_colour",
     "Command",
     "CommandPalette",
     "CommandStack",
@@ -92,6 +95,8 @@ __all__ = [
     "RmsdResult",
     "RunDashboard",
     "RunTrace",
+    "SearchBox",
+    "SearchBoxes",
     "SessionHistory",
     "SessionStore",
     "Theme",
@@ -3817,6 +3822,307 @@ class PoseComparisonWidget(QtWidgets.QWidget):
             self.heading.setText(tr("compare.hint"))
         else:
             self.set_comparison(self._comparison)
+
+
+# ---------------------------------------------------------------------------
+# Search boxes: a collection with identity, not a single flag
+# ---------------------------------------------------------------------------
+#
+# The workbench used to hold *one* box as a ``(center, size)`` tuple with a single
+# ``_box_visible`` flag shared by the 3-D view, the checkbox and the menu action.
+# That single flag is the trap a user described exactly: visibility and existence
+# were one control, so hiding the box could leave no way back to it, and nothing
+# distinguished "the box is hidden" from "there is no box".
+#
+# Here a box is an object with a stable id and a name.  Visibility is one of its
+# fields; deletion removes it.  The rules the tests pin:
+#
+# * :meth:`SearchBoxes.remove` is the only way to make a box disappear from the
+#   collection;
+# * show/hide never removes anything, so a hidden box keeps its id, its name and
+#   its place in any menu built from this collection — which is what makes "hide
+#   a box, check it in the menu, get it back" the same round trip;
+# * the active box is the one the editor fields apply to, and it is *stated*
+#   (:meth:`SearchBoxes.active_name`) rather than implied, because "which box am I
+#   editing" is the first thing that confuses people in a multi-box tool.
+
+#: A per-box tint, so two overlapping boxes stay distinguishable.  Chosen away
+#: from the interaction palette's hues on purpose: a box is scenery, not a
+#: contact, and must never be misread as one.
+BOX_COLOURS: Tuple[Tuple[float, float, float], ...] = (
+    (0.36, 0.78, 0.92),  # sky
+    (0.98, 0.72, 0.36),  # amber
+    (0.62, 0.84, 0.44),  # leaf
+    (0.86, 0.58, 0.92),  # orchid
+    (0.92, 0.52, 0.55),  # rose
+    (0.66, 0.70, 0.86),  # slate
+)
+
+#: The default edge length of a new box, in Å — the 20 Å the workbench used when
+#: it fitted a first box, so adding one is a familiar starting point.
+DEFAULT_BOX_SIZE = 20.0
+
+
+def box_colour(index: int) -> Tuple[float, float, float]:
+    """The tint for ``index`` (stable per id, wrapping through the palette)."""
+    return BOX_COLOURS[int(index) % len(BOX_COLOURS)]
+
+
+@dataclass
+class SearchBox:
+    """One search box: a name, a centre and three independent dimensions.
+
+    ``width``/``height``/``depth`` are the three components of the size vector in
+    Å, settable independently: a flat slab and a tall column are both legal, and
+    the docking box is a rectangular prism, not a cube.
+    """
+
+    id: int
+    name: str
+    center: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+    size: Tuple[float, float, float] = (DEFAULT_BOX_SIZE,) * 3
+    visible: bool = True
+    spacing: float = 0.375
+
+    KEYS = ("id", "name", "center", "size", "visible", "spacing")
+
+    def __post_init__(self) -> None:
+        self.center = tuple(float(v) for v in self.center)  # type: ignore[assignment]
+        self.size = tuple(float(v) for v in self.size)  # type: ignore[assignment]
+        if len(self.center) != 3 or len(self.size) != 3:
+            raise ValueError("a search box has a centre and a size of three numbers each")
+
+    # -- dimensions --------------------------------------------------------
+
+    @property
+    def width(self) -> float:
+        return float(self.size[0])
+
+    @property
+    def height(self) -> float:
+        return float(self.size[1])
+
+    @property
+    def depth(self) -> float:
+        return float(self.size[2])
+
+    @property
+    def volume(self) -> float:
+        return self.width * self.height * self.depth
+
+    def colour(self) -> Tuple[float, float, float]:
+        return box_colour(self.id)
+
+    def geometry(self) -> Tuple[Tuple[float, float, float], Tuple[float, float, float]]:
+        """``(center, size)`` — the shape ``Scene.box`` and ``BoxSpec`` take."""
+        return (tuple(self.center), tuple(self.size))
+
+    # -- serialisation -----------------------------------------------------
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": int(self.id),
+            "name": str(self.name),
+            "center": [float(v) for v in self.center],
+            "size": [float(v) for v in self.size],
+            "visible": bool(self.visible),
+            "spacing": float(self.spacing),
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "SearchBox":
+        return cls(
+            id=int(payload["id"]),
+            name=str(payload["name"]),
+            center=tuple(float(v) for v in payload.get("center", (0, 0, 0))),  # type: ignore[arg-type]
+            size=tuple(float(v) for v in payload.get("size", (DEFAULT_BOX_SIZE,) * 3)),  # type: ignore[arg-type]
+            visible=bool(payload.get("visible", True)),
+            spacing=float(payload.get("spacing", 0.375)),
+        )
+
+
+class SearchBoxes:
+    """The collection: identity, order, per-box visibility and the active box."""
+
+    def __init__(self) -> None:
+        self.boxes: List[SearchBox] = []
+        self.active_id: Optional[int] = None
+        self._next_id = 1
+
+    # -- container ---------------------------------------------------------
+
+    def __len__(self) -> int:
+        return len(self.boxes)
+
+    def __iter__(self):
+        return iter(self.boxes)
+
+    def __getitem__(self, index: int) -> SearchBox:
+        return self.boxes[index]
+
+    def get(self, box_id: Optional[int]) -> Optional[SearchBox]:
+        for box in self.boxes:
+            if box.id == box_id:
+                return box
+        return None
+
+    # -- identity ----------------------------------------------------------
+
+    def add(
+        self,
+        center: Sequence[float] = (0.0, 0.0, 0.0),
+        size: Sequence[float] = (DEFAULT_BOX_SIZE,) * 3,
+        *,
+        name: Optional[str] = None,
+        visible: bool = True,
+        spacing: float = 0.375,
+    ) -> SearchBox:
+        """Add a box with a stable id and, by default, the next free name.
+
+        The *name* is the caller's when it wants one (the window passes a
+        translated "box {n}", so this class stays free of i18n).
+        """
+        box_id = self._next_id
+        self._next_id += 1
+        if name is None:
+            used = {box.name for box in self.boxes}
+            index = 1
+            while f"box {index}" in used:
+                index += 1
+            name = f"box {index}"
+        box = SearchBox(
+            id=box_id,
+            name=str(name),
+            center=tuple(float(v) for v in center),  # type: ignore[arg-type]
+            size=tuple(float(v) for v in size),  # type: ignore[arg-type]
+            visible=bool(visible),
+            spacing=float(spacing),
+        )
+        self.boxes.append(box)
+        if self.active_id is None:
+            self.active_id = box.id
+        return box
+
+    def remove(self, box_id: int) -> bool:
+        """Delete a box — the **only** operation that removes one.
+
+        Hiding is :meth:`show`; nothing else here shrinks the collection, which is
+        what keeps "hidden" and "gone" from ever being the same thing.
+        """
+        box = self.get(box_id)
+        if box is None:
+            return False
+        self.boxes.remove(box)
+        if self.active_id == box_id:
+            self.active_id = self.boxes[0].id if self.boxes else None
+        return True
+
+    def clear(self) -> None:
+        self.boxes = []
+        self.active_id = None
+        self._next_id = 1
+
+    # -- active box --------------------------------------------------------
+
+    def active(self) -> Optional[SearchBox]:
+        return self.get(self.active_id)
+
+    def set_active(self, box_id: Optional[int]) -> bool:
+        if box_id is None:
+            self.active_id = None
+            return True
+        if self.get(box_id) is None:
+            return False
+        self.active_id = int(box_id)
+        return True
+
+    def active_name(self) -> str:
+        box = self.active()
+        return box.name if box is not None else ""
+
+    # -- editing -----------------------------------------------------------
+
+    def move(self, box_id: int, center: Sequence[float]) -> bool:
+        box = self.get(box_id)
+        if box is None:
+            return False
+        box.center = tuple(float(v) for v in center)  # type: ignore[assignment]
+        return True
+
+    def resize(self, box_id: int, size: Sequence[float]) -> bool:
+        box = self.get(box_id)
+        if box is None:
+            return False
+        box.size = tuple(float(v) for v in size)  # type: ignore[assignment]
+        return True
+
+    def set_dimension(self, box_id: int, axis: int, value: float) -> bool:
+        """Set width (0), height (1) or depth (2) on its own."""
+        box = self.get(box_id)
+        if box is None or axis not in (0, 1, 2):
+            return False
+        size = list(box.size)
+        size[int(axis)] = float(value)
+        box.size = tuple(size)  # type: ignore[assignment]
+        return True
+
+    def show(self, box_id: int, visible: bool = True) -> bool:
+        """Show or hide a box. It stays in the collection either way."""
+        box = self.get(box_id)
+        if box is None:
+            return False
+        box.visible = bool(visible)
+        return True
+
+    def set_spacing(self, box_id: int, spacing: float) -> bool:
+        box = self.get(box_id)
+        if box is None:
+            return False
+        box.spacing = float(spacing)
+        return True
+
+    # -- derived views -----------------------------------------------------
+
+    def visible(self) -> List[SearchBox]:
+        return [box for box in self.boxes if box.visible]
+
+    def others_visible(self, box_id: Optional[int]) -> List[SearchBox]:
+        """Every visible box except ``box_id`` (the one the renderer draws)."""
+        return [box for box in self.boxes if box.visible and box.id != box_id]
+
+    def hidden(self) -> List[SearchBox]:
+        return [box for box in self.boxes if not box.visible]
+
+    # -- serialisation -----------------------------------------------------
+
+    def to_list(self) -> List[Dict[str, Any]]:
+        return [box.to_dict() for box in self.boxes]
+
+    def to_state(self) -> Dict[str, Any]:
+        """The collection as one snapshot payload (undo and session state)."""
+        return {"boxes": self.to_list(), "active_box": self.active_id}
+
+    def load_state(self, state: Mapping[str, Any]) -> None:
+        """Replace the collection from a snapshot, keeping ids and visibility."""
+        items = list(state.get("boxes") or [])
+        self.boxes = [SearchBox.from_dict(item) for item in items]
+        highest = max((box.id for box in self.boxes), default=0)
+        self._next_id = max(highest + 1, int(state.get("next_id", 0) or 0), 1)
+        active = state.get("active_box")
+        if active is not None and self.get(int(active)) is not None:
+            self.active_id = int(active)
+        else:
+            self.active_id = self.boxes[0].id if self.boxes else None
+
+    def fingerprint(self) -> Tuple:
+        """A comparable summary, for the panel-state test.
+
+        Ids are included: deleting ``box 2`` and adding a new one must not look
+        like the same state, because the menu entry's identity changed with it.
+        """
+        return tuple(
+            (box.id, box.name, box.center, box.size, box.visible) for box in self.boxes
+        ) + (("active", self.active_id),)
 
 
 # ---------------------------------------------------------------------------

@@ -309,6 +309,10 @@ class ViewportWidget(QtWidgets.QWidget):
         #: they land in a snapshot as well as on screen. Each entry is a plain
         #: dict built by the window: {"kind", "points", "split", "text", ...}.
         self.measurement_overlays: List[dict] = []
+        #: Every *other* visible search box (the renderer draws the active one).
+        #: Edge-only wireframes in the boxes' own colours, painted above the 3-D
+        #: pass so no translucent volume can swallow them.
+        self.extra_boxes: List[dict] = []
         self.annotation_overlays: List[dict] = []
         #: ``(kind, detected, drawn)`` for the interaction legend.
         self.interaction_legend: List[tuple] = []
@@ -370,6 +374,19 @@ class ViewportWidget(QtWidgets.QWidget):
 
     def set_measurement_overlays(self, overlays: Sequence[dict]) -> None:
         self.measurement_overlays = [dict(item) for item in overlays]
+        self.update()
+
+    def set_extra_boxes(self, boxes: Sequence[dict]) -> None:
+        """The non-active search boxes, as edge-only wireframes.
+
+        The renderer draws one box — the active one, as a translucent volume — so
+        every other box is drawn here instead of asking ``viewport.py`` to grow a
+        list of volumes. Two consequences, both wanted: the active box is the only
+        solid one (which is how the user sees which box the editor is changing),
+        and this layer is painted *after* the 3-D pass, so a volume can never
+        occlude another box's wireframe.
+        """
+        self.extra_boxes = [dict(item) for item in boxes]
         self.update()
 
     def set_annotation_overlays(self, overlays: Sequence[dict]) -> None:
@@ -454,6 +471,83 @@ class ViewportWidget(QtWidgets.QWidget):
             for point in points:
                 painter.drawEllipse(point, 3.4, 3.4)
             self._draw_label(painter, points[len(points) // 2], str(overlay.get("text", "")), colour)
+        painter.restore()
+
+
+    #: The 8 corner signs of a box, and the 12 edges between them.
+    BOX_CORNERS = (
+        (-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1),
+        (-1, -1, 1), (1, -1, 1), (1, 1, 1), (-1, 1, 1),
+    )
+    BOX_EDGES = (
+        (0, 1), (1, 2), (2, 3), (3, 0),
+        (4, 5), (5, 6), (6, 7), (7, 4),
+        (0, 4), (1, 5), (2, 6), (3, 7),
+    )
+
+    def _paint_box_wireframes(self, painter: QtGui.QPainter) -> None:
+        """Edge-only outlines for the search boxes the renderer is not drawing.
+
+        Edge-only is the convention, not a shortcut: a second translucent volume
+        would both hide the first and be indistinguishable from it at a glance,
+        while coloured edges read as two separate boxes even when they overlap.
+        Each box carries its own tint (``dashboard.box_colour``) and a dark halo
+        under the stroke, so the outline is legible on both themes.
+        """
+        if not self.extra_boxes:
+            return
+        painter.save()
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+        for entry in self.extra_boxes:
+            try:
+                center = [float(v) for v in entry["center"]]
+                size = [float(v) for v in entry["size"]]
+            except (KeyError, TypeError, ValueError):  # pragma: no cover - defensive
+                continue
+            colour = tuple(entry.get("colour", (0.36, 0.78, 0.92)))
+            wireframe = bool(entry.get("wireframe", True))
+            half = [max(0.001, value) / 2.0 for value in size]
+            projected = []
+            for sign in self.BOX_CORNERS:
+                point = (
+                    center[0] + sign[0] * half[0],
+                    center[1] + sign[1] * half[1],
+                    center[2] + sign[2] * half[2],
+                )
+                projected.append(self.project_point(point))
+            if not wireframe:
+                # Label only: the renderer already draws this box's outline, and a
+                # second set of edges on top of it would just thicken it.
+                anchor = self.project_point(
+                    (
+                        center[0] - half[0],
+                        center[1] - half[1],
+                        center[2] + half[2],
+                    )
+                )
+                if anchor is not None:
+                    self._draw_label(painter, anchor, str(entry.get("name", "")), colour)
+                continue
+            stroke = self._overlay_stroke(painter, colour, width=1.6)
+            halo = QtGui.QPen(QtGui.QColor(10, 12, 18, 150), 3.2)
+            halo.setCapStyle(QtCore.Qt.PenCapStyle.RoundCap)
+            for first, second in self.BOX_EDGES:
+                one, two = projected[first], projected[second]
+                if one is None or two is None:
+                    continue  # an edge behind the eye is simply not drawn
+                painter.setPen(halo)
+                painter.drawLine(one, two)
+            painter.setPen(stroke)
+            for first, second in self.BOX_EDGES:
+                one, two = projected[first], projected[second]
+                if one is None or two is None:
+                    continue
+                painter.drawLine(one, two)
+            # The name, so three boxes are three *named* boxes on screen too.
+            label = str(entry.get("name", ""))
+            anchor = next((p for p in projected if p is not None), None)
+            if label and anchor is not None:
+                self._draw_label(painter, anchor, label, colour)
         painter.restore()
 
     def _draw_arc(self, painter, vertex, first, second, colour) -> None:
@@ -777,6 +871,7 @@ class ViewportWidget(QtWidgets.QWidget):
         # draws, including the interaction dashes: that ordering, plus the dark
         # halo every stroke carries, is what keeps an arc or a plane readable
         # instead of becoming one more anonymous line.
+        self._paint_box_wireframes(painter)
         self._paint_measurement_overlay(painter)
         self._paint_annotation_overlay(painter)
 
@@ -1486,6 +1581,7 @@ class ViewportWidget(QtWidgets.QWidget):
                 sy = image.height() / max(1, self.height())
                 painter.save()
                 painter.scale(sx, sy)
+                self._paint_box_wireframes(painter)
                 self._paint_measurement_overlay(painter)
                 self._paint_annotation_overlay(painter)
                 painter.restore()
@@ -1829,6 +1925,10 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         #: routes are different decisions: a box fitted to the ligand follows it
         #: to a new pose, a hand-placed one does not, and a protocol says which.
         self._box_source = "ligand"
+        #: Every search box, with its own identity and visibility. ``scene.box`` is
+        #: only the rendering channel for the *active* box; this collection is the
+        #: record — see ``dashboard.SearchBoxes`` for the rules it keeps.
+        self.boxes = dashboard.SearchBoxes()
         #: The template currently being compared against, and the last protocol
         #: loaded from a file (for the tab's diff label).
         self._loaded_protocol = None
@@ -1938,6 +2038,9 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         self._build_menus()
         self._build_statusbar()
         self._apply_style()
+        # One initial pass so the box list, the menu and the tree agree about a
+        # (possibly empty) collection before anything touches a box.
+        self._sync_boxes_view()
         self._apply_dock_proportions()
         self._install_autosave()
         self.setAcceptDrops(True)
@@ -1990,6 +2093,10 @@ class DockingWorkbench(QtWidgets.QMainWindow):
             "poses_text": self.poses_text,
             "pending": dict(self._pending),
             "box": self.scene.box,
+            # The whole collection, not just the active box: a rebuild (a language
+            # switch, a theme change) must not quietly delete the user's other
+            # boxes or forget that one of them was hidden.
+            "boxes": self.boxes.to_state(),
             "spacing": float(self.spacing.value()),
             "box_visible": self.chk_box.isChecked(),
             "focus_requested": self._focus_requested,
@@ -2187,16 +2294,30 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         # ``load_*`` rewrite these from whatever they were handed, so the
         # remembered values go back last.
         self._pending = dict(state["pending"])
-        self._box_visible = bool(state["box_visible"])
-        self.chk_box.setChecked(self._box_visible)
-        if self.box_action is not None:
-            self.box_action.setChecked(self._box_visible)
-        if state["box"] is not None:
+        # The collection first: it carries the ids, the active box and every
+        # per-box visibility, so a rebuild (language, theme) cannot quietly delete
+        # a box or forget that one was hidden. `box`/`box_visible` remain the
+        # older single-box view of the same thing, used only when no collection
+        # was captured.
+        collection = state.get("boxes") or {}
+        if collection.get("boxes"):
+            self.boxes.load_state(collection)
+            self._refresh_spins_from_active_box()
+            self._sync_boxes_view()
+        elif state.get("box") is not None:
+            self.boxes.clear()
             self._set_box(state["box"][0], state["box"][1], state["spacing"])
         else:
-            self.scene.box = None
+            self.boxes.clear()
             self.spacing.setValue(state["spacing"])
-            self._refresh_box_label()
+            self._sync_boxes_view()
+        active = self.boxes.active()
+        self._box_visible = bool(active.visible) if active is not None else False
+        for widget in (getattr(self, "chk_box", None), getattr(self, "box_action", None)):
+            if widget is not None and widget.isChecked() != self._box_visible:
+                widget.blockSignals(True)
+                widget.setChecked(self._box_visible)
+                widget.blockSignals(False)
 
         self._filter_verdict = state["filters"]
         self._refresh_filter_label()
@@ -2736,6 +2857,18 @@ class DockingWorkbench(QtWidgets.QMainWindow):
                 path = Path(base) / path
         if path.exists():
             self.load_poses(path)
+
+    def _build_boxes_menu(self, view: QtWidgets.QMenu) -> None:
+        """View ▸ Search boxes: one checkable entry per box, plus add and delete.
+
+        The entries are rebuilt from the collection (``_sync_box_actions``) rather
+        than created once, because the trap this feature exists to avoid is a menu
+        that lists a box only while it is *visible*: a hidden box must keep its
+        entry so it can be turned back on, and only deletion removes it.
+        """
+        self.boxes_menu = view.addMenu(tr("menu.boxes"))
+        self._box_actions: Dict[int, QtGui.QAction] = {}
+        self._sync_box_actions()
 
     # -- the protocol tab ---------------------------------------------------
 
@@ -3527,6 +3660,28 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         page = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(page)
 
+        # The collection first: "which box am I editing" is the question this panel
+        # has to answer before any of the fields below mean anything.
+        boxes_group = QtWidgets.QGroupBox(tr("tab.grid.boxes"))
+        boxes_layout = QtWidgets.QVBoxLayout(boxes_group)
+        self.box_list = QtWidgets.QListWidget()
+        self.box_list.setObjectName("boxList")
+        self.box_list.setMaximumHeight(96)
+        self.box_list.currentItemChanged.connect(self._on_box_list_selection)
+        # Delete is its own path, on the selected box: deleting is never reachable
+        # only by hiding, and the key is undoable like the button.
+        delete_shortcut = QtGui.QShortcut(
+            QtGui.QKeySequence(QtCore.Qt.Key.Key_Delete), self.box_list
+        )
+        delete_shortcut.setContext(QtCore.Qt.ShortcutContext.WidgetShortcut)
+        delete_shortcut.activated.connect(self._delete_active_box)
+        boxes_layout.addWidget(self.box_list)
+        self.box_active_label = QtWidgets.QLabel(tr("boxes.none"))
+        self.box_active_label.setWordWrap(True)
+        self.box_active_label.setObjectName("dashboardReadout")
+        boxes_layout.addWidget(self.box_active_label)
+        layout.addWidget(boxes_group)
+
         box = QtWidgets.QGroupBox(tr("group.search_box"))
         form = QtWidgets.QGridLayout(box)
         self.spins: Dict[str, QtWidgets.QDoubleSpinBox] = {}
@@ -4079,6 +4234,7 @@ class DockingWorkbench(QtWidgets.QMainWindow):
             view, tr("action.redo"), self.redo, shortcut="Ctrl+Shift+Z"
         )
         self._sync_history_actions()
+        self._build_boxes_menu(view)
         self._act(view, tr("action.clear_measurements"), self._clear_measurements)
         self.ghost_action = self._act(
             view, tr("action.show_reference"), self._toggle_ghost, checkable=True
@@ -4372,6 +4528,7 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         self.scene.highlight = []
         self.scene.locked_bonds = []
         self.scene.measurements = []
+        self.boxes.clear()
         self.scene.box = None
         self.receptor_text = self.ligand_text = None
         self.ligand_models = []
@@ -4451,6 +4608,11 @@ class DockingWorkbench(QtWidgets.QMainWindow):
                 if box is not None
                 else None
             ),
+            # The whole collection travels with the document, so a restart reopens
+            # the project the user left: every box, its name, which one was active
+            # and which of them were hidden. `box` above stays as the active box
+            # for anything that reads the older single-box shape.
+            "boxes": self.boxes.to_state(),
             "engine": {
                 "scoring": self.engine.currentText(),
                 "exhaustiveness": self.exhaustiveness.value(),
@@ -4501,9 +4663,17 @@ class DockingWorkbench(QtWidgets.QMainWindow):
             self.load_ligand(payload["ligand"])
         if payload.get("poses"):
             self.load_poses(payload["poses"])
-        box = payload.get("box")
-        if isinstance(box, dict) and "center" in box:
-            self._set_box(box["center"], box["size"], box.get("spacing", 0.375))
+        boxes = payload.get("boxes") or {}
+        if isinstance(boxes, dict) and boxes.get("boxes"):
+            # The collection is the record; the single `box` below is the older
+            # shape, used only for a project written before boxes had identities.
+            self.boxes.load_state(boxes)
+            self._refresh_spins_from_active_box()
+            self._sync_boxes_view()
+        else:
+            box = payload.get("box")
+            if isinstance(box, dict) and "center" in box:
+                self._set_box(box["center"], box["size"], box.get("spacing", 0.375))
         for name in payload.get("flexible_residues", []):
             self.flex_list.addItem(str(name))
         self._locked_bonds = [tuple(b) for b in payload.get("locked_bonds", [])]
@@ -4752,15 +4922,20 @@ class DockingWorkbench(QtWidgets.QMainWindow):
                     QtWidgets.QTreeWidgetItem(
                         node, [residue.label, str(residue.heavy_atoms)]
                     )
-        if self.scene.box is not None:
-            _, size = self.scene.box
-            QtWidgets.QTreeWidgetItem(
+        for box in self.boxes:
+            state = tr("boxes.visible") if box.visible else tr("boxes.hidden")
+            node = QtWidgets.QTreeWidgetItem(
                 self.tree,
                 [
-                    tr("tree.search_box", x=size[0], y=size[1], z=size[2]),
-                    "",
+                    tr("tree.search_box", x=box.width, y=box.height, z=box.depth),
+                    f"{box.name} ({state})",
                 ],
             )
+            if box.id == self.boxes.active_id:
+                font = node.font(0)
+                font.setBold(True)
+                node.setFont(0, font)
+                node.setFont(1, font)
         ligand = QtWidgets.QTreeWidgetItem(
             self.tree, [tr("tree.ligand"), str(len(self.scene.ligand))]
         )
@@ -5170,80 +5345,339 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         return getattr(self, "_protocol_page", None)
 
     def _current_box(self):
+        """The **active** box as a ``BoxSpec``, whether or not it is drawn.
+
+        The collection is the record, ``scene.box`` is only the rendering channel:
+        a hidden box is still a real box, still editable and still the box a run
+        would use, so this must never consult the visibility flag.
+        """
         import odock
 
-        if self.scene.box is None:
+        active = self.boxes.active()
+        if active is None:
             return None
-        center, size = self.scene.box
+        center, size = active.geometry()
         return odock.BoxSpec(
             center=tuple(float(v) for v in center),
             size=tuple(float(v) for v in size),
-            spacing=float(self.spacing.value()),
+            spacing=float(active.spacing),
         )
 
     def _set_box(self, center, size, spacing: float = 0.375) -> None:
-        previous = self.scene.box
-        previous_spacing = float(self.spacing.value())
-        self.scene.box = (
-            tuple(float(v) for v in center),
-            tuple(float(v) for v in size),
-        )
+        """Set the active box's centre and size (creating a box if there is none).
+
+        Every caller that used to move "the box" now moves the *active* box, which
+        is the same thing when there is one box and the documented meaning when
+        there are several.
+        """
+        before = self.boxes.to_state()
+        active = self.boxes.active()
+        if active is None:
+            active = self.boxes.add(
+                center=center,
+                size=size,
+                name=self._next_box_name(),
+                spacing=float(spacing),
+            )
+            self.boxes.set_active(active.id)
+        else:
+            self.boxes.move(active.id, center)
+            self.boxes.resize(active.id, size)
+            self.boxes.set_spacing(active.id, float(spacing))
         if self.spacing.value() != float(spacing):
             self.spacing.setValue(float(spacing))
-        keys = ("center_x", "center_y", "center_z", "size_x", "size_y", "size_z")
-        for key, value in zip(keys, list(center) + list(size)):
+        self._refresh_spins_from_active_box()
+        self._sync_boxes_view()
+        if not self._suppress_history and before != self.boxes.to_state():
+            self._record(
+                tr("undo.move_box"),
+                {"boxes": before},
+                {"boxes": self.boxes.to_state()},
+            )
+
+    def _refresh_spins_from_active_box(self) -> None:
+        """Load the editor fields from the active box, with signals blocked."""
+        active = self.boxes.active()
+        if active is None:
+            return
+        values = list(active.center) + list(active.size)
+        for key, value in zip(
+            ("center_x", "center_y", "center_z", "size_x", "size_y", "size_z"), values
+        ):
             spin = self.spins[key]
             spin.blockSignals(True)
             spin.setValue(float(value))
             spin.blockSignals(False)
-        # A real box means "show it": the checkbox and the menu action follow,
-        # with their signals blocked so this cannot push the box back out of the
-        # placeholder spin values.
-        self._box_visible = True
+
+    def _next_box_name(self) -> str:
+        """The translated default name for the next box ("box 2", …)."""
+        used = {box.name for box in self.boxes}
+        index = 1
+        while tr("boxes.name", n=index) in used:
+            index += 1
+        return tr("boxes.name", n=index)
+
+    def _sync_boxes_view(self) -> None:
+        """Push the collection into the renderer, the list, the menu and the tree.
+
+        This is the single funnel: nothing draws, lists or menus a box without
+        coming through here, which is what keeps "hidden still listed" true
+        everywhere at once instead of in three places that can disagree.
+        """
+        active = self.boxes.active()
+        # The renderer draws *one* box. It is the active one, and only while it is
+        # visible: hiding the active box leaves no solid volume, which is what lets
+        # the other boxes' wireframes be read (and is the case the user was afraid
+        # of — see _sync_boxes_view's callers and the guide).
+        self.scene.box = (
+            active.geometry() if (active is not None and active.visible) else None
+        )
+        # The single-box widgets follow the active box, so the checkbox, the menu
+        # action and `_box_visible` describe *it* rather than a global flag that
+        # could disagree with the collection.
+        visible = bool(active.visible) if active is not None else False
+        self._box_visible = visible
         for widget in (
             getattr(self, "chk_box", None),
             getattr(self, "box_action", None),
         ):
-            if widget is not None and not widget.isChecked():
+            if widget is not None and widget.isChecked() != visible:
                 widget.blockSignals(True)
-                widget.setChecked(True)
+                widget.setChecked(visible)
                 widget.blockSignals(False)
+        if active is not None and self.spacing.value() != float(active.spacing):
+            self.spacing.blockSignals(True)
+            self.spacing.setValue(float(active.spacing))
+            self.spacing.blockSignals(False)
+        self._apply_box_alpha(active)
+        self._sync_box_overlays(active)
+        self._sync_box_list()
+        self._sync_box_actions()
         self._refresh_box_label()
-        self.viewport.refresh()
         self._rebuild_tree()
-        # A box is a scene edit like any other, so it is undoable — including
-        # going back to "there was no box".
-        if not self._suppress_history and previous != self.scene.box:
-            self._record(
-                tr("menu.grid"),
+        self.viewport.refresh()
+
+    #: How much the active volume is thinned while other boxes are visible. Two
+    #: overlapping boxes must both be readable, and the edges are the part that
+    #: carries the second box: a strongly opaque volume behind them swallows it.
+    MULTI_BOX_ALPHA_SCALE = 0.45
+
+    def _apply_box_alpha(self, active) -> None:
+        """Thin the active volume when it is sharing the view with other boxes."""
+        base = getattr(self, "_box_alpha_base", None)
+        if base is None:
+            base = float(getattr(self.scene, "box_alpha", 0.35) or 0.35)
+            self._box_alpha_base = base
+        others = len(self.boxes.others_visible(active.id if active is not None else None))
+        # Thinned, but with a floor: the fill is what identifies the *active* box,
+        # so scaling it down must not scale it out. Measured in both themes on the
+        # bundled demo — below ~0.1 the active volume stops reading as a volume and
+        # the "which box am I editing" cue is lost.
+        self.scene.box_alpha = (
+            max(base * self.MULTI_BOX_ALPHA_SCALE, 0.12) if others else base
+        )
+
+    def _sync_box_overlays(self, active) -> None:
+        """Hand every *other* visible box to the overlay layer as a wireframe."""
+        others = self.boxes.others_visible(active.id if active is not None else None)
+        entries = [
+            {
+                "name": box.name,
+                "colour": box.colour(),
+                "center": list(box.center),
+                "size": list(box.size),
+                "wireframe": True,
+            }
+            for box in others
+        ]
+        if active is not None and active.visible:
+            # The active box's outline comes from the renderer; this entry only
+            # names it, so a view with three boxes says which one the dock edits.
+            entries.append(
                 {
-                    "box": None
-                    if previous is None
-                    else {
-                        "center": list(previous[0]),
-                        "size": list(previous[1]),
-                        "spacing": previous_spacing,
-                    }
-                },
-                {
-                    "box": {
-                        "center": list(self.scene.box[0]),
-                        "size": list(self.scene.box[1]),
-                        "spacing": float(self.spacing.value()),
-                    }
-                },
+                    "name": tr("boxes.active", name=active.name),
+                    "colour": active.colour(),
+                    "center": list(active.center),
+                    "size": list(active.size),
+                    "wireframe": False,
+                }
             )
+        self.viewport.set_extra_boxes(entries)
+
+    def _sync_box_list(self) -> None:
+        """The Grid tab's list: every box, its dimensions and whether it is shown."""
+        widget = getattr(self, "box_list", None)
+        if widget is None:
+            return
+        widget.blockSignals(True)
+        widget.clear()
+        for box in self.boxes:
+            shown = tr("boxes.visible") if box.visible else tr("boxes.hidden")
+            item = QtWidgets.QListWidgetItem(
+                f"{box.name}  {box.width:g}×{box.height:g}×{box.depth:g}  ({shown})"
+            )
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, box.id)
+            # A hidden row is where a user concludes the box is gone, so the route
+            # back is stated *in the row* rather than in a dialog: the answer has
+            # to be visible without an action. The three visual states are
+            # distinct: bold = active, "(hidden)" = rendering off, and the
+            # tooltip spells out how to bring a hidden one back.
+            if not box.visible:
+                item.setToolTip(
+                    f"{tr('boxes.hidden')} — {tr('menu.boxes')} › {box.name}"
+                )
+            if box.id == self.boxes.active_id:
+                font = item.font()
+                font.setBold(True)
+                item.setFont(font)
+                item.setSelected(True)
+            widget.addItem(item)
+            if box.id == self.boxes.active_id:
+                widget.setCurrentItem(item)
+        widget.blockSignals(False)
+        label = getattr(self, "box_active_label", None)
+        if label is not None:
+            active = self.boxes.active()
+            if active is None:
+                label.setText(tr("boxes.none"))
+            else:
+                state = tr("boxes.visible") if active.visible else tr("boxes.hidden")
+                label.setText(
+                    tr("boxes.active", name=f"{active.name} ({state})")
+                )
+
+    def _sync_box_actions(self) -> None:
+        """One checkable Views-menu entry per box — present whether shown or hidden.
+
+        The menu is rebuilt from the collection, so a hidden box keeps its entry
+        (unchecked) and a deleted box loses it. That asymmetry *is* the feature: a
+        hidden box can always be turned back on, and only deletion removes the way
+        back.
+        """
+        menu = getattr(self, "boxes_menu", None)
+        if menu is None:
+            return
+        menu.clear()
+        self._box_actions: Dict[int, QtGui.QAction] = {}
+        for box in self.boxes:
+            action = QtGui.QAction(box.name, menu)
+            action.setCheckable(True)
+            action.setChecked(bool(box.visible))
+            action.setStatusTip(
+                tr("boxes.active", name=box.name) if box.id == self.boxes.active_id else box.name
+            )
+            action.toggled.connect(
+                lambda checked, box_id=box.id: self._set_box_visibility(box_id, checked)
+            )
+            action.triggered.connect(
+                lambda _checked=False, box_id=box.id: self._activate_box(box_id, quiet=True)
+            )
+            menu.addAction(action)
+            self._box_actions[box.id] = action
+        if self.boxes:
+            menu.addSeparator()
+        self._act(menu, tr("action.add_box"), self._add_box)
+        delete = self._act(menu, tr("action.delete_box"), self._delete_active_box)
+        delete.setEnabled(self.boxes.active() is not None)
+        self._box_delete_action = delete
+
+    def _activate_box(self, box_id: int, *, quiet: bool = False) -> bool:
+        """Make ``box_id`` the box the editor fields edit."""
+        if not self.boxes.set_active(box_id):
+            return False
+        box = self.boxes.active()
+        if box is not None:
+            self.spacing.blockSignals(True)
+            self.spacing.setValue(float(box.spacing))
+            self.spacing.blockSignals(False)
+            self._refresh_spins_from_active_box()
+            if not quiet:
+                self._log(tr("log.box_active", name=box.name))
+        self._sync_boxes_view()
+        return True
+
+    def _on_box_list_selection(self, current, _previous=None) -> None:
+        """Selecting a row in the Grid tab's box list makes that box the active one."""
+        if current is None:
+            return
+        box_id = current.data(QtCore.Qt.ItemDataRole.UserRole)
+        if isinstance(box_id, int) and box_id != self.boxes.active_id:
+            self._activate_box(box_id, quiet=True)
+
+    def _add_box(self) -> None:
+        """Add a box — a new identity, not a second view of the same one."""
+        before = self.boxes.to_state()
+        active = self.boxes.active()
+        center = tuple(active.center) if active is not None else (0.0, 0.0, 0.0)
+        size = tuple(active.size) if active is not None else (dashboard.DEFAULT_BOX_SIZE,) * 3
+        box = self.boxes.add(
+            center=center,
+            size=size,
+            name=self._next_box_name(),
+            spacing=float(self.spacing.value()),
+        )
+        self.boxes.set_active(box.id)
+        self._refresh_spins_from_active_box()
+        self._sync_boxes_view()
+        self._log(f"{tr('action.add_box')}: {box.name}")
+        self._record(
+            tr("undo.add_box"),
+            {"boxes": before},
+            {"boxes": self.boxes.to_state()},
+        )
+
+    def _delete_active_box(self) -> None:
+        """Delete the active box — the only operation that removes one.
+
+        No confirmation on purpose: deletion is one undoable step, and a modal on
+        every delete in a workbench with a working Ctrl+Z teaches users to dismiss
+        dialogs instead of trusting undo. The guide says so, next to the actions.
+        """
+        active = self.boxes.active()
+        if active is None:
+            return
+        before = self.boxes.to_state()
+        name = active.name
+        self.boxes.remove(active.id)
+        self._refresh_spins_from_active_box()
+        self._sync_boxes_view()
+        self._log(f"{tr('action.delete_box')}: {name}")
+        self._record(
+            tr("undo.delete_box"),
+            {"boxes": before},
+            {"boxes": self.boxes.to_state()},
+        )
+
+    def _set_box_visibility(self, box_id: int, visible: bool) -> None:
+        """Show or hide a box. Rendering only: it stays in the collection."""
+        box = self.boxes.get(box_id)
+        if box is None:
+            return
+        before = self.boxes.to_state()
+        self.boxes.show(box_id, visible)
+        self._sync_boxes_view()
+        self._log(
+            f"{tr('action.box_show' if visible else 'action.box_hide')}: {box.name}"
+        )
+        self._record(
+            tr("undo.show_box" if visible else "undo.hide_box"),
+            {"boxes": before},
+            {"boxes": self.boxes.to_state()},
+        )
 
     def _refresh_box_label(self) -> None:
-        if self.scene.box is None:
+        """The Grid tab's read-out: which box, its dimensions, its cost."""
+        active = self.boxes.active()
+        if active is None:
             self.lbl_box_info.setText(tr("label.no_box"))
             return
-        _, size = self.scene.box
-        spacing = float(self.spacing.value())
+        size = active.size
+        spacing = float(active.spacing) or float(self.spacing.value())
         volume = float(size[0]) * float(size[1]) * float(size[2])
         npts = 1
         for axis in size:
             npts *= max(1, int(float(axis) / max(spacing, 1e-3)) + 1)
+        state = tr("boxes.visible") if active.visible else tr("boxes.hidden")
         self.lbl_box_info.setText(
             tr(
                 "label.box_info",
@@ -5251,30 +5685,60 @@ class DockingWorkbench(QtWidgets.QMainWindow):
                 npts=npts,
                 mb=npts * 4 / 1048576,
             )
+            + f"\n{tr('boxes.active', name=f'{active.name} ({state})')}"
         )
 
     def _push_box(self) -> None:
+        """Apply the editor fields to the **active** box — the one they describe.
+
+        Recorded with a merge key, so a spin drag is one undo step rather than
+        thirty, and the restored state is the *collection* rather than the widget
+        values, which is what keeps the panel fingerprint honest.
+        """
         center = tuple(
             self.spins[k].value() for k in ("center_x", "center_y", "center_z")
         )
         size = tuple(
             max(2.0, self.spins[k].value()) for k in ("size_x", "size_y", "size_z")
         )
-        self.scene.box = (center, size)
-        self._refresh_box_label()
-        if self.chk_box.isChecked():
-            self.viewport.refresh()
+        active = self.boxes.active()
+        if active is None:
+            self._set_box(center, size, self.spacing.value())
+            return
+        moved = tuple(active.center) != tuple(center)
+        resized = tuple(active.size) != tuple(size)
+        if not moved and not resized:
+            return
+        before = self.boxes.to_state()
+        self.boxes.move(active.id, center)
+        self.boxes.resize(active.id, size)
+        self._sync_boxes_view()
+        self._record(
+            tr("undo.resize_box" if resized else "undo.move_box"),
+            {"boxes": before},
+            {"boxes": self.boxes.to_state()},
+            merge_key="box-edit",
+        )
 
     def _on_box_spin(self) -> None:
         self._push_box()
 
     def _toggle_box(self, checked: bool) -> None:
-        self._box_visible = bool(checked)
-        if not checked:
-            self.scene.box = None
-        else:
-            self._push_box()
-        self.viewport.refresh()
+        """Show/hide the **active** box. Rendering only: it is never removed.
+
+        With no box at all, ticking this is the user *asking for a box*, so it
+        creates one from the editor fields — the behaviour it always had, made
+        explicit here instead of falling out of a shared visibility flag. Unticking
+        it hides the active box and removes nothing.
+        """
+        active = self.boxes.active()
+        if active is None:
+            if checked:
+                self._push_box()
+            return
+        if bool(checked) == bool(active.visible):
+            return
+        self._set_box_visibility(active.id, bool(checked))
 
     def _choose_box_opacity(self) -> None:
         """Set the translucent fill's opacity (the renderer always draws edges).
@@ -5308,8 +5772,9 @@ class DockingWorkbench(QtWidgets.QMainWindow):
         self._log(tr("log.box_centred"))
 
     def _current_size(self):
-        if self.scene.box is not None:
-            return tuple(max(2.0, v) for v in self.scene.box[1])
+        active = self.boxes.active()
+        if active is not None:
+            return tuple(max(2.0, v) for v in active.size)
         return (20.0, 20.0, 20.0)
 
     def _fit_box_to_ligand(self) -> None:
@@ -6665,6 +7130,23 @@ class DockingWorkbench(QtWidgets.QMainWindow):
                 self.set_pose(int(fields["pose"]), record=False)
             if "selection" in fields:
                 self.sequence.select_keys([tuple(key) for key in fields["selection"]])
+            if "boxes" in fields:
+                # Add/delete/move/resize/show/hide all restore through this one
+                # branch: the collection *is* the undoable thing, so a step can
+                # never restore the geometry without restoring the membership.
+                self.boxes.load_state(fields["boxes"] or {})
+                self._refresh_spins_from_active_box()
+                self._sync_boxes_view()
+                active = self.boxes.active()
+                visible = bool(active.visible) if active is not None else False
+                for widget in (
+                    getattr(self, "chk_box", None),
+                    getattr(self, "box_action", None),
+                ):
+                    if widget is not None and widget.isChecked() != visible:
+                        widget.blockSignals(True)
+                        widget.setChecked(visible)
+                        widget.blockSignals(False)
             if "style_receptor" in fields:
                 self._set_style("receptor", str(fields["style_receptor"]))
             if "style_ligand" in fields:
@@ -8979,6 +9461,11 @@ class DockingWorkbench(QtWidgets.QMainWindow):
                 if box is not None
                 else None
             ),
+            # The whole collection travels with the document, so a restart reopens
+            # the project the user left: every box, its name, which one was active
+            # and which of them were hidden. `box` above stays as the active box
+            # for anything that reads the older single-box shape.
+            "boxes": self.boxes.to_state(),
             "engine": {
                 "scoring": self.engine.currentText(),
                 "search": self.search.currentIndex(),
@@ -9061,11 +9548,22 @@ class DockingWorkbench(QtWidgets.QMainWindow):
             if path and Path(str(path)).is_file():
                 loader(path)
 
-        box = data.get("box")
-        if isinstance(box, dict) and box.get("center"):
-            self._set_box(
-                box["center"], box.get("size", (20.0, 20.0, 20.0)), box.get("spacing", 0.375)
-            )
+        boxes = data.get("boxes") or {}
+        if isinstance(boxes, dict) and boxes.get("boxes"):
+            # The collection is the record: ids, names, per-box visibility and
+            # which box was active all come back, so a restart reopens the
+            # project the user left rather than a single-box approximation.
+            self.boxes.load_state(boxes)
+            self._refresh_spins_from_active_box()
+            self._sync_boxes_view()
+        else:
+            box = data.get("box")
+            if isinstance(box, dict) and box.get("center"):
+                self._set_box(
+                    box["center"],
+                    box.get("size", (20.0, 20.0, 20.0)),
+                    box.get("spacing", 0.375),
+                )
         engine = data.get("engine") or {}
         if engine.get("scoring"):
             self.engine.setCurrentText(str(engine["scoring"]))

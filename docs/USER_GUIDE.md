@@ -730,6 +730,53 @@ the sequence ruler, which paints itself.
 
 Every dock can also be toggled individually from `View ▸ Panels`.
 
+#### Search boxes: a collection, not a single box
+
+The workbench holds as many search boxes as you like, and each one is a separate
+object with its own **name**, centre, width, height and depth. `View ▸ Search
+boxes` lists **every** box, and the Grid tab lists them too:
+
+| state | what you see | how you leave it |
+|---|---|---|
+| shown | checked in the menu, `(shown)` in the Grid list | untick it (hide) or delete it |
+| hidden | **still listed**, unticked, `(hidden)` plus a tooltip naming the route back | tick it again — nothing was removed |
+| active **and** hidden | bold row, `active: box 2 (hidden)`, and no solid volume in the view | tick it, or edit it anyway |
+
+Two rules make that safe, and they are the reason this is a collection rather than
+a flag:
+
+* **Hiding and deleting are different controls everywhere.** Hiding is the
+  checkable menu entry / the `Show box` checkbox; deleting is
+  `View ▸ Search boxes ▸ Delete search box`, the `Delete` key while the box list
+  has focus, and the log says which one you did (显示/隐藏 versus 删除 in Chinese —
+  the two word families are audited by `tools/audit_box_keys.py`, so a translation
+  cannot blur them).
+* **A hidden box always says how to get it back**, in the row that is most likely
+  to be mistaken for a missing box. Deleting is the only operation that removes
+  an entry from the menu, and it is one `Ctrl+Z`.
+
+There is **no delete confirmation**. In a workbench with a working undo, a modal
+on every delete trains people to dismiss dialogs instead of trusting them — which
+makes the *next* dialog useless. The delete is one undoable step; `Ctrl+Z` is the
+confirmation.
+
+**Drawing, when several boxes are visible.** The renderer draws **one** box — the
+**active** one, as a translucent volume — and every other visible box is drawn as
+an **edge-only wireframe in its own colour**, with its name beside it and the
+active one labelled `active: box 2`. The wireframes are painted on top of the 3-D
+pass, so no volume can swallow them; that is why opening one box cannot hide the
+others. The active volume is also **thinned** while it shares the view (0.45× its
+configured opacity, floored at 0.12 so the fill never fades out completely), which
+keeps the other outlines readable without losing the "which box am I editing"
+cue. Both themes were checked with two overlapping boxes
+(`out/boxes/boxes-overlap-{dark,light}.png`).
+
+Adding a box is `View ▸ Search boxes ▸ Add search box`; it starts where the
+active box is and copies its dimensions, then you edit it from the Grid tab. The
+**active** box is the one every Grid field, every fit/centre button and the run
+use — `boxes.active` in the read-out always names it, because "which box am I
+editing" is the first question a multi-box tool has to answer.
+
 #### Loading structures by drag and drop
 
 Drop a `.pdbqt` or `.pdb` file anywhere on the window. The file is routed by

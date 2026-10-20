@@ -1051,6 +1051,32 @@ EN: Dict[str, str] = {
     "undo.add_annotation": "add annotation",
     "undo.edit_annotation": "edit annotation",
     "undo.remove_annotation": "remove annotation",
+    # Search boxes as a *collection*: several boxes can exist, each with its own
+    # geometry and its own rendering state. The distinction these strings have to
+    # keep is deliberately two different words in both languages —
+    # **shown/hidden is rendering** (显示/隐藏) and **delete is existence**
+    # (删除) — because the whole feature exists to stop "hidden" and "gone" being
+    # the same control. There is no delete-confirmation string on purpose: delete
+    # is undoable, and a modal on every delete teaches people to dismiss dialogs
+    # instead of trusting Ctrl+Z.
+    "menu.boxes": "Search boxes",
+    "tab.grid.boxes": "Search boxes",
+    "boxes.name": "box {n}",
+    "boxes.active": "active: {name}",
+    "boxes.none": "no search box yet",
+    "boxes.visible": "shown",
+    "boxes.hidden": "hidden",
+    "action.add_box": "Add search box",
+    "action.delete_box": "Delete search box",
+    "action.box_show": "Show",
+    "action.box_hide": "Hide",
+    "undo.add_box": "add search box",
+    "undo.delete_box": "delete search box",
+    "undo.move_box": "move search box",
+    "undo.resize_box": "resize search box",
+    "undo.show_box": "show search box",
+    "undo.hide_box": "hide search box",
+    "log.box_active": "editing {name}",
     "log.measure_csv": "wrote {n} measurements to the CSV",
     "log.measure_degenerate": "those atoms are degenerate: the measurement is undefined",
     "log.measure_kind": "measuring {kind}",
@@ -2016,6 +2042,28 @@ ZH: Dict[str, str] = {
     "undo.add_annotation": "添加标注",
     "undo.edit_annotation": "编辑标注",
     "undo.remove_annotation": "删除标注",
+    # 搜索框作为一个*集合*：可以存在多个，各有自己的几何与显示状态。这些字符串
+    # 必须守住两个不同的词 —— **显示/隐藏 是渲染**，**删除 是存在** —— 因为该功能
+    # 存在的意义就是不让「隐藏」和「没了」变成同一个控件。故意没有删除确认文案：
+    # 删除可撤销，而每次删除都弹模态框只会教人忽略对话框、不再信任 Ctrl+Z。
+    "menu.boxes": "搜索框",
+    "tab.grid.boxes": "搜索框",
+    "boxes.name": "搜索框 {n}",
+    "boxes.active": "当前：{name}",
+    "boxes.none": "还没有搜索框",
+    "boxes.visible": "显示",
+    "boxes.hidden": "隐藏",
+    "action.add_box": "添加搜索框",
+    "action.delete_box": "删除搜索框",
+    "action.box_show": "显示",
+    "action.box_hide": "隐藏",
+    "undo.add_box": "添加搜索框",
+    "undo.delete_box": "删除搜索框",
+    "undo.move_box": "移动搜索框",
+    "undo.resize_box": "调整搜索框",
+    "undo.show_box": "显示搜索框",
+    "undo.hide_box": "隐藏搜索框",
+    "log.box_active": "正在编辑 {name}",
     "log.measure_csv": "已将 {n} 条测量写入 CSV",
     "log.measure_degenerate": "所选原子退化，该测量无定义",
     "log.measure_kind": "正在测量{kind}",

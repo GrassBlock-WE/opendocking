@@ -4,6 +4,65 @@ All notable changes to OpenDocking are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.5.0 — 2026-10-20
+
+A **minor** release: the search box stopped being one thing and became a collection.
+
+### Search boxes are a collection
+
+The workbench had **one** box — `scene.box` as a `(center, size)` tuple behind a **single
+shared visibility flag**. That structure made two different questions share one control, and a
+user asked for exactly the distinction it could not express: *every box deletable, freely
+resizable, and toggleable from the Views menu — without the case where hiding one means you can
+never open it again, or where opening it covers the others.*
+
+* **Identity, not position.** Each box has a stable id, a name (`box 1`, `box 2`), its own
+  centre, **independent width/height/depth**, its own visibility and spacing, and its own
+  colour. `remove()` is the **only** operation that shrinks the collection, which is what makes
+  "hidden" and "gone" structurally different rather than visually different. Deleting the
+  middle of three leaves `box 1` and `box 3` — not a renumbered pair.
+* **`View ▸ Search boxes` lists every box, always.** One checkable entry per box, present
+  whether the box is shown or hidden, carrying its name. A hidden box keeps its id, its name,
+  its entry (unchecked) and its place in the Grid list, with the route back **in the row's
+  tooltip** — because a hidden row is exactly where someone concludes the box is gone.
+* **Delete is its own action and its own control** — the menu item and the `Delete` key, never
+  the visibility checkbox. **No confirmation dialog, deliberately**: a modal on every delete in a
+  workbench with a working `Ctrl+Z` trains people to dismiss dialogs, which is what makes the
+  *next* dialog useless. `Ctrl+Z` is the confirmation, and the reasoning is written into the
+  guide so a later contributor cannot "fix" it by adding one.
+* **One volume, the rest wireframes.** The renderer draws the **active** box as a translucent
+  volume — which also answers "which box am I editing" — and every other visible box as an
+  **edge-only wireframe in its own colour, painted after the 3-D pass**, so no volume can cover
+  another box. The active volume thins to 0.45x (floored at 0.12, measured: below that it
+  stopped reading as a volume) when it shares the view, and a view with three boxes names all
+  three (`active: box 2`, `box 1`, `box 3`).
+* **Active-but-hidden is defined.** No solid volume, the other boxes' wireframes still draw, and
+  the Grid dock **keeps editing that box**, with the read-out saying `active: box N (hidden)`.
+  That is the case where "hidden" would most easily be mistaken for "deleted".
+* **The record and the rendering channel are separate.** `scene.box` is now only *how the active
+  box is drawn*; the collection is the record, so `_current_box()` returns the active box's
+  geometry **whether or not it is shown** — a hidden box is still dockable.
+* **Everything round-trips and is undoable**: add, delete, move, resize, show and hide are each
+  one step on the collection, and the snapshot, session and project payloads carry all boxes
+  with their names, visibility and the active id.
+
+### The translation cannot conflate hide with delete
+
+`tools/audit_box_keys.py` classifies the Chinese strings by **family**: the six rendering
+strings must use 显示/隐藏 and contain **no existence verb**; the six existence strings must use
+添加/删除/移动/调整 and contain **no rendering verb**. 12/12 clean, and it re-checks parity,
+lengths, ampersands, key counts and construction in both languages — a standing gate rather
+than a one-off check. The 18 new keys bring both languages to **836 keys each**.
+
+### Verified
+
+`tests/test_boxes.py` → **15 passed** (the seven scenarios, the active-hidden case, and the
+interaction cases); GUI modules **255 passed, 1 skipped**; project/CLI/screen **157 passed**;
+`tests/simulate_workbench.py` **48/48**, no step changed because boxes live in a submenu and the
+menu-bar contract is unaffected. Full suite in a clean environment → **2224 passed, 1 skipped,
+0 failed**. Both themes were inspected as images with two overlapping boxes and with the active
+box hidden.
+
 ## 0.4.5 — 2026-10-18
 
 ### Fixed
